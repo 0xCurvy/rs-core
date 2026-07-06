@@ -1,0 +1,20 @@
+[package]
+name = "curvy-wasm"
+description = "wasm-bindgen bindings for the Curvy crypto core (decimal-string boundary)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Rayon-threaded scan for cross-origin-isolated pages. Needs the nightly
+# atomics build (see ../../scripts/build-wasm-threads.sh); plain builds ignore it.
+wasm-threads = ["curvy-core/parallel", "dep:wasm-bindgen-rayon"]
+
+[dependencies]
+curvy-core = { path = "../core" }
+wasm-bindgen.workspace = true
+wasm-bindgen-rayon = { workspace = true, optional = true }

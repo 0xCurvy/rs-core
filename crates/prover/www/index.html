@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>prover-poc browser bench</title>
+<h3>ark+rayon (wasm threads) vs snarkjs — aggregation _2_3_30</h3>
+<pre id="out"></pre>
+<div id="done"></div>
+<script src="./snarkjs.min.js"></script>
+<script type="module">
+  import init, { initThreadPool, WasmProver } from "./pkg/prover_poc.js";
+
+  const threads =
+    Number(new URLSearchParams(location.search).get("threads")) || navigator.hardwareConcurrency;
+  const out = document.getElementById("out");
+  const log = (m) => {
+    out.textContent += m + "\n";
+    console.log("[bench] " + m);
+  };
+
+  const median = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)];
+
+  async function run() {
+    log(`crossOriginIsolated: ${crossOriginIsolated} | threads: ${threads} | hw: ${navigator.hardwareConcurrency}`);
+    const [zkey, wtns] = await Promise.all(
+      ["./data/agg.zkey", "./data/agg.wtns"].map(async (u) =>
+        new Uint8Array(await (await fetch(u)).arrayBuffer())
+      )
+    );
+    log(`fetched zkey ${zkey.length}B, wtns ${wtns.length}B`);
+
+    await init();
+    await initThreadPool(threads);
+
+    let t0 = performance.now();
+    const prover = new WasmProver(zkey);
+    log(`ark zkey parse: ${(performance.now() - t0).toFixed(0)}ms (${prover.numConstraints()} constraints)`);
+
+    prover.proveOnly(wtns); // warm
+    const ark = [];
+    for (let i = 0; i < 5; i++) {
+      t0 = performance.now();
+      prover.proveOnly(wtns);
+      ark.push(performance.now() - t0);
+    }
+    log(`ark+rayon(${threads}) prove: ${ark.map((t) => t.toFixed(0) + "ms").join(" ")} | median ${median(ark).toFixed(0)}ms`);
+
+    // snarkjs baseline in the same browser (its own web workers, no SAB needed)
+    await window.snarkjs.groth16.prove(zkey, wtns); // warm
+    const sj = [];
+    for (let i = 0; i < 3; i++) {
+      t0 = performance.now();
+      await window.snarkjs.groth16.prove(zkey, wtns);
+      sj.push(performance.now() - t0);
+    }
+    log(`snarkjs prove: ${sj.map((t) => t.toFixed(0) + "ms").join(" ")} | median ${median(sj).toFixed(0)}ms`);
+
+    document.getElementById("done").textContent = "DONE";
+  }
+
+  run().catch((e) => {
+    log("ERROR: " + (e.stack || e));
+    document.getElementById("done").textContent = "ERROR";
+  });
+</script>

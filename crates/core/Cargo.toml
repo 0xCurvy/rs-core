@@ -1,0 +1,32 @@
+[package]
+name = "curvy-core"
+description = "Curvy privacy-protocol crypto core (Poseidon, BabyJubjub, note commitments, stealth addressing)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[features]
+# Fan the scan loop out over announcements with rayon. Off by default; the
+# threaded wasm build enables it via the curvy-wasm `wasm-threads` feature.
+parallel = ["dep:rayon"]
+
+[dependencies]
+aes.workspace = true
+rayon = { workspace = true, optional = true }
+ark-bn254.workspace = true
+ark-ec.workspace = true
+ark-ff.workspace = true
+ark-secp256k1.workspace = true
+getrandom.workspace = true
+ctr.workspace = true
+hkdf.workspace = true
+num-bigint.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+light-poseidon.workspace = true
+serde.workspace = true
+serde_json.workspace = true

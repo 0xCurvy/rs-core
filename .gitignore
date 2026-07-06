@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target
+**/target
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+
+# wasm-bindgen output (regenerate via scripts/build-wasm*.sh)
+crates/wasm/pkg-node
+crates/wasm/pkg-web
+crates/wasm/pkg-bundler
+crates/wasm/pkg-web-threads
+crates/prover/pkg-node
+crates/prover/pkg-web
+crates/prover/pkg-web-threads
+
+# Harness node deps + large circuit artifacts (supply per www/data/README.md)
+node_modules
+crates/prover/www/data/*.zkey
+crates/prover/www/data/*.wtns
+
+# Deliberately tracked (do NOT ignore):
+#   Cargo.lock                 pinned dependency graph + checksums
+#   crates/*/testdata/*.json   committed conformance vectors
+#   crates/prover/www/data/*.json   small circuit input/verification-key fixtures
+
+# macOS / IDE
+.DS_Store
+.idea
+
+# staging output of scripts/build-hybrid-wasm.sh
+dist-hybrid

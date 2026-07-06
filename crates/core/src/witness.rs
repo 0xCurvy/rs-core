@@ -1,0 +1,313 @@
+//! Circuit witness builders (aggregation, withdrawal, pending-notes-commitment).
+//! They produce the flat snarkjs input objects, in circom field-declaration order,
+//! by composing the commitment-layer primitives and the [`crate::imt`] tree. Pure
+//! assembly: no randomness, no I/O.
+//!
+//! Inclusion proofs are supplied by the caller: each is `(leaf_index, siblings)`.
+
+use ark_ff::AdditiveGroup;
+use num_bigint::BigUint;
+use serde::Serialize;
+
+use crate::cipher::encrypt_amount_token;
+use crate::eddsa::sign_hex;
+use crate::field::{fr_to_biguint, fr_to_dec, Fr};
+use crate::hash_utils::sha256_bigint;
+use crate::imt::Imt;
+use crate::note as commitments;
+use crate::poseidon::poseidon;
+
+/// A note as the witness builders see it. `shared_secret`/`ephemeral_key` are
+/// BabyJubjub field coordinates (`< r`); they convert to raw `BigUint` for the
+/// cipher (where `< r` values pack identically).
+#[derive(Clone)]
+pub struct Note {
+    pub amount: Fr,
+    pub token: Fr,
+    pub owner_pub: (Fr, Fr),
+    pub shared_secret: Fr,
+    pub ephemeral_key: (Fr, Fr),
+    pub view_tag: Fr,
+}
+
+impl Note {
+    pub fn owner_hash(&self) -> Fr {
+        commitments::owner_hash(self.owner_pub, self.shared_secret)
+    }
+    pub fn id(&self) -> Fr {
+        commitments::note_id(self.owner_hash(), self.amount, self.token)
+    }
+    pub fn nullifier(&self) -> Fr {
+        commitments::nullifier(self.shared_secret, self.owner_pub)
+    }
+    /// Flattened note layout: `[owner.x, owner.y, sharedSecret, amount, token]`.
+    fn flat(&self) -> Vec<String> {
+        vec![
+            fr_to_dec(&self.owner_pub.0),
+            fr_to_dec(&self.owner_pub.1),
+            fr_to_dec(&self.shared_secret),
+            fr_to_dec(&self.amount),
+            fr_to_dec(&self.token),
+        ]
+    }
+    /// `(encryptedAmount, encryptedToken)` for this note's amount/token.
+    fn encrypted(&self) -> (Fr, Fr) {
+        let out = encrypt_amount_token(
+            self.amount,
+            self.token,
+            &fr_to_biguint(&self.shared_secret),
+            (&fr_to_biguint(&self.ephemeral_key.0), &fr_to_biguint(&self.ephemeral_key.1)),
+        );
+        (out.encrypted_amount, out.encrypted_token)
+    }
+    /// Flattened encrypted-data layout: `[encAmount, encToken, eph.x, eph.y, viewTag]`.
+    fn flat_encrypted(&self) -> Vec<String> {
+        let (ea, et) = self.encrypted();
+        vec![
+            fr_to_dec(&ea),
+            fr_to_dec(&et),
+            fr_to_dec(&self.ephemeral_key.0),
+            fr_to_dec(&self.ephemeral_key.1),
+            fr_to_dec(&self.view_tag),
+        ]
+    }
+}
+
+/// A supplied inclusion proof: `(leaf_index, siblings)`.
+pub struct Proof {
+    pub leaf_index: u64,
+    pub siblings: Vec<Fr>,
+}
+
+impl Proof {
+    /// Flattened inclusion-proof layout: `[leafIndex, ...siblings]`.
+    fn flat(&self) -> Vec<String> {
+        let mut out = vec![self.leaf_index.to_string()];
+        out.extend(self.siblings.iter().map(fr_to_dec));
+        out
+    }
+}
+
+fn flat_signature(r8: (Fr, Fr), s: &BigUint) -> [String; 3] {
+    [s.to_string(), fr_to_dec(&r8.0), fr_to_dec(&r8.1)]
+}
+
+// ── Withdrawal ──────────────────────────────────────────────────────────────
+
+#[derive(Serialize, PartialEq, Eq, Debug)]
+pub struct WithdrawalWitness {
+    #[serde(rename = "inputNotes")]
+    pub input_notes: Vec<Vec<String>>,
+    #[serde(rename = "publicKey")]
+    pub public_key: [String; 2],
+    #[serde(rename = "inputNoteInclusionProofs")]
+    pub input_note_inclusion_proofs: Vec<Vec<String>>,
+    pub signature: [String; 3],
+    #[serde(rename = "notesRoot")]
+    pub notes_root: String,
+    #[serde(rename = "destinationAddress")]
+    pub destination_address: String,
+    #[serde(rename = "tokenId")]
+    pub token_id: String,
+}
+
+/// Build the withdrawal circuit witness.
+/// Signing message: `Poseidon([...nullifiers, destinationAddress, withdrawnAmount, tokenId])`.
+pub fn build_withdrawal(
+    notes: &[Note],
+    owner_key_hex: &str,
+    public_key: (Fr, Fr),
+    proofs: &[Proof],
+    notes_root: Fr,
+    destination_address: Fr,
+    token_id: Fr,
+) -> WithdrawalWitness {
+    let total: Fr = notes.iter().fold(Fr::ZERO, |a, n| a + n.amount);
+    let mut msg: Vec<Fr> = notes.iter().map(|n| n.nullifier()).collect();
+    msg.push(destination_address);
+    msg.push(total);
+    msg.push(token_id);
+    let sig = sign_hex(&fr_to_biguint(&poseidon(&msg)), owner_key_hex);
+
+    WithdrawalWitness {
+        input_notes: notes.iter().map(|n| n.flat()).collect(),
+        public_key: [fr_to_dec(&public_key.0), fr_to_dec(&public_key.1)],
+        input_note_inclusion_proofs: proofs.iter().map(|p| p.flat()).collect(),
+        signature: flat_signature(sig.r8, &sig.s),
+        notes_root: fr_to_dec(&notes_root),
+        destination_address: fr_to_dec(&destination_address),
+        token_id: fr_to_dec(&token_id),
+    }
+}
+
+// ── Aggregation ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize, PartialEq, Eq, Debug)]
+pub struct AggregationWitness {
+    #[serde(rename = "inputNotes")]
+    pub input_notes: Vec<Vec<String>>,
+    #[serde(rename = "inputNoteInclusionProofs")]
+    pub input_note_inclusion_proofs: Vec<Vec<String>>,
+    #[serde(rename = "outputNotes")]
+    pub output_notes: Vec<Vec<String>>,
+    #[serde(rename = "publicKey")]
+    pub public_key: [String; 2],
+    pub signature: [String; 3],
+    #[serde(rename = "feeNote")]
+    pub fee_note: Vec<String>,
+    #[serde(rename = "encryptedNoteData")]
+    pub encrypted_note_data: Vec<Vec<String>>,
+    #[serde(rename = "notesRoot")]
+    pub notes_root: String,
+    #[serde(rename = "protocolFeePerThousand")]
+    pub protocol_fee_per_thousand: String,
+    #[serde(rename = "gasFee")]
+    pub gas_fee: String,
+    /// Per-token gas fee: the gas-fee-tree Merkle path (leaf index = the inputs'
+    /// token) proving `gasFee` is the committed cost for this token. See below.
+    #[serde(rename = "gasFeeSiblings")]
+    pub gas_fee_siblings: Vec<String>,
+    /// Public root the `gasFeeSiblings` path is verified under.
+    #[serde(rename = "commitPendingNotesGasFeeRoot")]
+    pub commit_pending_notes_gas_fee_root: String,
+    #[serde(rename = "feeNotePublicKey")]
+    pub fee_note_public_key: [String; 2],
+}
+
+/// Depth of the per-token gas-fee tree (indexed by token id).
+const GAS_FEE_TREE_DEPTH: usize = 6;
+
+/// Synthesize the depth-`GAS_FEE_TREE_DEPTH` gas-fee tree holding `gas_fee` at
+/// `token_index` (zeros elsewhere) and return the `(siblings, root)` inclusion
+/// proof at that index. Real flows pass the actual committed gas-fee tree; the
+/// synthetic tree here proves against its own root (self-contained).
+fn synthetic_gas_fee_proof(token: &Fr, gas_fee: Fr) -> (Vec<String>, String) {
+    let token_index: usize = fr_to_biguint(token)
+        .try_into()
+        .ok()
+        .filter(|&i: &usize| i < (1usize << GAS_FEE_TREE_DEPTH))
+        .unwrap_or_else(|| {
+            panic!("aggregation: token out of range for the gas-fee tree (0..2^{GAS_FEE_TREE_DEPTH}-1)")
+        });
+    let mut leaves = vec![Fr::ZERO; token_index + 1];
+    leaves[token_index] = gas_fee;
+    let proof = Imt::from_leaves(GAS_FEE_TREE_DEPTH, &leaves).create_proof(token_index);
+    (proof.siblings.iter().map(fr_to_dec).collect(), fr_to_dec(&proof.root))
+}
+
+/// Build the aggregation circuit witness.
+/// `input_notes`/`output_notes` are already resolved and padded (no randomness here).
+/// Signing message: `Poseidon([ Poseidon(outputNoteIds), Poseidon(encNoteData flat amount/token) ])`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_aggregation(
+    input_notes: &[Note],
+    input_proofs: &[Proof],
+    output_notes: &[Note],
+    fee_note: &Note,
+    owner_key_hex: &str,
+    public_key: (Fr, Fr),
+    notes_root: Fr,
+    protocol_fee_per_thousand: Fr,
+    gas_fee: Fr,
+    fee_note_public_key: (Fr, Fr),
+) -> AggregationWitness {
+    let enc_notes: Vec<Note> = output_notes.iter().chain(std::iter::once(fee_note)).cloned().collect();
+    let encrypted: Vec<(Fr, Fr)> = enc_notes.iter().map(|n| n.encrypted()).collect();
+
+    let output_note_hash = poseidon(&output_notes.iter().map(|n| n.id()).collect::<Vec<_>>());
+    let mut enc_flat: Vec<Fr> = Vec::with_capacity(encrypted.len() * 2);
+    for (ea, et) in &encrypted {
+        enc_flat.push(*ea);
+        enc_flat.push(*et);
+    }
+    let encrypted_note_data_hash = poseidon(&enc_flat);
+    let signing_hash = poseidon(&[output_note_hash, encrypted_note_data_hash]);
+    let sig = sign_hex(&fr_to_biguint(&signing_hash), owner_key_hex);
+
+    // Per-token gas fee: prove `(token -> gasFee)` membership. The leaf index is
+    // the inputs' token (`input_notes[0].token`); the synthetic tree carries
+    // `gasFee` at that index and proves against its own root.
+    let (gas_fee_siblings, commit_pending_notes_gas_fee_root) =
+        synthetic_gas_fee_proof(&input_notes[0].token, gas_fee);
+
+    AggregationWitness {
+        input_notes: input_notes.iter().map(|n| n.flat()).collect(),
+        input_note_inclusion_proofs: input_proofs.iter().map(|p| p.flat()).collect(),
+        output_notes: output_notes.iter().map(|n| n.flat()).collect(),
+        public_key: [fr_to_dec(&public_key.0), fr_to_dec(&public_key.1)],
+        signature: flat_signature(sig.r8, &sig.s),
+        fee_note: fee_note.flat(),
+        encrypted_note_data: enc_notes.iter().map(|n| n.flat_encrypted()).collect(),
+        notes_root: fr_to_dec(&notes_root),
+        protocol_fee_per_thousand: fr_to_dec(&protocol_fee_per_thousand),
+        gas_fee: fr_to_dec(&gas_fee),
+        gas_fee_siblings,
+        commit_pending_notes_gas_fee_root,
+        fee_note_public_key: [fr_to_dec(&fee_note_public_key.0), fr_to_dec(&fee_note_public_key.1)],
+    }
+}
+
+// ── Pending-notes commitment ────────────────────────────────────────────────
+
+#[derive(Serialize, PartialEq, Eq, Debug)]
+pub struct PendingCommitmentWitness {
+    #[serde(rename = "currentNoteIndex")]
+    pub current_note_index: String,
+    #[serde(rename = "inputHash")]
+    pub input_hash: String,
+    #[serde(rename = "currentNotesRoot")]
+    pub current_notes_root: String,
+    #[serde(rename = "pendingNoteIds")]
+    pub pending_note_ids: Vec<String>,
+    pub siblings: Vec<Vec<String>>,
+    #[serde(rename = "newNotesRoot")]
+    pub new_notes_root: String,
+}
+
+/// Build the pending-notes-commitment circuit witness. Mutates a copy of the tree:
+/// each non-zero pending id is inserted (zero ids are skip slots with zero siblings).
+/// `inputHash = sha256BigInt([...paddedIds, currentRoot, newRoot, currentIndex, newIndex])`.
+pub fn build_pending_commitment(
+    tree: &Imt,
+    tree_depth: usize,
+    batch_size: usize,
+    pending_note_ids: &[Fr],
+) -> PendingCommitmentWitness {
+    assert!(pending_note_ids.len() <= batch_size, "pending ids exceed batch size");
+    let current_notes_root = tree.root();
+    let current_note_index = tree.leaf_count() as u64;
+
+    let mut padded = pending_note_ids.to_vec();
+    padded.resize(batch_size, Fr::ZERO);
+
+    let mut work = tree.clone();
+    let mut siblings: Vec<Vec<Fr>> = Vec::with_capacity(batch_size);
+    for &id in &padded {
+        if id == Fr::ZERO {
+            siblings.push(vec![Fr::ZERO; tree_depth]);
+            continue;
+        }
+        work.insert(id);
+        let idx = work.leaf_count() - 1;
+        siblings.push(work.create_proof(idx).siblings);
+    }
+
+    let new_notes_root = work.root();
+    let new_note_index = work.leaf_count() as u64;
+
+    let mut hash_inputs: Vec<BigUint> = padded.iter().map(fr_to_biguint).collect();
+    hash_inputs.push(fr_to_biguint(&current_notes_root));
+    hash_inputs.push(fr_to_biguint(&new_notes_root));
+    hash_inputs.push(BigUint::from(current_note_index));
+    hash_inputs.push(BigUint::from(new_note_index));
+    let input_hash = sha256_bigint(&hash_inputs);
+
+    PendingCommitmentWitness {
+        current_note_index: current_note_index.to_string(),
+        input_hash: input_hash.to_string(),
+        current_notes_root: fr_to_dec(&current_notes_root),
+        pending_note_ids: padded.iter().map(fr_to_dec).collect(),
+        siblings: siblings.iter().map(|row| row.iter().map(fr_to_dec).collect()).collect(),
+        new_notes_root: fr_to_dec(&new_notes_root),
+    }
+}

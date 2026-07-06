@@ -1,0 +1,47 @@
+# arkworks Groth16 prover over snarkjs .zkey/.wtns artifacts — native (rayon) and
+# wasm32 from one source. Detached workspace (own [workspace]) so its dependency
+# set stays independent of the core crates.
+#
+# src/zkey.rs and src/qap.rs are vendored from ark-circom 0.5.0 (MIT OR Apache-2.0,
+# https://github.com/arkworks-rs/circom-compat), minus its wasmer witness calculator.
+[package]
+name = "curvy-prover"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-groth16 = { version = "0.5.0", default-features = false }
+ark-poly = { version = "0.5.0", default-features = false }
+ark-relations = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
+ark-std = { version = "0.5.0", default-features = false }
+byteorder = "1.5"
+num-bigint = "0.4"
+num-traits = "0.2"
+rand = "0.8"
+rayon = { version = "1", optional = true }
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = { version = "=0.2.114", optional = true }
+wasm-bindgen-rayon = { version = "1.3", optional = true }
+
+[features]
+default = ["std", "parallel"]
+std = ["ark-bn254/std", "ark-ec/std", "ark-ff/std", "ark-groth16/std", "ark-poly/std", "ark-relations/std", "ark-serialize/std", "ark-std/std"]
+parallel = ["dep:rayon", "ark-ec/parallel", "ark-ff/parallel", "ark-groth16/parallel", "ark-poly/parallel", "ark-std/parallel"]
+wasm = ["dep:wasm-bindgen"]
+# Threaded browser build: nightly + atomics + build-std + COOP/COEP page (see README).
+wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
