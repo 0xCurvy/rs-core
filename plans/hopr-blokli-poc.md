@@ -285,8 +285,21 @@ passkeys/EIP-712 UI flows (private-key login path only).
 > byte-identical across `zk-keys/v2` and `zk-circuits/build/v2`; verifier constants
 > match the snarkjs-generated verifier from that zkey. **§3 decision: option 1
 > (evaluation graph) adopted**; option 3 unnecessary, option 2 remains a long-term
-> nicety. Remaining fast-follow: exercise the aggregation + pending-commitment
-> circuits the same way (same buses/templates — expected to carry over).
+> nicety.
+>
+> **Fast-follow ✅ DONE (same day, commits `cc84433`+`122cf8f`, reviewer-verified):**
+> all THREE deployed circuit configs now pass the identical pipeline —
+> aggregation(2,3,30): 31 public signals, graph `f757ba00…`, witness `5c8156e4…`;
+> pending-notes-commitment(5,30): 226k constraints, 1.1M-node graph, witness
+> `e91726d9…`; both provenance-CLEAN (75/75 and 15/15 verifier constants match).
+> Findings for the real crates: (a) `witness::build_pending_commitment`'s output
+> is not directly circuit-consumable — it serializes a `newNotesRoot` the circuit
+> doesn't declare and emits `inputHash` as the RAW sha256 digest (> field modulus)
+> where the circuit's public signal is the mod-p reduction; needs a
+> `to_circuit_input()` view in core (worked around in the spike's gen-input).
+> (b) Artifact sizes force a fetch/cache-by-hash design: pending's zkey is 129 MB,
+> its graph 13 MB (gitignored + sha-pinned; `run.sh regen-fixtures` rebuilds
+> byte-identically).
 The single riskiest assumption is that rs-core's prover output verifies against
 Curvy's *deployed* snarkjs verifiers, because the witness-calc seam is unfilled and
 zkey provenance is unconfirmed. Pure-Rust witness generation is a day-one
@@ -378,10 +391,10 @@ requirement, so M1 *starts* with the calculator spike:
 
 1. ~~**Witness-calculator gap**~~ **RESOLVED (M1, 2026-07-08)**: `circom-witnesscalc`
    evaluation graphs handle the bus-typed circuits with byte-identical output —
-   pure-Rust witness generation works today. Residual: aggregation/pending-commitment
-   circuits not yet exercised (same templates, expected to carry over), and the
-   graph-artifact lifecycle (where per-circuit `.graph.bin` live, regeneration on
-   circuit changes) is a design decision for `curvy-witnesscalc`.
+   pure-Rust witness generation works today — now proven on ALL THREE deployed
+   circuit configs. Residual: artifact lifecycle design (129 MB pending zkey /
+   13 MB graph → fetch/cache pinned by hash), and a `to_circuit_input()` fix for
+   `build_pending_commitment` (extraneous `newNotesRoot`, unreduced `inputHash`).
 2. ~~**zkey/verifier provenance**~~ **RESOLVED for withdrawal(2,30) (M1)**:
    zkey/wasm/vkey byte-identical across `zk-keys/v2` and `zk-circuits/build/v2`;
    deployed verifier constants match the snarkjs-generated verifier from that zkey.
