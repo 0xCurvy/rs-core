@@ -15,3 +15,12 @@ pub mod send;
 
 pub use account::{Account, Identity, OwnedNote};
 pub use client::{CurvyClient, Discovered, Route, TxLedger};
+
+/// Re-export of the L0 `curvy-core` crate so consumers can name its `Fr`/field API
+/// (the same crate instance whose `Fr` appears in [`OwnedNote`]/[`Discovered`]) without
+/// declaring a *direct* path-dependency on `../crates/core`. That direct dep is what a
+/// nested consumer workspace must avoid: because `crates/core` is a member of the rs-core
+/// root workspace, path-depending it directly pulls the root workspace into the build and
+/// makes it hijack `workspace = true` inheritance resolution for the sibling `sdk/`
+/// crates. Reaching core transitively (through this re-export) sidesteps that entirely.
+pub use curvy_core;
