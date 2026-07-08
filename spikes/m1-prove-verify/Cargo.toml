@@ -1,0 +1,37 @@
+# M1 spike: pure-Rust witness generation + Groth16 prove/verify against Curvy's
+# real withdrawal(2,30) circuit and its deployed CurvyWithdrawalVerifier.sol.
+#
+# DETACHED workspace (own [workspace] table) — deliberately NOT a member of the
+# rs-core root workspace, so the spike's dependency set (circom-witnesscalc,
+# alloy, …) never pollutes rs-core's exact-pinned, cargo-deny-gated policy.
+[package]
+name = "m1-prove-verify"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+curvy-core = { path = "../../crates/core" }
+curvy-prover = { path = "../../crates/prover" }
+# Same arkworks line as curvy-prover (0.5.0) — Fr values flow across the boundary.
+ark-bn254 = { version = "0.5.0", features = ["std"] }
+ark-ff = { version = "0.5.0", features = ["std"] }
+num-bigint = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+sha2 = "0.10"
+hex = "0.4"
+# Pure-Rust witness generation, path 1: iden3 evaluation-graph runtime
+# (graph built offline by vendor/circom-witnesscalc's `build-circuit` bin).
+circom-witnesscalc = "0.3.0"
+# On-chain leg: deploy CurvyWithdrawalVerifier to anvil + call verifyProof.
+# `node-bindings` gives us `Anvil::spawn`; `full` covers provider/contract/signer.
+alloy = { version = "1", features = ["full", "node-bindings"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+opt-level = 3
