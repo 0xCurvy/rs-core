@@ -59,6 +59,13 @@ else
   echo "==> [curvy-deploy] CreateX already present at $CREATEX_ADDR — skipping bootstrap"
 fi
 
+# Bury every prior deployer tx (HOPR deploy, seed-tx, CreateX funding — all from
+# account 0) under >5 confirmations. Hardhat Ignition refuses to start while the
+# sender has txs younger than 5 confirmations (HHE10402), and relying on 1s
+# interval blocks accruing during hardhat's boot is a race (flaked on a warm run).
+echo "==> [curvy-deploy] mining 6 blocks so prior txs clear Ignition's confirmation check"
+cast rpc anvil_mine 0x6 --rpc-url "$RPC" >/dev/null
+
 # ── 2. Ignition deploy of the full Devenv graph ─────────────────────────────────
 # Clean any prior journal for this deployment-id so a fresh chain gets a fresh
 # deploy (untracked artifact — safe to remove).
