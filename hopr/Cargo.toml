@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["curvy-hopr-strategy", "curvy-hopr-runner"]
+
+# DETACHED workspace (plan risk 6 — the toolchain quarantine). Its own [workspace]
+# table + its own rust-toolchain.toml (channel 1.96, matching hoprnet). It never
+# touches rs-core's root Cargo.toml/deny.toml. It path-consumes the M2 `sdk/` crates
+# (edition 2021, stable) AND git-pins the real hoprnet `hopr-strategy` (edition 2024,
+# rustc 1.96) — the point of the crate is to prove those two toolchains coexist in one
+# consumer with zero changes to hopr-strategy.
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# The REAL hoprnet strategy framework. NOT published on crates.io (verified:
+# `cargo info hopr-strategy` → not found), so git-pinned to a commit. `runtime-tokio`
+# is required for `MultiStrategy::run` (its sub-task `spawn` maps to `tokio::spawn`).
+# Pin: hoprnet @ ac365f2b82143fcf69adf043f6c0a38203e61f00 (2026-07-07). hopr-strategy
+# 0.19.2; it transitively pulls hopr-api 1.14.x + hopr-utils from the same tree.
+hopr-strategy = { git = "https://github.com/hoprnet/hoprnet", rev = "ac365f2b82143fcf69adf043f6c0a38203e61f00", features = ["runtime-tokio"] }
+
+# The M2 Curvy Rust SDK, consumed BY PATH from the sibling detached `sdk/` workspace.
+# These are edition-2021 crates compiled here under 1.96.
+#
+# NOTE: we deliberately do NOT declare a direct `curvy-core = { path = "../crates/core" }`
+# here. `crates/core` is a member of the rs-core ROOT workspace; a direct path-dep to it
+# pulls the root workspace into this build, which then hijacks `workspace = true`
+# inheritance for the sibling `sdk/` crates (they'd resolve `anyhow`/etc. against the root
+# workspace, which lacks them). We reach `curvy-core` transitively via `curvy_sdk::curvy_core`
+# instead — verified to resolve cleanly.
+curvy-sdk = { path = "../sdk/curvy-sdk" }
+curvy-chain-api = { path = "../sdk/curvy-chain-api" }
+curvy-chain-blokli = { path = "../sdk/curvy-chain-blokli" }
+curvy-chain-rpc = { path = "../sdk/curvy-chain-rpc" }
+curvy-types = { path = "../sdk/curvy-types" }
+curvy-e2e = { path = "../sdk/curvy-e2e" }
+
+async-trait = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

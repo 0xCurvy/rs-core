@@ -1,0 +1,6 @@
+# Fetch the hoprnet git dependency via the system `git` CLI instead of cargo's built-in
+# libgit2. This environment has a global `url.git@github.com:.insteadOf https://github.com/`
+# rewrite; libgit2's SSH auth fails under it ("no usernames succeeded"), but the git CLI
+# authenticates fine (verified: `git ls-remote https://github.com/hoprnet/hoprnet HEAD`).
+[net]
+git-fetch-with-cli = true
