@@ -394,6 +394,23 @@ requirement, so M1 *starts* with the calculator spike:
   submission via blokli.
 
 ### M5 — CurvyStrategy in MultiStrategy
+> **✅ PASSED 2026-07-09** — `hopr/` toolchain-quarantined workspace (commits
+> `bca9fb6` isolated sdk re-export + `dfd777f`), reviewer-verified live:
+> `CurvyStrategy impl hopr_strategy::Strategy` (git-pinned hoprnet @ `ac365f2b`,
+> hopr-strategy 0.19.2 + `runtime-tokio` — NOT on crates.io; hopr-api 1.14.0 is)
+> composed into the real `MultiStrategy` beside a heartbeat and a deliberately
+> panicking sibling; the panic was isolated (`sub-strategy failed … panicked`
+> logged, Curvy kept running) and the policy tick detected the seeded 0.849 ETH
+> note and settled a REAL withdrawal through blokli
+> (tx `0x281fb96a…48fd`, status 1, DEST delta exact — cast-verified). Isolation
+> tests 3/3. Toolchain split contained exactly as designed: rustc 1.96 in
+> `hopr/` only; sdk crates compile there unchanged (via a `pub use curvy_core`
+> re-export in curvy-sdk to avoid root-workspace inheritance hijack).
+> **With this, every pillar of the original PoC statement is demonstrated.**
+> Note for M3/M4 below: their exit criteria were substantially absorbed by the
+> M2 e2e (two-party send → scan → withdraw all pass); what remains of them is
+> hardening (curvy-notes engine with gap-detection + forged-leaf test, exact TS
+> signature-KDF, planner/facade build-out).
 - `curvy-hopr-strategy`: `impl hopr_strategy::Strategy for CurvyStrategy` owning
   `Arc<CurvyClient>`; internal timer loop; policy v0 = sync notes + auto-aggregate
   when owned-note count exceeds circuit `maxInputs` (or threshold-triggered settle).
