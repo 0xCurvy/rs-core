@@ -339,10 +339,25 @@ requirement, so M1 *starts* with the calculator spike:
 > v3-e2e's pnpm/hardhat toolchain); addresses hand off via
 > `curvy_deployed_addresses.json` (git-ignored, regenerated per run).
 >
-> **Remaining for M2 completion**: the SDK skeleton (`curvy-chain-api` traits,
-> blokli TxSubmitter + RPC adapters, `curvy-abi`) driving a self-shielded
-> aggregation end-to-end on this stack — the spike's proving pipeline + this
-> substrate are both ready for it.
+> **✅ M2 COMPLETE (same day, commit `b668017` — `sdk/` workspace), reviewer-verified
+> on a fresh chain**: shield → commitPendingNotes (client plays batch-prover) →
+> aggregate to a second account **via blokli `sendTransactionSync`** → real ECDH
+> scan-discovery (decrypt + integrity gate) → **withdrawal stretch** to an EOA via
+> blokli, balance exact to the wei (cast-verified independently). The `sdk/`
+> workspace instantiates the plan's layering at PoC scale: `curvy-types`,
+> `curvy-chain-api` (5 traits + `PortalDirectory`), `curvy-abi` (vendored ABIs),
+> `curvy-witnesscalc` (real L0.5 crate), `curvy-chain-blokli`, `curvy-chain-rpc`
+> (+ direct-submit fallback), `curvy-sdk` (`CurvyClient`, no direct
+> alloy/blokli/reqwest — seam verified), `curvy-e2e`. Load-bearing discoveries
+> recorded in `sdk/` docs: note-owner BabyJubJub key is account-level (`s`) with
+> unlinkability from the stealth `sharedSecret`; shield = pre-fund entry portal
+> address then `deployShieldPortal` (non-payable); aggregation `gasFee` must bind
+> the real on-chain `commitmentFeeRoot` (core's `build_aggregation` synthesizes
+> its own — override needed); `netAmount` = gross − depositFee − portal − commit
+> gas. M3 residue: promote `sync()` into the real `curvy-notes` engine (gap
+> detection + forged-leaf test); swap the PoC keccak KDF stand-in for the exact
+> TS signature-KDF; raw-vs-reduced sharedSecret cross-impl conformance check vs
+> the Go core.
 - Fork `blokli/tests/smoke/docker-compose.yml` (anvil as separate service, :8545
   exposed, HOPR deployer one-shot) and add a Curvy deploy one-shot running the
   existing Ignition `Devenv.ts` graph trimmed to vault + aggregator + 3 verifiers
