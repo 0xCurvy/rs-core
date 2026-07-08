@@ -275,6 +275,18 @@ ENS/metadata handle resolution (pass pubkeys directly), sharded lean-client engi
 passkeys/EIP-712 UI flows (private-key login path only).
 
 ### M1 — A Rust proof accepted by Curvy's real verifier  ← the kill-shot test
+> **✅ PASSED 2026-07-08** — spike at `spikes/m1-prove-verify/` (commit `e1b9bd5`),
+> independently re-verified by the orchestrator (fresh proof, all 6 checks).
+> Verdict: iden3 `circom-witnesscalc` **handles Curvy's bus-typed circom 2.2.0
+> circuits with full fidelity** — pure-Rust witness byte-identical to snarkjs
+> (sha256 `b57d069…`, ~6 ms calc), arkworks proof verified off-chain and accepted
+> by the deployed `CurvyWithdrawalVerifier` bytecode on anvil; corrupted statement
+> and corrupted proof point both rejected. Provenance CLEAN: zkey `c91d9fdb…`
+> byte-identical across `zk-keys/v2` and `zk-circuits/build/v2`; verifier constants
+> match the snarkjs-generated verifier from that zkey. **§3 decision: option 1
+> (evaluation graph) adopted**; option 3 unnecessary, option 2 remains a long-term
+> nicety. Remaining fast-follow: exercise the aggregation + pending-commitment
+> circuits the same way (same buses/templates — expected to carry over).
 The single riskiest assumption is that rs-core's prover output verifies against
 Curvy's *deployed* snarkjs verifiers, because the witness-calc seam is unfilled and
 zkey provenance is unconfirmed. Pure-Rust witness generation is a day-one
@@ -364,13 +376,16 @@ requirement, so M1 *starts* with the calculator spike:
 
 ## 5. Risks (ranked)
 
-1. **Witness-calculator gap** — no Rust path from circuit inputs to full assignment,
-   and pure-Rust-from-day-one raises the bar: if `circom-witnesscalc` chokes on
-   Curvy's custom templates/bus types, the fallbacks are embedded-wasmi (all-Rust
-   process, circom artifact) or hand-written native builders (most work). *Mitigated
-   by M1 ordering, the trait seam, and offline golden `.wtns` fixtures.*
-2. **zkey/verifier provenance** — a mismatch produces proofs that verify locally but
-   revert on-chain. *M1 pins artifact provenance; golden vectors per circuit config.*
+1. ~~**Witness-calculator gap**~~ **RESOLVED (M1, 2026-07-08)**: `circom-witnesscalc`
+   evaluation graphs handle the bus-typed circuits with byte-identical output —
+   pure-Rust witness generation works today. Residual: aggregation/pending-commitment
+   circuits not yet exercised (same templates, expected to carry over), and the
+   graph-artifact lifecycle (where per-circuit `.graph.bin` live, regeneration on
+   circuit changes) is a design decision for `curvy-witnesscalc`.
+2. ~~**zkey/verifier provenance**~~ **RESOLVED for withdrawal(2,30) (M1)**:
+   zkey/wasm/vkey byte-identical across `zk-keys/v2` and `zk-circuits/build/v2`;
+   deployed verifier constants match the snarkjs-generated verifier from that zkey.
+   Repeat the hash check per circuit config as each is brought up.
 3. **Blokli indexer can't see Curvy events** — "blokli for indexing" is a fork, not
    config. *PoC uses direct RPC; trait split keeps the swap cheap; upstream talk.*
 4. **Blokli's permissive validator may tighten** — a future allowlist release could
@@ -404,8 +419,8 @@ Still open:
    (channels/tickets), which would add `hopr-api` node-trait bounds? PIX suggests
    the eventual exit-side strategy *will* need session-layer hooks (share
    verification lives near the SURB machinery) — worth deciding the seam early.
-2. **zkey provenance** — confirm `packages/zk-keys/v2` artifacts are the same
-   trusted-setup build as the deployed verifier bytecode.
+2. ~~**zkey provenance**~~ — answered by M1 for withdrawal(2,30): same trusted-setup
+   build; hashes recorded in `spikes/m1-prove-verify/README.md`.
 3. **Repo layout** — new `curvy-rs-sdk` workspace path-depending on rs-core
    (recommended), or grow inside rs-core?
 4. **Chain flavor** — vanilla 31337 anvil for the whole PoC (recommended), Gnosis-
@@ -416,6 +431,7 @@ Still open:
    hoprd session layer consuming `curvy-pix`, or a session-service sidecar; (c)
    shares live over the BabyJubJub *subgroup scalar field* — pin the exact field
    (vs BN254 Fr) in the appendix to avoid an implementation mismatch.
-6. **circom-witnesscalc compatibility** — does it handle `curvy-circuits`' custom
-   templates/bus types? (M1 spike answers this; flagging as the open technical
-   unknown it is.)
+6. ~~**circom-witnesscalc compatibility**~~ — answered by M1: **yes**, full
+   fidelity on the bus-typed withdrawal circuit (graph build from sources, ~6 ms
+   pure-Rust evaluation, byte-identical to snarkjs). Aggregation/pending-commitment
+   fixtures are the fast-follow.
