@@ -12,8 +12,17 @@ A PoC composed of:
 3. Curvy logic running as a **hoprd strategy**,
 4. everything running against **blokli's anvil image** with Curvy's contracts deployed.
 
-Later phases (not this PoC, but the design must not preclude them): the "pix protocol",
-HOPR connectors/edge nodes as Curvy infrastructure.
+Later phases (not this PoC, but the design must not preclude them): PIX (RFC-0012 —
+Curvy as the privacy pool for HOPR exit-node incentives, see §1.4), HOPR
+connectors/edge nodes as Curvy infrastructure.
+
+Decisions locked in with Vanja (2026-07-08):
+- **Pure-Rust witness generation from day one** — no snarkjs/JS subprocess, ever
+  (see §3 witness-calc and M1).
+- **Blokli indexing of Curvy events is a later modification; Curvy's own indexer
+  stays for now.** The PoC reads events via direct RPC; the existing Curvy indexer
+  REST is the interim production `NoteIndexSource`; a blokli extension comes later.
+- PoC scope cuts (§4 preamble) approved in principle.
 
 ---
 
@@ -105,15 +114,65 @@ HOPR connectors/edge nodes as Curvy infrastructure.
     with :8545 exposed* + a cast seed one-shot — the easiest base to fork for
     adding Curvy contracts. No auth on the API; no published anvil image found
     (build-it-yourself).
-- **"pix protocol"**: empty public footprint in HOPR and Curvy context (publicly only
-  Brazil's payment rail). Treated as an internal codename; a seam is reserved
-  (§3, L6) but semantics need owner input.
-- No public HOPR↔Curvy collaboration exists. The layers are complementary:
+- No public HOPR↔Curvy collaboration exists yet (the PIX Appendix-3 PR is the first
+  concrete artifact). The layers are complementary:
   HOPR = network/metadata privacy (mixnet, sessions, RPCh/GnosisVPN pattern),
   Curvy = on-chain transaction-graph privacy (stealth addresses + ZK). The natural
   long-term fit: Curvy's network calls (relay submission, note-delta fetch, handle
   resolution) tunneled over HOPR sessions; Curvy node-side logic living as hoprd
   strategies; blokli as the shared chain backend for Curvy light clients.
+
+### 1.4 PIX — RFC-0012 and Curvy's role (the "pix protocol")
+
+PIX = **Protocol for Incentivization of eXits** (`hoprnet/rfc` RFC-0012, Draft
+v0.3.0 on branch `pix`; authors Pohanka/Yu). It pays Exit nodes for serving Entry
+nodes, conditionally on actually delivering return traffic, without the Exit
+learning anything about the Entry:
+
+- The Entry deposits into an abstract **privacy pool `W`** ahead of time
+  (`Deposit(Amount) → Deposit_Handle`).
+- Per agreement round `i`, Entry and Exit jointly derive a **Session Stealth
+  Address**: `SSA_i = Σ constant-term commitments of m Entry polynomials +
+  ExitCommitment_i` (Exit's `b_i·BP`). Neither side alone knows `SSA_Priv_i`.
+  The Entry runs `Allocate(ChunkPrice, Deposit_Handle, SSA_i)` against `W`.
+- The Entry attaches **encrypted Shamir-style shares** of its polynomial constants
+  to SURBs; a share only becomes decryptable by the Exit after the Exit *uses* that
+  SURB to send reply traffic (the ack-secret from the first return-path relayer
+  keys the decryption — that's the traffic-conditionality trick). After `t+1`
+  verified shares per polynomial the Exit Lagrange-interpolates, adds `b_i`,
+  obtains `SSA_Priv_i`, and runs `Withdraw(SSA_i, PkPoP, WithdrawalAddress)`.
+- Appendix 2: PIX messages ride the Session/Start protocols (RFC-0008/0009),
+  bound to a Session ID; `UsePIX` capability bit in `StartSession`.
+
+**PR #89 (Aleksandar, open against the `pix` branch) adds Appendix 3: `W` = the
+Curvy protocol with curve `C` = BabyJubJub** (Appendix 1's secp256k1 is
+ZK-inefficient). The mapping onto Curvy is remarkably direct:
+
+| RFC-0012 op | Curvy realization |
+|---|---|
+| `Deposit(Amount)` | shield into the aggregator; the note + inclusion proof is the `Deposit_Handle` |
+| `Allocate(amount, handle, SSA_i)` | aggregation output note **owned by the SSA_i BabyJubJub pubkey** (ephemeral, single-note) |
+| `Withdraw(SSA, PkPoP, dest)` | Curvy withdrawal/aggregation — PoP *is* the EdDSA-Poseidon owner signature already enforced in the circuits |
+
+Consequences for the SDK design (why the architecture already fits):
+- Exit-side PIX = exactly the CurvyClient spend path: discover note owned by a
+  known key → prove → aggregate/withdraw via `TxSubmitter`. New pieces are small
+  and pure-math: polynomial eval/commitment and Lagrange interpolation over the
+  BabyJubJub subgroup scalar field (`curvy-core::babyjubjub` already has
+  `add_point`/`mul_point_escalar`/`BASE8`/`SUB_ORDER`), plus share
+  verification (`y·BP == Σ xʳ·M_r_u`).
+- PIX note discovery is **by known owner key**, not trial-decrypt stealth scanning
+  — the Exit knows each `SSA_i` it awaits. `curvy-notes` should expose a
+  "watch specific owner keys" mode alongside the scan path (cheap addition, worth
+  keeping in mind now).
+- Share encryption/transport (Blake3 KDF, ChaCha20, SURB attachment, ack-secrets)
+  lives in the **HOPR node/session layer**, not the Curvy SDK — the natural home is
+  the hoprd side (strategy/session integration), consuming `curvy-pix` (L6) for the
+  pool operations.
+- Spec gap to raise on the PR: Appendix 3 doesn't yet pin the exact note
+  construction for SSA-owned notes (Curvy's `ownerHash = Poseidon(pub.x, pub.y,
+  sharedSecret)` needs a defined `sharedSecret` convention the Exit can compute,
+  e.g. from the session/agreement transcript).
 
 ---
 
@@ -140,7 +199,8 @@ Key structural decisions this diagram encodes:
 1. **Blokli is one adapter, not a hard dependency.** Chain access sits behind
    Curvy-owned traits split *by capability*, because no single backend covers all of
    them today: `TxSubmitter` (blokli ✅ today), `NoteIndexSource` (blokli ❌ — direct
-   RPC in the PoC, blokli fork or Curvy indexer later), `RootAnchor` (**always** a
+   RPC in the PoC, the existing Curvy indexer REST as the interim production
+   source, a blokli extension later), `RootAnchor` (**always** a
    direct chain read — the trust anchor is never delegated to an indexer, mirroring
    the TS `rpcRootVerifier` seam), `FeeConfigSource`, `BalanceReader`. This is the
    same seam HOPR itself uses (`hopr-api` traits, blokli behind a connector).
@@ -175,11 +235,26 @@ L6  curvy-sdk-wasm | curvy-hopr-strategy |         consumers
   don't fold into rs-core's workspace: the prover is already detached, and
   `curvy-hopr-strategy` must track hoprnet's toolchain (edition 2024, rustc 1.96,
   `hopr-strategy`/`hopr-api` from crates.io) while everything else stays on stable.
-- Plus `curvy-witnesscalc` (L0.5): one trait (`WitnessCalculator`), v0 = snarkjs
-  `wtns.calculate` subprocess with the circuit `.wasm`, v1 = pure-Rust calculator
-  (spike iden3 `circom-witnesscalc` against Curvy's circuits' custom templates/bus
-  types). Callers stay calculator-agnostic; "pure-Rust, no-JS" is earned
-  incrementally without rework.
+- Plus `curvy-witnesscalc` (L0.5): one trait (`WitnessCalculator`), **pure Rust
+  from day one** (decision: no snarkjs/JS subprocess, ever). Candidate paths, to be
+  settled by the M1 spike:
+  1. **iden3 `circom-witnesscalc`** — compiles the circom *sources* (the
+     `curvy-circuits` package) into an evaluation graph executed natively in Rust.
+     Fastest route to full fidelity if Curvy's custom templates/bus types are
+     supported; needs the circuit sources + a compatible circom version.
+  2. **Native witness builders in Rust** — hand-implement full-assignment
+     generation for the three fixed circuit families (aggregation, withdrawal,
+     pending-commitment). Every primitive the circuits use already exists in
+     `curvy-core` (Poseidon, EdDSA verify, IMT paths, cipher); the work is wire
+     ordering fidelity. The long-term ideal (zero circom toolchain anywhere), most
+     effort, brittle against circuit changes.
+  3. **Embedded wasm runtime fallback** — execute the circom-generated witness
+     `.wasm` inside `wasmi`/`wasmtime` from Rust (re-vendor ark-circom's approach).
+     No JS/node anywhere — an all-Rust process executing a circom-built artifact.
+     Acceptable stopgap only if 1 fails and before 2 lands.
+  In every path, conformance is pinned by **golden `.wtns` fixtures generated once
+  offline with snarkjs** (committed test vectors, not a runtime dependency) —
+  byte-compare full assignments per circuit config.
 - Async model: tokio for IO; crypto/proving stay sync and run under
   `spawn_blocking`/rayon; typed enum events over `tokio::sync::broadcast` + `watch`;
   keyring is `Zeroizing`, never serialized; `SecretStore` trait for at-rest secrets
@@ -202,10 +277,14 @@ passkeys/EIP-712 UI flows (private-key login path only).
 ### M1 — A Rust proof accepted by Curvy's real verifier  ← the kill-shot test
 The single riskiest assumption is that rs-core's prover output verifies against
 Curvy's *deployed* snarkjs verifiers, because the witness-calc seam is unfilled and
-zkey provenance is unconfirmed.
-- Build `curvy-witnesscalc` v0 (snarkjs subprocess over `packages/zk-keys/v2`
-  artifacts). Feed `witness::build_withdrawal` (2,30 — smallest circuit) →
-  `.wtns` → `curvy-prover` → snarkjs-JSON proof.
+zkey provenance is unconfirmed. Pure-Rust witness generation is a day-one
+requirement, so M1 *starts* with the calculator spike:
+- **Spike `circom-witnesscalc` against the real `curvy-circuits` sources** (custom
+  templates/bus types are the compatibility question). If it fails, fall back to
+  the embedded-wasmi path while scoping native builders (§3 options 2/3). Generate
+  golden `.wtns` fixtures offline with snarkjs and byte-compare.
+- Feed `witness::build_withdrawal` (2,30 — smallest circuit) through the calculator
+  → full assignment → `curvy-prover` → snarkjs-JSON proof.
 - Verify (a) off-chain against the checked-in vkey (fast inner loop), then
   (b) on-chain: deploy only `CurvyWithdrawalVerifier.sol` to a bare anvil and get
   `verifyProof(...) == true`. Repeat for aggregation (2,3,30).
@@ -264,11 +343,14 @@ zkey provenance is unconfirmed.
   abort a sibling strategy (isolation test).
 
 ### Phase 2+ (post-PoC, seams already in place)
-1. **Blokli indexes Curvy events** — fork or upstream: topics + handler + DB entity
-   + migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
+1. **Blokli indexes Curvy events** (decision: later, not now — the existing Curvy
+   indexer stays in the interim). When it happens: topics + handler + DB entity +
+   migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
    `CommittedNullifiers`; then `curvy-chain-blokli` also implements
-   `NoteIndexSource` and the RPC adapter becomes fallback. Worth an early
-   conversation with the HOPR team about generic extensibility upstream.
+   `NoteIndexSource` and RPC/Curvy-indexer adapters become fallbacks. Meanwhile,
+   add a `NoteIndexSource` impl over the Curvy indexer's `/v3/sync/*` REST in
+   `curvy-services-http`. Worth an early conversation with the HOPR team about
+   generic extensibility upstream.
 2. **In-node strategy**: wire CurvyStrategy into the real `hoprnet/hoprd`
    composition site; assess a dev-net hoprd against the same anvil.
 3. **Relayer + Privacy Pass** (`curvy-privacy-pass`), portals/recovery, Solana,
@@ -282,10 +364,11 @@ zkey provenance is unconfirmed.
 
 ## 5. Risks (ranked)
 
-1. **Witness-calculator gap** — no Rust path from circuit inputs to full assignment;
-   v0 subprocess undercuts "pure Rust" until the circom-witnesscalc spike lands.
-   Compatibility of Curvy's custom templates/bus types with pure-Rust calculators
-   is unverified. *Mitigated by M1 ordering + trait seam.*
+1. **Witness-calculator gap** — no Rust path from circuit inputs to full assignment,
+   and pure-Rust-from-day-one raises the bar: if `circom-witnesscalc` chokes on
+   Curvy's custom templates/bus types, the fallbacks are embedded-wasmi (all-Rust
+   process, circom artifact) or hand-written native builders (most work). *Mitigated
+   by M1 ordering, the trait seam, and offline golden `.wtns` fixtures.*
 2. **zkey/verifier provenance** — a mismatch produces proofs that verify locally but
    revert on-chain. *M1 pins artifact provenance; golden vectors per circuit config.*
 3. **Blokli indexer can't see Curvy events** — "blokli for indexing" is a fork, not
@@ -307,23 +390,32 @@ zkey provenance is unconfirmed.
 10. **Chain-flavor drift** (Gnosis 100/xDai/hardfork vs anvil 31337/Cancun) — pinned
     to 31337 for the PoC; Gnosis-flavor is a deliberate later step.
 
-## 6. Open questions (need owner input)
+## 6. Open questions
 
-1. **pix protocol** — no public footprint; what is it, and does it ride on sessions
-   (transport) or on HOPR ticket economics (settlement)? The two imply different
-   L6 crates.
-2. **PoC scope cuts** — confirm: stubbed handle registration (no metadata service),
-   direct submit only (no relayer/Privacy Pass), no portals/Solana/bridging.
-3. **Blokli indexing end-state** — fork blokli for Curvy events, run a Curvy-owned
-   indexer beside it, or pursue upstream generic extensibility with the HOPR team?
-4. **Witness-calc end-state** — is a temporary snarkjs subprocess acceptable, or is
-   pure-Rust witness generation a hard requirement (and on what timeline)?
-5. **Strategy depth** — is CurvyStrategy purely a scheduler around CurvyClient
+Answered 2026-07-08: ~~pix protocol~~ (= RFC-0012 PIX + Curvy Appendix 3, §1.4),
+~~blokli indexing end-state~~ (modify blokli later; Curvy indexer stays for now),
+~~witness-calc end-state~~ (pure Rust from day one), ~~PoC scope cuts~~ (approved
+in principle).
+
+Still open:
+
+1. **Strategy depth** — is CurvyStrategy purely a scheduler around CurvyClient
    (current design), or should it eventually react to HOPR node state
-   (channels/tickets), which would add `hopr-api` node-trait bounds?
-6. **zkey provenance** — confirm `packages/zk-keys/v2` artifacts are the same
+   (channels/tickets), which would add `hopr-api` node-trait bounds? PIX suggests
+   the eventual exit-side strategy *will* need session-layer hooks (share
+   verification lives near the SURB machinery) — worth deciding the seam early.
+2. **zkey provenance** — confirm `packages/zk-keys/v2` artifacts are the same
    trusted-setup build as the deployed verifier bytecode.
-7. **Repo layout** — new `curvy-rs-sdk` workspace path-depending on rs-core
+3. **Repo layout** — new `curvy-rs-sdk` workspace path-depending on rs-core
    (recommended), or grow inside rs-core?
-8. **Chain flavor** — vanilla 31337 anvil for the whole PoC (recommended), Gnosis-
+4. **Chain flavor** — vanilla 31337 anvil for the whole PoC (recommended), Gnosis-
    flavored later?
+5. **PIX (for the Appendix-3 PR / later phase)** — (a) the SSA-owned note
+   construction needs a spec'd `sharedSecret`/`ownerHash` convention the Exit can
+   compute; (b) which component owns share generation/verification plumbing —
+   hoprd session layer consuming `curvy-pix`, or a session-service sidecar; (c)
+   shares live over the BabyJubJub *subgroup scalar field* — pin the exact field
+   (vs BN254 Fr) in the appendix to avoid an implementation mismatch.
+6. **circom-witnesscalc compatibility** — does it handle `curvy-circuits`' custom
+   templates/bus types? (M1 spike answers this; flagging as the open technical
+   unknown it is.)
