@@ -320,6 +320,29 @@ requirement, so M1 *starts* with the calculator spike:
   SDK scaffolding exists.
 
 ### M2 — Curvy contracts on blokli's anvil; first tx through blokli
+> **✅ ENVIRONMENT LAYER DONE 2026-07-08** — `poc/blokli-env/` (commits `a991044`,
+> `849b51b`), reviewer-verified with a full independent down/up cycle. One anvil
+> (automine, 31337) carries the HOPR suite (deployed by the bloklid image's own
+> `blokli-contract-deployer`) AND the full Curvy Devenv graph (CreateX bootstrap
+> replayed + Ignition `blokli_anvil_poc`); bloklid `0.23.3` (digest-pinned prod
+> image) serves GraphQL on :8080; `curvy-init` (alloy) ports the two mandatory
+> init calls with read-back verification (root `3185275…50464` matches the SDK
+> canonical value; fee-note key == `DEV_FEE_COLLECTOR` in
+> `packages/services/common/src/fee-collector.ts`); `blokli-smoke` submits a
+> locally-signed raw tx through `sendTransactionSync(conf=1)` → CONFIRMED in ~5 ms,
+> RPC cross-checked; garbage submissions rejected cleanly. Review found+fixed one
+> flake: Ignition's 5-confirmation interference check raced against hardhat boot
+> time (fixed by `anvil_mine 6` pre-deploy). Operational notes: anvil must run
+> AUTOMINE (the HOPR deployer's alloy `.watch()` stalls under interval mining);
+> `deploy-curvy.sh` flips to interval mining only for the Ignition run;
+> anvil-localhost finality = 1 → use `conf=1`; Curvy deploy runs host-side (needs
+> v3-e2e's pnpm/hardhat toolchain); addresses hand off via
+> `curvy_deployed_addresses.json` (git-ignored, regenerated per run).
+>
+> **Remaining for M2 completion**: the SDK skeleton (`curvy-chain-api` traits,
+> blokli TxSubmitter + RPC adapters, `curvy-abi`) driving a self-shielded
+> aggregation end-to-end on this stack — the spike's proving pipeline + this
+> substrate are both ready for it.
 - Fork `blokli/tests/smoke/docker-compose.yml` (anvil as separate service, :8545
   exposed, HOPR deployer one-shot) and add a Curvy deploy one-shot running the
   existing Ignition `Devenv.ts` graph trimmed to vault + aggregator + 3 verifiers
