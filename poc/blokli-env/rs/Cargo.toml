@@ -1,0 +1,38 @@
+# Curvy x HOPR/blokli — M2 smoke tooling.
+#
+# DETACHED workspace (own [workspace] table) — deliberately NOT a member of the
+# rs-core root workspace, so this alloy/reqwest dependency set never touches
+# rs-core's exact-pinned, cargo-deny-gated policy. Mirrors spikes/m1-prove-verify.
+[package]
+name = "curvy-poc-m2"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "curvy-init"
+path = "src/bin/curvy-init.rs"
+
+[[bin]]
+name = "blokli-smoke"
+path = "src/bin/blokli-smoke.rs"
+
+[dependencies]
+# Poseidon + BN254 Fr for the per-token gas-fee merkle root (matches the SDK's
+# poseidon-lite `poseidon2` / @zk-kit IMT).
+curvy-core = { path = "../../../crates/core" }
+# EVM: provider/signer/contract/sol! + raw-tx build & 2718 encoding.
+alloy = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# GraphQL over HTTP to bloklid :8080 (TLS not needed for localhost).
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+hex = "0.4"
+
+[profile.release]
+opt-level = 2
