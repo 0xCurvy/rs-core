@@ -120,7 +120,7 @@ source. Curvy equivalent, minimal-first:
 ## 6. ✅ IMPLEMENTED 2026-07-09, reviewer-verified
 
 - **`curvy-bindings` 1.0.0** at `v3-e2e/packages/contracts/evm/bindings/curvy-bindings/`
-  (commit `5feb37ff` — ⚠️ sits UNPUSHED on the owner's `v3-backend`; pure adds,
+  (commit `90b8d4b5` — ⚠️ sits UNPUSHED on the owner's `v3-backend`; pure adds,
   22 files, zero modified tracked files). Mirror fidelity: lib.rs differs from
   hopr-bindings by ONE export line; `deploy_for_testing` at config.rs:406 (theirs:
   404); alloy pinned `=2.1.0` with their feature list; constants carry the CreateX
@@ -132,7 +132,7 @@ source. Curvy equivalent, minimal-first:
   Forge pinned 1.5.1 (1.2.1 emits obsolete codegen; owner's default restored).
   Consequence: PortalFactory's CREATE2 address moved (metadata is hashed) —
   `0x3c0C…8125` → `0x4106…2072`; nothing hardcodes it.
-- **Fork diff collapsed** (blokli @ `8dc5ceb`): 60-line source diff, Cargo.lock
+- **Fork diff collapsed** (blokli @ `22008f2`): 60-line source diff, Cargo.lock
   SHRANK ~1000 lines (single alloy-2.1 stack), the Curvy block now reads exactly
   like the HOPR deploy_for_testing lines above it. Ignition-JSON/TOML key sets
   byte-identical for downstream.

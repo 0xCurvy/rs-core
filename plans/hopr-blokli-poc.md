@@ -275,7 +275,7 @@ ENS/metadata handle resolution (pass pubkeys directly), sharded lean-client engi
 passkeys/EIP-712 UI flows (private-key login path only).
 
 ### M1 — A Rust proof accepted by Curvy's real verifier  ← the kill-shot test
-> **✅ PASSED 2026-07-08** — spike at `spikes/m1-prove-verify/` (commit `e1b9bd5`),
+> **✅ PASSED 2026-07-08** — spike at `spikes/m1-prove-verify/` (commit `7234735`),
 > independently re-verified by the orchestrator (fresh proof, all 6 checks).
 > Verdict: iden3 `circom-witnesscalc` **handles Curvy's bus-typed circom 2.2.0
 > circuits with full fidelity** — pure-Rust witness byte-identical to snarkjs
@@ -287,7 +287,7 @@ passkeys/EIP-712 UI flows (private-key login path only).
 > (evaluation graph) adopted**; option 3 unnecessary, option 2 remains a long-term
 > nicety.
 >
-> **Fast-follow ✅ DONE (same day, commits `cc84433`+`122cf8f`, reviewer-verified):**
+> **Fast-follow ✅ DONE (same day, commits `10f2b9c`+`4a0ded2`, reviewer-verified):**
 > all THREE deployed circuit configs now pass the identical pipeline —
 > aggregation(2,3,30): 31 public signals, graph `f757ba00…`, witness `5c8156e4…`;
 > pending-notes-commitment(5,30): 226k constraints, 1.1M-node graph, witness
@@ -320,8 +320,8 @@ requirement, so M1 *starts* with the calculator spike:
   SDK scaffolding exists.
 
 ### M2 — Curvy contracts on blokli's anvil; first tx through blokli
-> **✅ ENVIRONMENT LAYER DONE 2026-07-08** — `poc/blokli-env/` (commits `a991044`,
-> `849b51b`), reviewer-verified with a full independent down/up cycle. One anvil
+> **✅ ENVIRONMENT LAYER DONE 2026-07-08** — `poc/blokli-env/` (commits `467981e`,
+> `5842c6d`), reviewer-verified with a full independent down/up cycle. One anvil
 > (automine, 31337) carries the HOPR suite (deployed by the bloklid image's own
 > `blokli-contract-deployer`) AND the full Curvy Devenv graph (CreateX bootstrap
 > replayed + Ignition `blokli_anvil_poc`); bloklid `0.23.3` (digest-pinned prod
@@ -339,7 +339,7 @@ requirement, so M1 *starts* with the calculator spike:
 > v3-e2e's pnpm/hardhat toolchain); addresses hand off via
 > `curvy_deployed_addresses.json` (git-ignored, regenerated per run).
 >
-> **✅ M2 COMPLETE (same day, commit `b668017` — `sdk/` workspace), reviewer-verified
+> **✅ M2 COMPLETE (same day, commit `4bf522e` — `sdk/` workspace), reviewer-verified
 > on a fresh chain**: shield → commitPendingNotes (client plays batch-prover) →
 > aggregate to a second account **via blokli `sendTransactionSync`** → real ECDH
 > scan-discovery (decrypt + integrity gate) → **withdrawal stretch** to an EOA via
@@ -395,7 +395,7 @@ requirement, so M1 *starts* with the calculator spike:
 
 ### M5 — CurvyStrategy in MultiStrategy
 > **✅ PASSED 2026-07-09** — `hopr/` toolchain-quarantined workspace (commits
-> `bca9fb6` isolated sdk re-export + `dfd777f`), reviewer-verified live:
+> `0911bf3` isolated sdk re-export + `47e1942`), reviewer-verified live:
 > `CurvyStrategy impl hopr_strategy::Strategy` (git-pinned hoprnet @ `ac365f2b`,
 > hopr-strategy 0.19.2 + `runtime-tokio` — NOT on crates.io; hopr-api 1.14.0 is)
 > composed into the real `MultiStrategy` beside a heartbeat and a deliberately
@@ -432,7 +432,7 @@ requirement, so M1 *starts* with the calculator spike:
    deployer emits HOPR + Curvy (`[contracts]` + `[curvy_contracts]` TOML). The
    bloklid daemon itself stays the published image — only the deployer bin is
    forked, which cargo-builds without Nix.
-   > **✅ STANDALONE HALF DONE 2026-07-09** (commits `c5169a7`+`0924fb5`,
+   > **✅ STANDALONE HALF DONE 2026-07-09** (commits `7aba84b`+`a5ac4a4`,
    > reviewer-verified full regression): the Hardhat/Ignition leg is GONE —
    > `run.sh up` invokes zero node/pnpm/hardhat; `sdk/curvy-deployer` deploys +
    > inits the whole suite in ~2 s of alloy txs (library linking, proxies,
@@ -450,16 +450,16 @@ requirement, so M1 *starts* with the calculator spike:
    > `drain_indexer`; raise upstream with the transplant.
    >
    > **✅ FORK HALF DONE 2026-07-09, reviewer-verified** — `~/Projects/blokli`,
-   > branch `curvy-deployer`, base `7b2b00c` (main), fork commit `3a198a9`:
+   > branch `curvy-deployer`, base `7b2b00c` (main), fork commit `1cce846`:
    > **78-line upstream-shaped diff** adding `--with-curvy` / `--curvy-json-out` /
    > `--curvy-toml-out` (default off; stock path byte-unchanged bar a benign
    > `provider.clone()`). Transplant was as mechanical as designed: ZERO logic
    > changes to curvy-deployer — only its alloy range widened to `>=1,<3`
-   > (rs-core `f9d5b56`) so the meta resolves to blokli's 2.1 while alloy-core
+   > (rs-core `4e677eb`) so the meta resolves to blokli's 2.1 while alloy-core
    > 1.6.0 stays shared. Confirmed: bloklid's `Config` is
    > `#[serde(deny_unknown_fields)]` → `[curvy_contracts]` must live in its own
    > file (it does: `generated/curvy_contracts.toml`). `poc/blokli-env` now
-   > provisions HOPR + Curvy via ONE forked-deployer invocation (`09a03b5`;
+   > provisions HOPR + Curvy via ONE forked-deployer invocation (`0fb80d9`;
    > legacy path behind `CURVY_LEGACY_DEPLOY=1`). Full regression re-verified.
    > **Upstreaming blockers/notes**: curvy-deployer is an absolute-path dep —
    > publish to crates.io or git-host (+ curvy-abi, + curvy-core if the tree
@@ -468,7 +468,7 @@ requirement, so M1 *starts* with the calculator spike:
    > curvy-abi's alloy range if upstream dislikes the dual-meta lockfile.
    >
    > **✅ SINGLE-CONTAINER IMAGE DONE 2026-07-09** (`poc/blokli-anvil-image/`,
-   > commit `dfee547`, reviewer-verified): `curvy-bloklid-anvil` reproduces
+   > commit `05a24a8`, reviewer-verified): `curvy-bloklid-anvil` reproduces
    > blokli's bloklid-anvil UX with Curvy baked in — one `docker run` = anvil +
    > HOPR + Curvy (deployed+inited) + bloklid; ready in ~14 s, 337 MB, plain
    > Dockerfile (no Nix). Full regression passes against the container
