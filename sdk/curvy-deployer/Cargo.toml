@@ -35,7 +35,16 @@ curvy-abi = { path = "../curvy-abi" }
 # Only for the Poseidon gas-fee tree — behind the `gas-fee-tree` feature.
 curvy-core = { workspace = true, optional = true }
 
-alloy = { workspace = true }
+# NOTE (blokli-transplant compat, additive): NOT `{ workspace = true }` (which would
+# pin `^1`). A `>=1, <3` range lets this crate's `alloy` META resolve to whatever the
+# CONSUMING workspace already uses — 1.8.3 in the rs-core `sdk` workspace (held by its
+# committed Cargo.lock), 2.1.0 inside blokli (which pins alloy 2.1.0 via hopr-bindings).
+# The provider/network/rpc layer is the ONLY alloy-version-sensitive surface here and
+# it is source-stable across 1.8↔2.1; alloy-CORE (primitives/sol-types/json-abi) is a
+# single shared 1.6.0 in both worlds, so `curvy-abi`'s `sol!` types unify regardless.
+# This is what makes `deploy_and_init::<P: Provider>(&blokli_provider, ..)` type-check
+# against blokli's alloy-2.1 provider. See README §"Alloy version".
+alloy = { version = ">=1, <3", features = ["full"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
