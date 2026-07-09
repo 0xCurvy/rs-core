@@ -2,7 +2,7 @@
 /generated/*
 !/generated/.gitkeep
 
-# Curvy deploy output copied in by deploy-curvy.sh.
+# Curvy deploy output written by curvy-deployer (sdk/curvy-deployer).
 /curvy_deployed_addresses.json
 
 # Rust build artifacts (detached workspace).

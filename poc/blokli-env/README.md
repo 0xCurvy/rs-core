@@ -16,11 +16,17 @@ See `../../plans/hopr-blokli-poc.md` §4 (M2) for the milestone this delivers.
   │     ▲     ▲                          (Curvy events = later fork)         │
   └─────┼─────┼──────────────────────────────────────────────────────────────┘
         │     │
-  HOPR suite  Curvy v2 suite            host-side Rust (poc/blokli-env/rs):
-  (blokli-    (vault+aggregator+3         curvy-init    — the 2 mandatory post-deploy calls
-   contract-   verifiers+PortalFactory    blokli-smoke  — raw tx → sendTransactionSync → mined
-   deployer)   +Multicall3+ERC20+ENS)
+  HOPR suite  Curvy v2 suite            Rust deployers/tools:
+  (blokli-    (vault+aggregator+3         curvy-deployer (sdk/) — deploy + wire + init the
+   contract-   verifiers+PortalFactory                    whole Curvy suite in one binary
+   deployer)   +Multicall3+ERC20)         blokli-smoke  (rs/)  — raw tx → sendTransactionSync
 ```
+
+> **Curvy is now deployed + initialised entirely by the Rust `sdk/curvy-deployer`** —
+> no node/pnpm/hardhat/v3-e2e toolchain at deploy time. The old host-side
+> `deploy-curvy.sh` (Hardhat/Ignition) + the separate `curvy-init` bin were replaced by
+> that one binary (which vendors its own creation bytecode + ABIs). The ENS stack is
+> skipped (the PoC passes pubkeys directly); see `sdk/curvy-deployer/README.md`.
 
 ## What is HOPR-side vs Curvy-side
 
@@ -29,8 +35,7 @@ See `../../plans/hopr-blokli-poc.md` §4 (M2) for the milestone this delivers.
 | anvil dev chain | shared | foundry image, `--block-time 1`, chain id **31337** (both worlds' default) |
 | HOPR contract suite | HOPR | `blokli-contract-deployer` (shipped **inside** the bloklid image) — one-shot `hopr-deploy`; emits the `[contracts]` TOML that bloklid consumes |
 | bloklid indexer + GraphQL | HOPR | production image, `network = "anvil-localhost"`, SQLite, single container |
-| Curvy v2 contracts | Curvy | `deploy-curvy.sh` — CreateX bootstrap + Hardhat Ignition `Devenv.ts` from the v3-e2e checkout |
-| Curvy on-chain init | Curvy | `rs/curvy-init` — `setPerTokenGasFees` + `setFeeNotePublicKey`, verified by read-back |
+| Curvy v2 contracts + init | Curvy | **`sdk/curvy-deployer`** (alloy) — CreateX bootstrap + deploy/wire the whole suite + `setPerTokenGasFees`/`setFeeNotePublicKey` + read-back, all in one Rust binary (vendored bytecode/ABIs; v3-e2e not read) |
 | tx-submission smoke | Curvy | `rs/blokli-smoke` — the exact `TxSubmitter` path (raw tx → `sendTransactionSync`) |
 
 blokli's indexer is hardcoded to the HOPR contract set; it neither needs nor sees
@@ -47,20 +52,22 @@ stance in the plan (§1.3, §2, risk #3).
 
 ## Reproduce
 
-Prereqs on host: **docker**, **foundry** (`cast`/`forge`/`anvil`), **node** + **pnpm**
-(with `/Users/vanja/Projects/v3-e2e` deps already installed), **cargo**, **jq**, **curl**.
+Prereqs on host: **docker**, **foundry** (`cast`/`forge`/`anvil`), **cargo**, **jq**,
+**curl**. (No node/pnpm/hardhat/v3-e2e toolchain — Curvy is deployed by the Rust
+`sdk/curvy-deployer`, which vendors its own creation bytecode + ABIs.)
 
 ```bash
 cd /Users/vanja/Projects/rs-core/poc/blokli-env
-./run.sh up          # full stack + all checks   (≈8–12 min cold, ≈3–4 min warm)
+./run.sh up          # full stack + all checks   (≈6–8 min cold, ≈2–3 min warm)
 ./run.sh smoke       # re-run blokli-smoke only
-./run.sh init        # re-run curvy-init only
+./run.sh deploy      # re-run the Curvy deploy+init only (curvy-deployer)
 ./run.sh logs        # follow bloklid logs
 ./run.sh down        # tear down + wipe volumes
 ```
 
 `run.sh up` is idempotent. Cold time is dominated by the first foundry-image pull
-(~200 MB) + the Rust build (~1 min) + the Ignition deploy (~2–4 min on 1s blocks).
+(~200 MB) + the Rust build (~1 min). The Curvy deploy is a few seconds of direct alloy
+txs under automine (no more Ignition confirmation waits on 1s blocks).
 
 ### What `run.sh up` does, in order
 1. `docker compose up -d anvil`, wait healthy.
@@ -70,9 +77,12 @@ cd /Users/vanja/Projects/rs-core/poc/blokli-env
 3. `docker compose run --rm seed-tx` — one plain tx so bloklid's
    `verify_rpc_capabilities()` has a transaction to trace (mirrors blokli's smoke compose).
 4. `docker compose up -d bloklid`, poll `/readyz` until `"status":"ready"`.
-5. `./deploy-curvy.sh` — CreateX bootstrap + Ignition `Devenv.ts`; copies
-   `deployed_addresses.json` → `curvy_deployed_addresses.json`.
-6. `rs/curvy-init` — the two mandatory calls + read-back verification.
+5. `sdk/curvy-deployer` — CreateX bootstrap + deploy/wire the whole Curvy suite + the
+   two mandatory init calls + read-back; writes `curvy_deployed_addresses.json` (and a
+   `generated/curvy_contracts.toml` `[curvy_contracts]` section).
+6. **drain the indexer** — the deployer bursts ~24 txs under automine, briefly
+   outrunning bloklid's indexer; run.sh mines blocks one-per-second until `/readyz` is
+   ready again (empty blocks are harmless; each later SDK/smoke tx keeps it fed).
 7. `rs/blokli-smoke` — chainInfo + raw tx through `sendTransactionSync` + negatives.
 
 ## Image provenance
@@ -150,12 +160,14 @@ negative: "0xdeadbeef" → RpcError "Failed to decode transaction" in 1.1 ms   (
 - **HOPR deploy uses the image's own `blokli-contract-deployer`**, run as a one-shot,
   rather than reimplementing HOPR deployment. It emits the `[contracts]` section the
   bloklid config needs; run.sh assembles `config/bloklid.base.toml` + that section.
-- **`CURVY_ENVIRONMENT=local CURVY_NETWORK=anvil`** are set for the Ignition deploy so
-  the module's parameter resolver reads `ignition/{network,environment}-parameters.json`
-  under keys `anvil`/`local` (the requested `--deployment-id blokli_anvil_poc` is not a
-  valid `environment_network` pair on its own).
-- **Detached Rust workspace** (`rs/`, own `[workspace]`) path-depending on `curvy-core`
-  — never touches rs-core's root manifest / cargo-deny policy (mirrors `spikes/m1-*`).
+- **Curvy deploy is pure Rust (`sdk/curvy-deployer`) under automine.** Direct alloy
+  deploys mine per-tx and `get_receipt` returns after 1 confirmation, so the old
+  Hardhat/Ignition machinery is gone: **no interval-mining toggle, no `anvil_mine 6`
+  5-confirmation dance, no `CURVY_ENVIRONMENT`/`CURVY_NETWORK` parameter-resolver env**.
+  The deploy config is `CurvyDeployConfig::local()` (the ignition `"local"`/`"anvil"`
+  values, baked in). anvil stays on automine the whole time.
+- **`blokli-smoke` stays in the detached `rs/` workspace** (own `[workspace]`), which
+  no longer needs `curvy-core` (the gas-fee-tree logic moved into `curvy-deployer`).
 
 ## Known limitations / open issues for the SDK e2e (M2 body)
 
@@ -169,9 +181,15 @@ negative: "0xdeadbeef" → RpcError "Failed to decode transaction" in 1.1 ms   (
    goes through direct RPC, so this does not affect Curvy correctness — but the SDK's
    sync loop must tolerate index-ahead-of-root on 1s blocks.
 4. **foundry image tag is mutable** (`latest`). Pin by digest for CI reproducibility.
-5. **Full `Devenv.ts` graph is deployed** (incl. PortalFactory/CreateX/ENS), not the
-   trimmed vault+aggregator+verifiers set the plan floats — chosen to avoid modifying
-   the read-only v3-e2e module. Deploy is correspondingly a bit slower.
-6. **Curvy deploy runs from the host** (needs the v3-e2e pnpm/hardhat toolchain), not
-   from a container. A later single-container UX could extend `blokli-contract-deployer`
-   (plan M2 note) — out of scope here.
+5. **Indexer drain after the deploy burst**: `curvy-deployer` mines ~24 txs under
+   automine, briefly outrunning bloklid's indexer (it advances a few blocks per new-head
+   event, then stalls when the chain freezes). `run.sh` mines blocks one-per-second
+   until `/readyz` is ready. Alternative: run the deploy under `--block-time`. This is
+   the deploy-time face of plan risk #8 (root/index height race).
+6. **ENS stack skipped** by `curvy-deployer` (`LocalENSRegistry`/`SimpleOffchainResolver`
+   /`LocalUniversalResolver`) — the PoC passes pubkeys directly and no consumer reads
+   those keys. PortalFactory/CreateX/Multicall3/ERC20Mock are all still deployed.
+7. **Single-container UX**: `curvy-deployer` is host-run cargo for now; its end state is
+   a transplant into blokli's own `blokli-contract-deployer` (one deployer for HOPR +
+   Curvy). It is already lib-first for exactly that — see
+   `sdk/curvy-deployer/README.md` §"Integrating into blokli-contract-deployer".

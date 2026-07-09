@@ -25,11 +25,10 @@ services:
       - "10"
       - "--balance"
       - "10000"
-      # AUTOMINE (no --block-time): the HOPR blokli-contract-deployer's alloy
-      # `.watch()` stalls under interval mining after its first tx; automine mines
-      # per-tx and it completes. deploy-curvy.sh flips to `evm_setIntervalMining 1`
-      # for the Hardhat Ignition run (which needs progressing blocks for its
-      # confirmation waits) and restores automine afterwards.
+      # AUTOMINE (no --block-time): both deployers use alloy — the HOPR
+      # blokli-contract-deployer's `.watch()` and curvy-deployer's `.get_receipt()`
+      # each need their tx mined, and automine mines per-tx. (The old Hardhat/Ignition
+      # interval-mining toggle is GONE now that Curvy deploys via alloy under automine.)
       # chain id defaults to 31337 (matches both HOPR anvil-localhost and Curvy localnet).
     ports:
       - "8545:8545"

@@ -3,6 +3,11 @@
 # DETACHED workspace (own [workspace] table) — deliberately NOT a member of the
 # rs-core root workspace, so this alloy/reqwest dependency set never touches
 # rs-core's exact-pinned, cargo-deny-gated policy. Mirrors spikes/m1-prove-verify.
+#
+# NOTE: the former `curvy-init` bin (the two mandatory post-deploy calls +
+# read-back) has been FOLDED into `sdk/curvy-deployer` (which now deploys AND
+# initialises the whole suite in one Rust binary). Only the blokli tx-submission
+# smoke remains here.
 [package]
 name = "curvy-poc-m2"
 version = "0.0.0"
@@ -13,17 +18,10 @@ publish = false
 [workspace]
 
 [[bin]]
-name = "curvy-init"
-path = "src/bin/curvy-init.rs"
-
-[[bin]]
 name = "blokli-smoke"
 path = "src/bin/blokli-smoke.rs"
 
 [dependencies]
-# Poseidon + BN254 Fr for the per-token gas-fee merkle root (matches the SDK's
-# poseidon-lite `poseidon2` / @zk-kit IMT).
-curvy-core = { path = "../../../crates/core" }
 # EVM: provider/signer/contract/sol! + raw-tx build & 2718 encoding.
 alloy = { version = "1", features = ["full"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
