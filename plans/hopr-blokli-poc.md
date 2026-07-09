@@ -432,6 +432,23 @@ requirement, so M1 *starts* with the calculator spike:
    deployer emits HOPR + Curvy (`[contracts]` + `[curvy_contracts]` TOML). The
    bloklid daemon itself stays the published image — only the deployer bin is
    forked, which cargo-builds without Nix.
+   > **✅ STANDALONE HALF DONE 2026-07-09** (commits `c5169a7`+`0924fb5`,
+   > reviewer-verified full regression): the Hardhat/Ignition leg is GONE —
+   > `run.sh up` invokes zero node/pnpm/hardhat; `sdk/curvy-deployer` deploys +
+   > inits the whole suite in ~2 s of alloy txs (library linking, proxies,
+   > CreateX replay all clean; PortalFactory address byte-identical to the old
+   > Ignition deploy). Artifacts vendored + sha-pinned with a refresh script;
+   > interval-mining/HHE10402 machinery deleted (automine throughout). Transplant
+   > readiness verified: API is provider-generic `SolCall`-only (no
+   > alloy-contract), `--no-default-features` builds with ZERO arkworks (gas-fee
+   > root suppliable via config), `to_toml()` emits `[curvy_contracts]`; blokli is
+   > alloy-meta 2.1.0 vs our 1.8.3 but both resolve alloy-core 1.6.0 → only the
+   > provider layer shifts at transplant. Fork-diff recipe:
+   > `sdk/curvy-deployer/README.md` §"Integrating into blokli-contract-deployer".
+   > New known issue: a fast automine tx burst can stall bloklid's indexer until a
+   > new head arrives (deploy-time face of risk 8) — worked around by run.sh's
+   > `drain_indexer`; raise upstream with the transplant. REMAINING: the actual
+   > blokli fork calling the lib.
 1. **Blokli indexes Curvy events** (decision: later, not now — the existing Curvy
    indexer stays in the interim). When it happens: topics + handler + DB entity +
    migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
