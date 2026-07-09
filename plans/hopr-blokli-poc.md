@@ -447,8 +447,25 @@ requirement, so M1 *starts* with the calculator spike:
    > `sdk/curvy-deployer/README.md` §"Integrating into blokli-contract-deployer".
    > New known issue: a fast automine tx burst can stall bloklid's indexer until a
    > new head arrives (deploy-time face of risk 8) — worked around by run.sh's
-   > `drain_indexer`; raise upstream with the transplant. REMAINING: the actual
-   > blokli fork calling the lib.
+   > `drain_indexer`; raise upstream with the transplant.
+   >
+   > **✅ FORK HALF DONE 2026-07-09, reviewer-verified** — `~/Projects/blokli`,
+   > branch `curvy-deployer`, base `7b2b00c` (main), fork commit `3a198a9`:
+   > **78-line upstream-shaped diff** adding `--with-curvy` / `--curvy-json-out` /
+   > `--curvy-toml-out` (default off; stock path byte-unchanged bar a benign
+   > `provider.clone()`). Transplant was as mechanical as designed: ZERO logic
+   > changes to curvy-deployer — only its alloy range widened to `>=1,<3`
+   > (rs-core `f9d5b56`) so the meta resolves to blokli's 2.1 while alloy-core
+   > 1.6.0 stays shared. Confirmed: bloklid's `Config` is
+   > `#[serde(deny_unknown_fields)]` → `[curvy_contracts]` must live in its own
+   > file (it does: `generated/curvy_contracts.toml`). `poc/blokli-env` now
+   > provisions HOPR + Curvy via ONE forked-deployer invocation (`09a03b5`;
+   > legacy path behind `CURVY_LEGACY_DEPLOY=1`). Full regression re-verified.
+   > **Upstreaming blockers/notes**: curvy-deployer is an absolute-path dep —
+   > publish to crates.io or git-host (+ curvy-abi, + curvy-core if the tree
+   > feature is wanted) before any PR; frame as "optional Curvy co-deployment
+   > for local/dev"; report the indexer burst-stall alongside; offer to widen
+   > curvy-abi's alloy range if upstream dislikes the dual-meta lockfile.
 1. **Blokli indexes Curvy events** (decision: later, not now — the existing Curvy
    indexer stays in the interim). When it happens: topics + handler + DB entity +
    migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
