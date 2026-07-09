@@ -30,6 +30,13 @@ ADDRESSES="$HERE/curvy_deployed_addresses.json"
 BLOKLI_FORK="${BLOKLI_FORK:-/Users/vanja/Projects/blokli}"
 FORK_DEPLOYER="$BLOKLI_FORK/target/release/blokli-contract-deployer"
 
+# ── Single-container image path (ADDITIVE; default compose path is unchanged) ─────────
+# `image-up` runs ONE `curvy-bloklid-anvil` container (anvil + HOPR + Curvy + bloklid)
+# instead of the multi-service compose. See ../blokli-anvil-image/README.md.
+IMAGE_NAME="${IMAGE_NAME:-curvy-bloklid-anvil:latest}"
+IMAGE_CONTAINER="${IMAGE_CONTAINER:-curvy-bloklid-anvil}"
+IMAGE_DIR="$HERE/../blokli-anvil-image"
+
 # Build the forked deployer bin on the host if missing (blokli pins rustc 1.96 via its
 # rust-toolchain.toml; rustup selects it automatically inside $BLOKLI_FORK).
 build_fork_deployer() {
@@ -121,6 +128,62 @@ wait_ready() {
   exit 1
 }
 
+# ── image-up / image-down: the SINGLE-CONTAINER alternative bring-up ─────────────────
+# Runs ONE `curvy-bloklid-anvil` container (its entrypoint deploys HOPR + Curvy and
+# starts anvil + bloklid), then copies the Curvy addresses to where the SDK expects
+# them (poc/blokli-env/curvy_deployed_addresses.json). Additive: does not touch the
+# compose services or their generated/config.toml.
+wait_ready_image() {
+  echo "==> waiting for bloklid /readyz (single container)..."
+  for _ in $(seq 1 150); do
+    if curl -sf "$BLOKLI_URL/readyz" 2>/dev/null | grep -q '"status":"ready"'; then
+      echo "    bloklid ready"; return 0
+    fi
+    sleep 2
+  done
+  echo "FATAL: bloklid did not become ready; recent container logs:" >&2
+  docker logs --tail 60 "$IMAGE_CONTAINER" >&2 || true
+  exit 1
+}
+
+image_up() {
+  mkdir -p generated
+  if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "==> image $IMAGE_NAME not found; building it ($IMAGE_DIR/build.sh)"
+    IMAGE="$IMAGE_NAME" "$IMAGE_DIR/build.sh"
+  fi
+  echo "==> starting single container $IMAGE_CONTAINER (anvil+HOPR+Curvy+bloklid)"
+  docker rm -f "$IMAGE_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$IMAGE_CONTAINER" \
+    -p 8545:8545 -p 8080:8080 \
+    -v "$HERE/generated:/shared" \
+    "$IMAGE_NAME" >/dev/null
+  wait_ready_image
+  # Hand the Curvy addresses to the SDK's default path (mount wrote them into generated/).
+  if [ -f generated/curvy_deployed_addresses.json ]; then
+    cp generated/curvy_deployed_addresses.json "$ADDRESSES"
+    echo "    copied Curvy addresses -> $ADDRESSES"
+  else
+    echo "FATAL: generated/curvy_deployed_addresses.json missing after readiness" >&2
+    docker logs --tail 60 "$IMAGE_CONTAINER" >&2 || true
+    exit 1
+  fi
+  echo "==> blokli-smoke (raw tx through sendTransactionSync + negatives)"
+  ( cd rs && cargo run --release --quiet --bin blokli-smoke )
+  echo
+  echo "==> single-container stack is UP and all checks passed."
+  echo "    bloklid GraphQL:   $BLOKLI_URL/graphql"
+  echo "    anvil RPC:         http://127.0.0.1:8545"
+  echo "    run the SDK e2e:   (cd ../../sdk && cargo run --release -p curvy-e2e)"
+}
+
+image_down() {
+  echo "==> tearing down single container $IMAGE_CONTAINER"
+  docker rm -f -v "$IMAGE_CONTAINER" >/dev/null 2>&1 || true   # -v drops the anon /data volume
+  rm -f "$ADDRESSES" generated/curvy_deployed_addresses.json generated/curvy_contracts.toml
+  echo "    done (compose path untouched)"
+}
+
 case "${1:-up}" in
   up)
     mkdir -p generated
@@ -168,5 +231,10 @@ case "${1:-up}" in
   smoke)  ( cd rs && cargo run --release --quiet --bin blokli-smoke ) ;;
   deploy) deploy_curvy ;;
   logs)   $COMPOSE logs -f bloklid ;;
-  *) echo "usage: $0 [up|down|smoke|deploy|logs]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…)" >&2; exit 1 ;;
+
+  image-up)   image_up ;;
+  image-down) image_down ;;
+  image-logs) docker logs -f "$IMAGE_CONTAINER" ;;
+
+  *) echo "usage: $0 [up|down|smoke|deploy|logs|image-up|image-down|image-logs]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…)" >&2; exit 1 ;;
 esac
