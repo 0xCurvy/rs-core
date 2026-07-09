@@ -1,0 +1,45 @@
+[package]
+name = "curvy-deployer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Deploys + initialises the entire Curvy v2 suite against any RPC from ONE Rust
+# binary — the Rust replacement for deploy-curvy.sh's Hardhat/Ignition leg + the
+# separate curvy-init bin. Mirrors how blokli's own `blokli-contract-deployer`
+# works (deploy → wire → emit an addresses artifact), and is LIB-FIRST so a fork of
+# blokli's deployer can call `deploy_curvy_suite()` after its own HOPR deploy.
+#
+# See README.md §"Integrating into blokli-contract-deployer".
+
+[lib]
+name = "curvy_deployer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "curvy-deployer"
+path = "src/bin/curvy-deployer.rs"
+
+[features]
+default = ["gas-fee-tree"]
+# The ONE heavy dependency the blokli fork inherits: curvy-core (arkworks) powers the
+# depth-6 Poseidon2 commitment-gas-fee tree. Isolated in `src/gasfee.rs`. Build with
+# `--no-default-features` to drop arkworks entirely and instead pass a precomputed
+# `commitment_fee_root` in `GasFeesInit` (see CurvyDeployConfig).
+gas-fee-tree = ["dep:curvy-core"]
+
+[dependencies]
+# Reused vendored bindings (vault / aggregator / portalFactory typed calls + events).
+curvy-abi = { path = "../curvy-abi" }
+# Only for the Poseidon gas-fee tree — behind the `gas-fee-tree` feature.
+curvy-core = { workspace = true, optional = true }
+
+alloy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+anyhow = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { workspace = true }
