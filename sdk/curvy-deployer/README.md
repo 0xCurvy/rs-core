@@ -1,5 +1,17 @@
 # curvy-deployer
 
+> **SUPERSEDED BY `curvy-bindings`** (2026-07-09, per `plans/blokli-native-integration.md`):
+> the deploy/wire/init/read-back logic in this crate has been ported 1:1 into
+> `CurvyContractInstances::deploy_for_testing` in the **`curvy-bindings`** crate
+> (`v3-e2e` monorepo, `packages/contracts/evm/bindings/curvy-bindings/` — the structural
+> mirror of hoprnet's `hopr-bindings`, with committed `forge bind --alloy` codegen and a
+> bytecode parity gate against this crate's vendored Hardhat artifacts). The blokli fork
+> now depends on `curvy-bindings`, not on this crate. This crate is kept (NOT deleted)
+> because the legacy paths still use it: `poc/blokli-env/run.sh deploy`,
+> `CURVY_LEGACY_DEPLOY=1`, and the `gas-fee-tree` feature remains the reference
+> implementation for recomputing the commitment-gas-fee root. No new consumers should
+> depend on it.
+
 Deploy **and** initialise the entire Curvy v2 contract suite from ONE Rust binary,
 against any RPC. This replaces `poc/blokli-env/deploy-curvy.sh`'s Hardhat/Ignition leg
 **and** the separate `curvy-init` bin — so `poc/blokli-env/run.sh up` needs **no

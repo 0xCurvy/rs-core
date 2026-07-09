@@ -22,17 +22,19 @@ FROM ghcr.io/foundry-rs/foundry:latest AS foundry-src
 # anvil + cast are real files under /usr/local/bin (glibc-dynamic, Ubuntu 22.04).
 
 # ── builder: compile the FORKED blokli-contract-deployer (linux/glibc) ───────────────
-# The fork path-depends on rs-core/sdk/curvy-deployer; build.sh stages BOTH repos into
-# the context (blokli/ + rs-core/) and rewrites the fork's path dep to /build/rs-core/…
-# so the two-repo build resolves without touching the real fork. With
-# default-features=false the deployer drops arkworks (no curvy-core); only curvy-abi +
-# curvy-types come along. `--locked` uses blokli's committed Cargo.lock.
+# The fork path-depends on the self-contained `curvy-bindings` crate (the
+# hopr-bindings mirror in the v3-e2e contracts package; supersedes the earlier
+# rs-core/sdk/curvy-deployer dep). build.sh stages the fork + ONLY that crate into the
+# context (blokli/ + curvy-bindings/) and rewrites the fork's path dep to
+# /build/curvy-bindings so the build resolves without touching the real fork. The
+# crate carries no heavy crypto (arkworks never enters the tree) and pins alloy
+# =2.1.0 like hopr-bindings. `--locked` uses blokli's committed Cargo.lock.
 FROM rust:1.96-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake clang libclang-dev pkg-config perl git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY rs-core /build/rs-core
-COPY blokli  /build/blokli
+COPY curvy-bindings /build/curvy-bindings
+COPY blokli         /build/blokli
 WORKDIR /build/blokli
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/blokli/target \

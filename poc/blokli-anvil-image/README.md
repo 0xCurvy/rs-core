@@ -64,25 +64,25 @@ version skew. Multi-arch (linux/amd64) is future work — this builds for the ho
 
 ## The two-repo build-context problem, and the solution
 
-The blokli fork's `bloklid` crate path-depends on **`rs-core/sdk/curvy-deployer`** via an
-**absolute** path (`/Users/vanja/Projects/rs-core/sdk/curvy-deployer`). A Docker build
-context is a single tree, so the fork alone cannot resolve that dep.
+The blokli fork's `bloklid` crate path-depends on the **`curvy-bindings`** crate (the
+hopr-bindings mirror in the v3-e2e contracts package) via an **absolute** path
+(`/Users/vanja/Projects/v3-e2e/packages/contracts/evm/bindings/curvy-bindings`;
+supersedes the earlier `rs-core/sdk/curvy-deployer` dep). A Docker build context is a
+single tree, so the fork alone cannot resolve that dep.
 
-**Solution — chosen: staging (option a).** `build.sh` rsyncs **both** repos (source only:
-`--exclude .git target *.zkey *.wtns *.graph.bin *.wasm node_modules`) into a clean
+**Solution — chosen: staging (option a).** `build.sh` rsyncs the fork plus ONLY the
+`curvy-bindings` crate directory (self-contained: committed forge-bind codegen +
+constants + the unlinked-aggregator hex; `--exclude target .forge`) into a clean
 context, then rewrites the **staged** fork's path dep to the context-relative
-`/build/rs-core/sdk/curvy-deployer` (the **real fork is never touched** — it stays the
-78-line deployer diff). The Dockerfile `COPY`ies `blokli/ → /build/blokli` and
-`rs-core/ → /build/rs-core` and builds `cargo build --release --locked -p bloklid
---bin blokli-contract-deployer`.
+`/build/curvy-bindings` (the **real fork is never touched**). The Dockerfile `COPY`ies
+`blokli/ → /build/blokli` and `curvy-bindings/ → /build/curvy-bindings` and builds
+`cargo build --release --locked -p bloklid --bin blokli-contract-deployer`.
 
-What actually gets compiled from rs-core: because the fork pins
-`curvy-deployer { default-features = false }`, the **arkworks gas-fee-tree feature is
-off**, so `curvy-core` never enters the tree — only **`curvy-abi` + `curvy-types`** come
-along (confirmed: blokli's committed `Cargo.lock` contains `curvy-deployer`, `curvy-abi`,
-`curvy-types` but **not** `curvy-core`/`curvy-prover`). The full rs-core source is still
-staged so cargo's workspace-membership validation resolves cleanly; `--locked` uses
-blokli's committed lock, so the build is reproducible.
+What actually gets compiled beyond blokli: just `curvy-bindings` — it carries **no
+heavy crypto** (the commitment-gas-fee root is a precomputed constant; arkworks never
+enters the tree) and pins alloy `=2.1.0` exactly like `hopr-bindings`, so no second
+alloy stack exists in the lockfile either. `--locked` uses blokli's committed lock, so
+the build is reproducible.
 
 > Alternatives considered: (b) context = the whole `~/Projects` with a `.dockerignore` —
 > rejected (huge, and named/extra build contexts don't honor `.dockerignore`);
@@ -144,10 +144,11 @@ this image), `CURVY_SHARED_DIR` (/shared).
 
 ## What a future Nix-native / upstream version needs
 
-- **Publish `curvy-deployer`** (+ `curvy-abi`, + `curvy-core` if the `gas-fee-tree`
-  feature is wanted) to crates.io or a git host. Then blokli's `bloklid/Cargo.toml`
-  drops the absolute `path` dep, and the whole two-repo staging dance disappears — the
-  fork becomes a normal git/crates dep and the image can be a pure blokli build.
+- **Publish `curvy-bindings`** to crates.io or a git host (hosting is postponed by
+  owner decision; it is the final step). Then blokli's `bloklid/Cargo.toml` drops the
+  absolute `path` dep, and the whole staging dance disappears — the fork becomes a
+  normal git/crates dep (exactly the hopli / hopr-bindings pattern) and the image can
+  be a pure blokli build.
 - **Nix-native image**: extend blokli's `nix build .#docker-bloklid-anvil-…` to build the
   `--with-curvy` deployer and bake it in — then bloklid can stay on its own musl/Nix base
   (no debian, no `COPY`-out) and anvil/cast come from nixpkgs (musl-compatible) instead of
@@ -165,6 +166,6 @@ this image), `CURVY_SHARED_DIR` (/shared).
 2. **foundry tag is mutable** (`latest`). Pin by digest for CI reproducibility (the
    bloklid base already is digest-pinned).
 3. **Absolute path dep in the fork** → the Dockerfile/build.sh are host-path-aware
-   (`RS_CORE`, `BLOKLI_FORK` overridable). Resolved cleanly for local builds; the upstream
-   fix is publishing `curvy-deployer` (above).
+   (`V3_E2E`, `BLOKLI_FORK` overridable). Resolved cleanly for local builds; the upstream
+   fix is publishing `curvy-bindings` (above).
 4. **Single-arch** (host arch only) for now.

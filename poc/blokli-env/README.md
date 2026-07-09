@@ -17,26 +17,38 @@ See `../../plans/hopr-blokli-poc.md` §4 (M2) for the milestone this delivers.
   └─────┼─────┼──────────────────────────────────────────────────────────────┘
         │     │
   HOPR suite  Curvy v2 suite            Rust deployers/tools:
-  (blokli-    (vault+aggregator+3         curvy-deployer (sdk/) — deploy + wire + init the
-   contract-   verifiers+PortalFactory                    whole Curvy suite in one binary
-   deployer)   +Multicall3+ERC20)         blokli-smoke  (rs/)  — raw tx → sendTransactionSync
+  (blokli-    (vault+aggregator+3         curvy-bindings (v3-e2e contracts pkg) — the
+   contract-   verifiers+PortalFactory      hopr-bindings mirror whose deploy_for_testing
+   deployer)   +Multicall3+ERC20)           deploys+wires+inits the whole Curvy suite
+                                          blokli-smoke  (rs/)  — raw tx → sendTransactionSync
 ```
 
 > **BOTH suites are now deployed by ONE binary: a fork of blokli's own
 > `blokli-contract-deployer`.** `run.sh up` builds that fork on the host and runs it once
 > with `--with-curvy`; it deploys the HOPR suite (stock `ContractInstances::deploy_for_testing`)
-> then calls the Curvy `sdk/curvy-deployer` lib on the SAME provider/signer, emitting the
-> HOPR `[contracts]` config, Curvy's Ignition JSON, and a `[curvy_contracts]` TOML — no
-> node/pnpm/hardhat/v3-e2e toolchain at deploy time. The old two-step flow (image
-> `blokli-contract-deployer` for HOPR + host `sdk/curvy-deployer` bin for Curvy) is kept
-> behind `CURVY_LEGACY_DEPLOY=1`. The ENS stack is skipped (the PoC passes pubkeys
-> directly); see `sdk/curvy-deployer/README.md`.
+> then calls `curvy_bindings::config::CurvyContractInstances::deploy_for_testing` on the
+> SAME provider/signer (the `curvy-bindings` crate is the structural mirror of
+> `hopr-bindings`, living in the v3-e2e monorepo at
+> `packages/contracts/evm/bindings/curvy-bindings/`; it supersedes the
+> `sdk/curvy-deployer` lib for this path), emitting the HOPR `[contracts]` config,
+> Curvy's Ignition JSON, and a `[curvy_contracts]` TOML — no node/pnpm/hardhat toolchain
+> at deploy time. The old two-step flow (image `blokli-contract-deployer` for HOPR +
+> host `sdk/curvy-deployer` bin for Curvy) is kept behind `CURVY_LEGACY_DEPLOY=1`. The
+> ENS stack is skipped (the PoC passes pubkeys directly). NOTE: with curvy-bindings the
+> deterministic PortalFactory CREATE2 address is
+> `0x410607362be76701CcE07841281e7352E63f2072` (not the Hardhat-era `0x3c0C…8125`):
+> CREATE2 hashes the full init code incl. the solc CBOR metadata blob, which differs
+> between the Hardhat and forge builds of the same source; the executable bytecode is
+> byte-identical (see the parity gate in the curvy-bindings README). No consumer
+> hardcodes the address — it flows through the Ignition JSON.
 >
 > **Fork provenance:** `/Users/vanja/Projects/blokli`, branch `curvy-deployer`, forked
 > from `hoprnet/blokli` `main` @ `7b2b00c` ("feat: Add deployment annotations to
-> helm-chart (#397)"). The fork adds `--with-curvy` + a `curvy-deployer` path dependency
-> to `bloklid/src/bin/blokli-contract-deployer.rs`; nothing else changes. Override its
-> location with `BLOKLI_FORK=…`.
+> helm-chart (#397)"). The fork adds `--with-curvy` + a `curvy-bindings` path dependency
+> (v3-e2e `packages/contracts/evm/bindings/curvy-bindings`, interim until the crate is
+> hosted) to `bloklid/src/bin/blokli-contract-deployer.rs`; nothing else changes — the
+> Curvy block reads exactly like the HOPR `deploy_for_testing` lines above it. Override
+> the fork location with `BLOKLI_FORK=…`.
 
 ## What is HOPR-side vs Curvy-side
 
@@ -45,7 +57,7 @@ See `../../plans/hopr-blokli-poc.md` §4 (M2) for the milestone this delivers.
 | anvil dev chain | shared | foundry image, `--block-time 1`, chain id **31337** (both worlds' default) |
 | HOPR contract suite | HOPR | **forked** `blokli-contract-deployer` (host build) — stock `ContractInstances::deploy_for_testing`; emits the `[contracts]` TOML that bloklid consumes |
 | bloklid indexer + GraphQL | HOPR | production image, `network = "anvil-localhost"`, SQLite, single container |
-| Curvy v2 contracts + init | Curvy | the **same** forked deployer's `--with-curvy` path calls **`sdk/curvy-deployer`** (alloy) — CreateX bootstrap + deploy/wire the whole suite + `setPerTokenGasFees`/`setFeeNotePublicKey` + read-back (vendored bytecode/ABIs; v3-e2e not read) |
+| Curvy v2 contracts + init | Curvy | the **same** forked deployer's `--with-curvy` path calls **`curvy-bindings`**' `CurvyContractInstances::deploy_for_testing` — CreateX bootstrap + deploy/wire the whole suite + `setPerTokenGasFees`/`setFeeNotePublicKey` + read-back (committed forge-bind codegen, parity-gated against the Hardhat artifacts) |
 | tx-submission smoke | Curvy | `rs/blokli-smoke` — the exact `TxSubmitter` path (raw tx → `sendTransactionSync`) |
 
 blokli's indexer is hardcoded to the HOPR contract set; it neither needs nor sees
