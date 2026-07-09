@@ -423,6 +423,15 @@ requirement, so M1 *starts* with the calculator spike:
   abort a sibling strategy (isolation test).
 
 ### Phase 2+ (post-PoC, seams already in place)
+0. **Curvy deployment inside `blokli-contract-deployer`** (decision 2026-07-09:
+   integrate from day one). Path: `sdk/curvy-deployer` is built LIB-FIRST (pure-Rust
+   deploy of the whole Curvy suite: CreateX bootstrap, library linking, UUPS
+   proxies, verifier registration, wiring, init calls) and validated standalone in
+   our compose; then a blokli fork's `blokli-contract-deployer.rs` calls
+   `deploy_curvy_suite(...)` after `ContractInstances::deploy_for_testing`, so ONE
+   deployer emits HOPR + Curvy (`[contracts]` + `[curvy_contracts]` TOML). The
+   bloklid daemon itself stays the published image — only the deployer bin is
+   forked, which cargo-builds without Nix.
 1. **Blokli indexes Curvy events** (decision: later, not now — the existing Curvy
    indexer stays in the interim). When it happens: topics + handler + DB entity +
    migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
