@@ -466,6 +466,22 @@ requirement, so M1 *starts* with the calculator spike:
    > feature is wanted) before any PR; frame as "optional Curvy co-deployment
    > for local/dev"; report the indexer burst-stall alongside; offer to widen
    > curvy-abi's alloy range if upstream dislikes the dual-meta lockfile.
+   >
+   > **✅ SINGLE-CONTAINER IMAGE DONE 2026-07-09** (`poc/blokli-anvil-image/`,
+   > commit `dfee547`, reviewer-verified): `curvy-bloklid-anvil` reproduces
+   > blokli's bloklid-anvil UX with Curvy baked in — one `docker run` = anvil +
+   > HOPR + Curvy (deployed+inited) + bloklid; ready in ~14 s, 337 MB, plain
+   > Dockerfile (no Nix). Full regression passes against the container
+   > (`run.sh image-up` → e2e 5/5 + strategy settle). Key engineering: published
+   > bloklid image is a Nix/musl rootfs with no glibc loader → runtime base is
+   > debian-slim with static-musl bloklid copied out + glibc foundry bins;
+   > two-repo build context solved by rsync staging + path-dep rewrite (real
+   > fork never modified, still the 78-line diff); mining regime = automine for
+   > the deploy burst then 1 s interval so the indexer self-drains (anvil's
+   > setIntervalMining takes SECONDS — a ms value freezes the chain; guarded by
+   > a block-advance check). Deviations: :8545 also exposed (SDK needs direct
+   > RPC until blokli indexes Curvy); CURVY=1 default on. Future: Nix-native
+   > variant belongs upstream once curvy-deployer is hosted; multi-arch TODO.
 1. **Blokli indexes Curvy events** (decision: later, not now — the existing Curvy
    indexer stays in the interim). When it happens: topics + handler + DB entity +
    migration + GraphQL types for `PendingNotes`/`CommittedNotes`/
