@@ -104,13 +104,15 @@ source. Curvy equivalent, minimal-first:
    thin re-exports.
 7. Regression gates unchanged: compose up, e2e 5/5, strategy settle, image build.
 
-## 5. Open questions (owner)
+## 5. Decisions (owner, 2026-07-09)
 
-1. Contracts home: foundry profile inside the existing monorepo package (fast),
-   or extract `curvy-contracts` mirroring hoprnet/contracts (cleaner long-term)?
-2. Hosting cadence: git dep now → crates.io when? (hopr-bindings is crates.io;
-   hopli is git — both fit, crates.io is the more "finished" signal upstream.)
-3. Versioning: pin `curvy-bindings` versions to contract releases like theirs?
-4. Exact codegen command parity: confirm the precise generator hoprnet/contracts
-   uses (header style says `forge bind --alloy`) and match flags so our codegen
-   files are idiomatically identical.
+1. **Contracts home**: inside the monorepo contracts package —
+   `packages/contracts/evm/bindings/curvy-bindings/` (+ foundry profile files at
+   the package root), mirroring hoprnet's contracts-with-bindings-alongside
+   layout. Additive files only; nothing existing in the monorepo changes.
+2. **Hosting**: postponed until the implementation is finished (path deps in the
+   interim; git/crates.io hosting is the final step).
+3. **Versioning**: yes — `curvy-bindings` versions in lockstep with contract
+   releases, like hopr-bindings.
+4. Still to confirm during implementation: exact codegen flag parity with
+   hoprnet's generator (header style says `forge bind --alloy`).
