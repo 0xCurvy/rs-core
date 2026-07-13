@@ -13,7 +13,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 COMPOSE="docker compose"
 BLOKLI_URL="${BLOKLI_URL:-http://127.0.0.1:8080}"
-SDK_DIR="$HERE/../../sdk"
+RS_CORE_ROOT="$(cd "$HERE/../.." && pwd)"
+SDK_DIR="$RS_CORE_ROOT/sdk"
 ADDRESSES="$HERE/curvy_deployed_addresses.json"
 
 # The forked blokli-contract-deployer (host build). Override BLOKLI_FORK to relocate.
@@ -25,17 +26,26 @@ IMAGE_NAME="${IMAGE_NAME:-bloklid-anvil-curvy:latest}"
 IMAGE_CONTAINER="${IMAGE_CONTAINER:-curvy-bloklid-anvil}"
 REBUILD_IMAGE="${REBUILD_IMAGE:-true}"
 
-run_cargo() {
+run_cargo_in() {
+  local flake="$1"
+  shift
   if command -v cargo >/dev/null 2>&1; then
     cargo "$@"
+  elif command -v nix >/dev/null 2>&1; then
+    echo "    cargo not on PATH; using Nix dev shell: $flake" >&2
+    nix develop "$flake" -c cargo "$@"
   else
-    nix develop "$BLOKLI_FORK" -c cargo "$@"
+    echo "FATAL: cargo is unavailable and nix cannot provide it" >&2
+    exit 1
   fi
 }
 
+run_cargo() { run_cargo_in "$RS_CORE_ROOT" "$@"; }
+run_blokli_cargo() { run_cargo_in "$BLOKLI_FORK" "$@"; }
+
 build_fork_deployer() {
   echo "==> building Curvy-enabled blokli-contract-deployer ($BLOKLI_FORK)"
-  ( cd "$BLOKLI_FORK" && run_cargo build --locked --release -p bloklid \
+  ( cd "$BLOKLI_FORK" && run_blokli_cargo build --locked --release -p bloklid \
       --bin blokli-contract-deployer --features curvy-test-deployment )
   [ -x "$FORK_DEPLOYER" ] || { echo "FATAL: $FORK_DEPLOYER not built" >&2; exit 1; }
 }

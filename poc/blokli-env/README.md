@@ -5,7 +5,9 @@
 > smoke test and strict Curvy E2E. Run `./run.sh image-down` to stop it. Nix/image
 > validation must run in the Linux VM. The compose and standalone-deployer sections
 > below are retained temporarily as rollback documentation until that acceptance run
-> passes; they are not the release path.
+> passes; they are not the release path. A system Cargo installation is optional:
+> `run.sh` uses Blokli's Nix shell for Blokli builds and rs-core's Nix shell (including
+> libclang/libffi) for the smoke and SDK builds.
 
 A reproducible local stack that puts **Curvy's v2 contracts and the HOPR contract
 suite on one anvil**, runs **hoprnet/blokli (`bloklid`)** against it, and proves a
