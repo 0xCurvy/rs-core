@@ -5,6 +5,7 @@
 #   ./run.sh image-down  stop it and remove generated state
 #   ./run.sh down    tear everything down + remove volumes
 #   ./run.sh smoke   re-run the Rust smoke test only
+#   ./run.sh check-proving-keys  validate the external v3-e2e zkeys
 #   ./run.sh logs    follow bloklid logs
 #
 # Prerequisites: Nix, Docker, jq, and curl. Deployment needs no Node toolchain.
@@ -42,6 +43,51 @@ run_cargo_in() {
 
 run_cargo() { run_cargo_in "$RS_CORE_ROOT" "$@"; }
 run_blokli_cargo() { run_cargo_in "$BLOKLI_FORK" "$@"; }
+
+prepare_proving_keys() {
+  local root="${CURVY_ZK_KEYS_DIR:-}"
+  local candidate
+  if [ -z "$root" ]; then
+    for candidate in \
+      "${V3_E2E:-}/packages/zk-keys/v2" \
+      "$RS_CORE_ROOT/../v3-e2e/packages/zk-keys/v2" \
+      "$RS_CORE_ROOT/../curvy-monorepo/packages/zk-keys/v2"; do
+      if [ "$candidate" != "/packages/zk-keys/v2" ] && [ -d "$candidate" ]; then
+        root="$candidate"
+        break
+      fi
+    done
+  fi
+
+  local missing=0
+  local spec env_name relative path
+  for spec in \
+    "CURVY_WITHDRAWAL_ZKEY|withdrawal/verifySingleWithdrawalNoHashing_2_30_0001.zkey" \
+    "CURVY_AGGREGATION_ZKEY|aggregation/verifySingleAggregationNoHashing_2_3_30_0001.zkey" \
+    "CURVY_PENDING_ZKEY|pending-notes-commitment/verifyPendingNotesCommitment_5_30_0001.zkey"; do
+    IFS='|' read -r env_name relative <<< "$spec"
+    path="${!env_name:-${root:+$root/$relative}}"
+    if [ -z "$path" ] || [ ! -f "$path" ]; then
+      echo "FATAL: missing Curvy proving key: ${path:-$relative}" >&2
+      missing=1
+    elif head -c 80 "$path" | grep -q '^version https://git-lfs.github.com/spec/v1$'; then
+      echo "FATAL: Curvy proving key is still a Git LFS pointer: $path" >&2
+      missing=1
+    else
+      printf -v "$env_name" '%s' "$path"
+      export "$env_name"
+    fi
+  done
+  if [ "$missing" -ne 0 ]; then
+    echo "Set CURVY_ZK_KEYS_DIR to the v3-e2e packages/zk-keys/v2 directory" >&2
+    echo "and fetch its Git LFS objects before running the strict E2E." >&2
+    exit 1
+  fi
+  if [ -n "$root" ]; then
+    export CURVY_ZK_KEYS_DIR="$root"
+    echo "    Curvy proving keys: $CURVY_ZK_KEYS_DIR"
+  fi
+}
 
 build_fork_deployer() {
   echo "==> building Curvy-enabled blokli-contract-deployer ($BLOKLI_FORK)"
@@ -164,6 +210,7 @@ image_up() {
   echo "==> blokli-smoke (raw tx through sendTransactionSync + negatives)"
   ( cd rs && run_cargo run --release --quiet --bin blokli-smoke )
   echo "==> strict Curvy shield → commit → aggregate → scan → withdraw E2E"
+  prepare_proving_keys
   ( cd "$SDK_DIR" && run_cargo run --release --locked --quiet -p curvy-e2e )
   echo
   echo "==> single-container stack is UP and all checks passed."
@@ -229,6 +276,7 @@ case "${1:-up}" in
   image-up)   image_up ;;
   image-down) image_down ;;
   image-logs) docker logs -f "$IMAGE_CONTAINER" ;;
+  check-proving-keys) prepare_proving_keys ;;
 
-  *) echo "usage: $0 [up|down|smoke|deploy|logs|image-up|image-down|image-logs]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…)" >&2; exit 1 ;;
+  *) echo "usage: $0 [up|down|smoke|deploy|logs|image-up|image-down|image-logs|check-proving-keys]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…, CURVY_ZK_KEYS_DIR=…)" >&2; exit 1 ;;
 esac

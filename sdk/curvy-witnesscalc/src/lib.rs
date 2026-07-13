@@ -7,13 +7,13 @@
 //! ## Artifact resolution (documented order)
 //! Graphs and proving keys are pinned by sha256 and resolved per circuit:
 //! 1. an env-var override (`CURVY_<CIRCUIT>_GRAPH` / `CURVY_<CIRCUIT>_ZKEY`);
-//! 2. otherwise a compiled-in default path.
+//! 2. graphs use the committed spike fixtures;
+//! 3. zkeys use their circuit-relative path under `CURVY_ZK_KEYS_DIR`.
 //!
 //! Graph defaults point at the **committed** spike fixtures
-//! (`spikes/m1-prove-verify/fixtures/**`); the pending graph (13 MB) and every zkey
-//! (13/16/129 MB) are gitignored there and resolved from those paths (regenerate with
-//! the spike's `run.sh regen-fixtures`). Loading a graph/zkey whose sha256 does not
-//! match the pin is a hard error — wrong artifact, wrong trusted setup.
+//! (`spikes/m1-prove-verify/fixtures/**`). The zkeys (13/16/123 MiB) remain external
+//! Git-LFS artifacts. Loading a graph or zkey whose sha256 does not match the pin is a
+//! hard error — wrong artifact, wrong trusted setup.
 
 use anyhow::{bail, Context, Result};
 use ark_bn254::Fr;
@@ -62,7 +62,7 @@ pub struct Circuit {
     graph_default: &'static str,
     graph_sha256: &'static str,
     zkey_env: &'static str,
-    zkey_default: &'static str,
+    zkey_relative: &'static str,
     zkey_sha256: &'static str,
     pub num_public: usize,
 }
@@ -82,7 +82,7 @@ impl Circuit {
             graph_default: "withdrawal_2_30.graph.bin",
             graph_sha256: "3a7c7a5ad479643cb5b19b024b7b73f1cc32be7eee75d98bbc91e294bf8f6abf",
             zkey_env: "CURVY_WITHDRAWAL_ZKEY",
-            zkey_default: "/Users/vanja/Projects/v3-e2e/packages/zk-keys/v2/withdrawal/verifySingleWithdrawalNoHashing_2_30_0001.zkey",
+            zkey_relative: "withdrawal/verifySingleWithdrawalNoHashing_2_30_0001.zkey",
             zkey_sha256: "c91d9fdbea6edde296e9676bdb97959f6acb5f32360b5490c01cea9814844716",
             num_public: 6,
         }
@@ -96,7 +96,7 @@ impl Circuit {
             graph_default: "aggregation/aggregation_2_3_30.graph.bin",
             graph_sha256: "f757ba006d125ebb25cb3fc900d3c93b1568db59a6f084c48d6127611aab82ce",
             zkey_env: "CURVY_AGGREGATION_ZKEY",
-            zkey_default: "/Users/vanja/Projects/v3-e2e/packages/zk-keys/v2/aggregation/verifySingleAggregationNoHashing_2_3_30_0001.zkey",
+            zkey_relative: "aggregation/verifySingleAggregationNoHashing_2_3_30_0001.zkey",
             zkey_sha256: "88a85746f60820712199a60ee13241181658250ba9855af61503d306c52ba4e6",
             num_public: 31,
         }
@@ -110,7 +110,7 @@ impl Circuit {
             graph_default: "pending/pending_5_30.graph.bin",
             graph_sha256: "3cc81fe0a084c0b11bb627c564f20f1f86d5368ffa19d1d558b03c0414b5f69b",
             zkey_env: "CURVY_PENDING_ZKEY",
-            zkey_default: "/Users/vanja/Projects/v3-e2e/packages/zk-keys/v2/pending-notes-commitment/verifyPendingNotesCommitment_5_30_0001.zkey",
+            zkey_relative: "pending-notes-commitment/verifyPendingNotesCommitment_5_30_0001.zkey",
             zkey_sha256: "efb4c3d4d3350f931860faeb6319b6010303c5fbf06d8ef414d708e9cf907847",
             num_public: 1,
         }
@@ -121,10 +121,17 @@ impl Circuit {
             .map(PathBuf::from)
             .unwrap_or_else(|_| spike_fixtures().join(self.graph_default))
     }
-    fn zkey_path(&self) -> PathBuf {
-        std::env::var(self.zkey_env)
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(self.zkey_default))
+    fn zkey_path(&self) -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os(self.zkey_env) {
+            return Ok(PathBuf::from(path));
+        }
+        let root = std::env::var_os("CURVY_ZK_KEYS_DIR").with_context(|| {
+            format!(
+                "{}: proving key location is not configured; set {} or CURVY_ZK_KEYS_DIR",
+                self.key, self.zkey_env
+            )
+        })?;
+        Ok(PathBuf::from(root).join(self.zkey_relative))
     }
 
     /// Load + pin-check the evaluation graph.
@@ -141,9 +148,15 @@ impl Circuit {
 
     /// Load + pin-check the proving key into a `curvy-prover::Prover`.
     pub fn load_prover(&self) -> Result<Prover> {
-        let path = self.zkey_path();
-        let zkey = std::fs::read(&path)
-            .with_context(|| format!("{}: read zkey {} (set {})", self.key, path.display(), self.zkey_env))?;
+        let path = self.zkey_path()?;
+        let zkey = std::fs::read(&path).with_context(|| {
+            format!(
+                "{}: read zkey {} (set {} or CURVY_ZK_KEYS_DIR)",
+                self.key,
+                path.display(),
+                self.zkey_env
+            )
+        })?;
         let got = sha256_hex(&zkey);
         if got != self.zkey_sha256 {
             bail!("{}: zkey sha256 mismatch: got {got}, expected {} — wrong trusted setup", self.key, self.zkey_sha256);

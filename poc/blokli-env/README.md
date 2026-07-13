@@ -7,7 +7,9 @@
 > below are retained temporarily as rollback documentation until that acceptance run
 > passes; they are not the release path. A system Cargo installation is optional:
 > `run.sh` uses Blokli's Nix shell for Blokli builds and rs-core's Nix shell (including
-> libclang/libffi) for the smoke and SDK builds.
+> libclang/libffi) for the smoke and SDK builds. The strict E2E also needs the three
+> v3-e2e proving keys fetched through Git LFS; set `CURVY_ZK_KEYS_DIR` to that checkout's
+> `packages/zk-keys/v2`, or keep `v3-e2e` beside `rs-core` for automatic discovery.
 
 A reproducible local stack that puts **Curvy's v2 contracts and the HOPR contract
 suite on one anvil**, runs **hoprnet/blokli (`bloklid`)** against it, and proves a

@@ -65,7 +65,7 @@ committed golden and the pure-Rust output.
 
 Each graph is **deterministic** — rebuilding from source with `build-circuit` reproduces
 the same sha256 byte-for-byte (verified by a full `./run.sh regen-fixtures`), so graphs are
-committed/pinned by content hash (except pending's 13 MB blob — sha-pinned, see below).
+committed and pinned by content hash.
 
 **Recommendation for plan §3 (witness-calc end-state): option 1 (the `circom-witnesscalc`
 evaluation graph) is confirmed across the whole deployed circuit family.** Pure-Rust,
@@ -104,9 +104,9 @@ aggregation, **15/15** for pending (only the contract name differs: `Groth16Veri
 Withdrawal fixtures are flat in `fixtures/` (M1 layout, unchanged); aggregation/pending
 live in `fixtures/<circuit>/`. Per circuit: `input.json`, `expected-public.json`,
 `snarkjs-proof.json`, `snarkjs-public.json`, `<Verifier>.bytecode.txt`, `<Verifier>.abi.json`.
-Graphs + goldens: committed for withdrawal + aggregation; **pending's 13 MB graph and
-7 MB golden are gitignored** and sha256-pinned in `src/lib.rs` (`graph_sha256`,
-`golden_sha256`) — regenerate with `./run.sh regen-fixtures`.
+Graphs are committed for all three circuits. Pending's 7 MB golden witness remains
+gitignored; it is sha256-pinned in `src/lib.rs` and can be regenerated with
+`./run.sh regen-fixtures`.
 
 - `input.json` — rs-core parity vector (`crates/core/testdata/witness_vectors.json`)
   rebuilt at treeDepth=30 by the `gen-input` bin (see below).
