@@ -7,7 +7,7 @@
 #   ./run.sh smoke   re-run the Rust smoke test only
 #   ./run.sh logs    follow bloklid logs
 #
-# Prerequisites: Nix, Docker, Cargo, jq, and curl. Deployment needs no Node toolchain.
+# Prerequisites: Nix, Docker, jq, and curl. Deployment needs no Node toolchain.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
@@ -25,9 +25,17 @@ IMAGE_NAME="${IMAGE_NAME:-bloklid-anvil-curvy:latest}"
 IMAGE_CONTAINER="${IMAGE_CONTAINER:-curvy-bloklid-anvil}"
 REBUILD_IMAGE="${REBUILD_IMAGE:-true}"
 
+run_cargo() {
+  if command -v cargo >/dev/null 2>&1; then
+    cargo "$@"
+  else
+    nix develop "$BLOKLI_FORK" -c cargo "$@"
+  fi
+}
+
 build_fork_deployer() {
   echo "==> building Curvy-enabled blokli-contract-deployer ($BLOKLI_FORK)"
-  ( cd "$BLOKLI_FORK" && cargo build --locked --release -p bloklid \
+  ( cd "$BLOKLI_FORK" && run_cargo build --locked --release -p bloklid \
       --bin blokli-contract-deployer --features curvy-test-deployment )
   [ -x "$FORK_DEPLOYER" ] || { echo "FATAL: $FORK_DEPLOYER not built" >&2; exit 1; }
 }
@@ -50,7 +58,7 @@ deploy_all_forked() {
 # by the CURVY_LEGACY_DEPLOY=1 fallback path. Assumes HOPR + bloklid are already up.
 deploy_curvy() {
   echo "==> deploying + initialising Curvy v2 suite only (sdk/curvy-deployer)"
-  ( cd "$SDK_DIR" && cargo run --release --quiet -p curvy-deployer -- \
+  ( cd "$SDK_DIR" && run_cargo run --release --quiet -p curvy-deployer -- \
       --rpc-url "http://127.0.0.1:8545" \
       --json-out "$ADDRESSES" \
       --toml-out "$HERE/generated/curvy_contracts.toml" )
@@ -144,9 +152,9 @@ image_up() {
     exit 1
   fi
   echo "==> blokli-smoke (raw tx through sendTransactionSync + negatives)"
-  ( cd rs && cargo run --release --quiet --bin blokli-smoke )
+  ( cd rs && run_cargo run --release --quiet --bin blokli-smoke )
   echo "==> strict Curvy shield → commit → aggregate → scan → withdraw E2E"
-  ( cd "$SDK_DIR" && cargo run --release --locked --quiet -p curvy-e2e )
+  ( cd "$SDK_DIR" && run_cargo run --release --locked --quiet -p curvy-e2e )
   echo
   echo "==> single-container stack is UP and all checks passed."
   echo "    bloklid GraphQL:   $BLOKLI_URL/graphql"
@@ -189,7 +197,7 @@ case "${1:-up}" in
     fi
 
     echo "==> blokli-smoke (raw tx through sendTransactionSync + negatives)"
-    ( cd rs && cargo run --release --quiet --bin blokli-smoke )
+    ( cd rs && run_cargo run --release --quiet --bin blokli-smoke )
 
     echo
     echo "==> M2 stack is UP and all checks passed."
@@ -204,7 +212,7 @@ case "${1:-up}" in
     echo "    done"
     ;;
 
-  smoke)  ( cd rs && cargo run --release --quiet --bin blokli-smoke ) ;;
+  smoke)  ( cd rs && run_cargo run --release --quiet --bin blokli-smoke ) ;;
   deploy) deploy_curvy ;;
   logs)   $COMPOSE logs -f bloklid ;;
 
