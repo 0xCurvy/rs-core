@@ -15,7 +15,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-V3E2E="${CURVY_V3E2E:-/Users/vanja/Projects/v3-e2e}"
+V3E2E="/home/dev/Projects/curvy-monorepo/"
 SNARKJS="$V3E2E/packages/zk-circuits/node_modules/.bin/snarkjs"
 ZKROOT="$V3E2E/packages/zk-keys/v2"
 CIRCUITS="$V3E2E/packages/zk-circuits"
