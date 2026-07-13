@@ -1,23 +1,13 @@
 #!/usr/bin/env bash
-# run.sh — one command to stand up the M2 substrate and prove it end-to-end.
+# Local Blokli/Curvy acceptance runner.
 #
-#   ./run.sh up      compose up anvil -> ONE forked blokli-contract-deployer
-#                    (HOPR + Curvy, --with-curvy) -> bloklid -> blokli-smoke  (idempotent)
+#   ./run.sh image-up    build/start the native Blokli Curvy image and run strict E2E
+#   ./run.sh image-down  stop it and remove generated state
 #   ./run.sh down    tear everything down + remove volumes
 #   ./run.sh smoke   re-run the Rust smoke test only
-#   ./run.sh deploy  re-run the Curvy-only deploy+init (host sdk/curvy-deployer)
 #   ./run.sh logs    follow bloklid logs
 #
-# Prereqs on host: docker, cast/forge (foundry), cargo, jq, curl.
-#   NO node / pnpm / hardhat / v3-e2e toolchain is needed at deploy time —
-#   BOTH the HOPR suite and the whole Curvy v2 suite are deployed + initialised by a
-#   single HOST-BUILT binary: a fork of hoprnet/blokli's `blokli-contract-deployer`
-#   whose `--with-curvy` flag calls the Curvy `sdk/curvy-deployer` lib after the HOPR
-#   deploy. See README.md "Fork provenance".
-#
-# Fallback: set CURVY_LEGACY_DEPLOY=1 to use the OLD two-step flow instead (the bloklid
-# image's own `blokli-contract-deployer` for HOPR + the host `sdk/curvy-deployer` bin
-# for Curvy) — kept working for comparison / if the fork is unavailable.
+# Prerequisites: Nix, Docker, Cargo, jq, and curl. Deployment needs no Node toolchain.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
@@ -30,27 +20,18 @@ ADDRESSES="$HERE/curvy_deployed_addresses.json"
 BLOKLI_FORK="${BLOKLI_FORK:-/Users/vanja/Projects/blokli}"
 FORK_DEPLOYER="$BLOKLI_FORK/target/release/blokli-contract-deployer"
 
-# ── Single-container image path (ADDITIVE; default compose path is unchanged) ─────────
-# `image-up` runs ONE `curvy-bloklid-anvil` container (anvil + HOPR + Curvy + bloklid)
-# instead of the multi-service compose. See ../blokli-anvil-image/README.md.
-IMAGE_NAME="${IMAGE_NAME:-curvy-bloklid-anvil:latest}"
+# Native image built by the Blokli fork.
+IMAGE_NAME="${IMAGE_NAME:-bloklid-anvil-curvy:latest}"
 IMAGE_CONTAINER="${IMAGE_CONTAINER:-curvy-bloklid-anvil}"
-IMAGE_DIR="$HERE/../blokli-anvil-image"
+REBUILD_IMAGE="${REBUILD_IMAGE:-true}"
 
-# Build the forked deployer bin on the host if missing (blokli pins rustc 1.96 via its
-# rust-toolchain.toml; rustup selects it automatically inside $BLOKLI_FORK).
 build_fork_deployer() {
-  if [ ! -x "$FORK_DEPLOYER" ]; then
-    echo "==> building forked blokli-contract-deployer ($BLOKLI_FORK) — first run only"
-    ( cd "$BLOKLI_FORK" && cargo build --release -p bloklid --bin blokli-contract-deployer )
-  fi
+  echo "==> building Curvy-enabled blokli-contract-deployer ($BLOKLI_FORK)"
+  ( cd "$BLOKLI_FORK" && cargo build --locked --release -p bloklid \
+      --bin blokli-contract-deployer --features curvy-test-deployment )
   [ -x "$FORK_DEPLOYER" ] || { echo "FATAL: $FORK_DEPLOYER not built" >&2; exit 1; }
 }
 
-# NEW default: ONE deployer invocation provisions HOPR + Curvy on the fresh chain, then
-# assembles bloklid's config.toml. Runs BEFORE bloklid so config.toml exists at boot.
-# IMPORTANT: the Curvy [curvy_contracts] section goes to its OWN file — bloklid's Config
-# is #[serde(deny_unknown_fields)] and would reject an extra section in its config.toml.
 deploy_all_forked() {
   build_fork_deployer
   echo "==> deploying HOPR + Curvy suites (ONE forked blokli-contract-deployer --with-curvy)"
@@ -58,14 +39,11 @@ deploy_all_forked() {
     --rpc-url "http://127.0.0.1:8545" \
     --output "$HERE/generated/contracts.toml" \
     --with-curvy \
-    --curvy-json-out "$ADDRESSES" \
-    --curvy-toml-out "$HERE/generated/curvy_contracts.toml"
+    --curvy-json-out "$ADDRESSES"
   [ -f "$HERE/generated/contracts.toml" ] || { echo "FATAL: generated/contracts.toml not produced" >&2; exit 1; }
   [ -f "$ADDRESSES" ] || { echo "FATAL: $ADDRESSES not produced (--curvy-json-out)" >&2; exit 1; }
-  # Assemble bloklid config = base + HOPR [contracts]. Curvy [curvy_contracts] is NOT
-  # appended here (deny_unknown_fields); it lives in generated/curvy_contracts.toml.
   { cat "$HERE/config/bloklid.base.toml"; echo; cat "$HERE/generated/contracts.toml"; } > "$HERE/generated/config.toml"
-  echo "    wrote generated/config.toml (base + [contracts]); Curvy → $ADDRESSES + generated/curvy_contracts.toml"
+  echo "    wrote generated/config.toml; Curvy addresses → $ADDRESSES"
 }
 
 # LEGACY Curvy-only deploy (host sdk/curvy-deployer bin) — used by `./run.sh deploy` and
@@ -128,11 +106,6 @@ wait_ready() {
   exit 1
 }
 
-# ── image-up / image-down: the SINGLE-CONTAINER alternative bring-up ─────────────────
-# Runs ONE `curvy-bloklid-anvil` container (its entrypoint deploys HOPR + Curvy and
-# starts anvil + bloklid), then copies the Curvy addresses to where the SDK expects
-# them (poc/blokli-env/curvy_deployed_addresses.json). Additive: does not touch the
-# compose services or their generated/config.toml.
 wait_ready_image() {
   echo "==> waiting for bloklid /readyz (single container)..."
   for _ in $(seq 1 150); do
@@ -148,15 +121,18 @@ wait_ready_image() {
 
 image_up() {
   mkdir -p generated
-  if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-    echo "==> image $IMAGE_NAME not found; building it ($IMAGE_DIR/build.sh)"
-    IMAGE="$IMAGE_NAME" "$IMAGE_DIR/build.sh"
+  if [ "$REBUILD_IMAGE" = "true" ] || ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "==> building native Blokli Curvy image"
+    ( cd "$BLOKLI_FORK" && nix build -L .#docker-bloklid-anvil-curvy-x86_64-linux --out-link result-curvy )
+    docker load < "$BLOKLI_FORK/result-curvy"
   fi
   echo "==> starting single container $IMAGE_CONTAINER (anvil+HOPR+Curvy+bloklid)"
+  rm -f "$ADDRESSES" generated/curvy_deployed_addresses.json
   docker rm -f "$IMAGE_CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$IMAGE_CONTAINER" \
     -p 8545:8545 -p 8080:8080 \
-    -v "$HERE/generated:/shared" \
+    -e ANVIL_HOST=0.0.0.0 \
+    -v "$HERE/generated:/data" \
     "$IMAGE_NAME" >/dev/null
   wait_ready_image
   # Hand the Curvy addresses to the SDK's default path (mount wrote them into generated/).
@@ -170,11 +146,12 @@ image_up() {
   fi
   echo "==> blokli-smoke (raw tx through sendTransactionSync + negatives)"
   ( cd rs && cargo run --release --quiet --bin blokli-smoke )
+  echo "==> strict Curvy shield → commit → aggregate → scan → withdraw E2E"
+  ( cd "$SDK_DIR" && cargo run --release --locked --quiet -p curvy-e2e )
   echo
   echo "==> single-container stack is UP and all checks passed."
   echo "    bloklid GraphQL:   $BLOKLI_URL/graphql"
   echo "    anvil RPC:         http://127.0.0.1:8545"
-  echo "    run the SDK e2e:   (cd ../../sdk && cargo run --release -p curvy-e2e)"
 }
 
 image_down() {

@@ -5,7 +5,7 @@ instantiating the plan's L2/L3/L4 seams (`plans/hopr-blokli-poc.md` §2–3) at 
 scale, driving a **real end-to-end flow on the `poc/blokli-env` stack, entirely from
 Rust**:
 
-> **shield → commit → aggregate → scan**
+> **shield → commit → aggregate → scan → withdraw**
 
 Rust-built, Rust-proved (pure-Rust witness + arkworks Groth16), submitted through
 **blokli's `sendTransactionSync`** for the aggregation, events read back over direct
@@ -28,6 +28,7 @@ stealth scan**.
 | `curvy-chain-rpc` | L4 | `NoteIndexSource`/`RootAnchor`/`FeeConfigSource`/`BalanceReader`/`PortalDirectory` over alloy against anvil + a direct-submit `TxSubmitter` fallback. |
 | `curvy-sdk` | L5 | the `CurvyClient` facade: keccak-KDF accounts, note build/send via `curvy-core` stealth, the shield/commit/aggregate/scan orchestration over the trait objects, minimal in-memory storage. **No direct alloy/blokli/reqwest dependency.** |
 | `curvy-e2e` | L6 | the runnable end-to-end (bin + integration test); per-step PASS/FAIL ledger. |
+| `curvy-deployer` | legacy | frozen deployment path; retained until the native Blokli image passes Linux acceptance. |
 
 Dependency flow is one-directional and L0–L3 never name a concrete backend. The seam
 is real, not decorative: `curvy-sdk`'s `Cargo.toml` lists no alloy/blokli/reqwest —
@@ -38,15 +39,15 @@ chain access is only via the adapter crates behind the L2 traits.
 ```bash
 # 1. Prerequisite: bring up the M2 substrate (anvil + HOPR + Curvy + bloklid).
 #    ≈6–8 min cold, ≈2–3 min warm. Writes poc/blokli-env/curvy_deployed_addresses.json.
-cd /Users/vanja/Projects/rs-core/poc/blokli-env && ./run.sh up
+cd /Users/vanja/Projects/rs-core/poc/blokli-env && ./run.sh image-up
 
 # 2. Run the e2e (release — arkworks proving is far faster than debug).
-cd /Users/vanja/Projects/rs-core/sdk && cargo run --release -p curvy-e2e
-#    or the integration test (skips cleanly if the stack is down):
-cargo test  --release -p curvy-e2e
+cd /Users/vanja/Projects/rs-core/sdk && cargo run --locked --release -p curvy-e2e
+# The integration test is strict and fails when the stack is unavailable:
+cargo test --locked --release -p curvy-e2e
 
 # 3. Tear the stack down when done.
-cd /Users/vanja/Projects/rs-core/poc/blokli-env && ./run.sh down
+cd /Users/vanja/Projects/rs-core/poc/blokli-env && ./run.sh image-down
 ```
 
 Expected wall time for step 2 once the stack is up: a few seconds of chain round-trips
@@ -77,6 +78,8 @@ plus the two heavy proofs (aggregation ≈ a couple s, pending ≈ a few s in re
    view-tag prefilter), `decrypt_amount_token`, and the integrity gate (recompute
    `noteId`, drop mismatches). Asserts Bob discovers the aggregation output with the
    right amount/token.
+5. **withdraw** — commit Bob's note, submit the withdrawal through Blokli, and require
+   the destination balance delta to match the delivered amount.
 
 See `../spikes/m1-prove-verify` (the proven pure-Rust proving pipeline) and
 `../poc/blokli-env` (the running stack) — this workspace is built ON TOP of both and
