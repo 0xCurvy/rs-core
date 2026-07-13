@@ -135,12 +135,11 @@ image_up() {
     -v "$HERE/generated:/data" \
     "$IMAGE_NAME" >/dev/null
   wait_ready_image
-  # Hand the Curvy addresses to the SDK's default path (mount wrote them into generated/).
-  if [ -f generated/curvy_deployed_addresses.json ]; then
-    cp generated/curvy_deployed_addresses.json "$ADDRESSES"
+  # Copy through Docker so host/container UID differences cannot block the SDK.
+  if docker cp "$IMAGE_CONTAINER:/data/curvy_deployed_addresses.json" "$ADDRESSES"; then
     echo "    copied Curvy addresses -> $ADDRESSES"
   else
-    echo "FATAL: generated/curvy_deployed_addresses.json missing after readiness" >&2
+    echo "FATAL: /data/curvy_deployed_addresses.json missing after readiness" >&2
     docker logs --tail 60 "$IMAGE_CONTAINER" >&2 || true
     exit 1
   fi
