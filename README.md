@@ -29,6 +29,24 @@ crates/
   prover/             the Groth16 prover + www/ browser harness
 ```
 
+## Prerequisites
+
+The easiest path is the flake: `nix develop` provides everything below (pinned
+Rust, protoc, libclang, libffi, pkg-config, cmake). Otherwise:
+
+- **Rust** — stable, pinned by `rust-toolchain.toml` (rustup picks it up
+  automatically). Enough for the core workspace (`crates/`).
+- **Git LFS** — the proving keys in `zk-keys/v2` are LFS objects. Install
+  `git-lfs`, then `git lfs pull` to materialize them (~160 MB). Needed for the
+  SDK e2e and the strict `poc/blokli-env` flow, not for the core build.
+- **protobuf-compiler (`protoc`), libclang, pkg-config, cmake** — build-time
+  deps of the SDK workspace (`sdk/`): `prost-build` shells out to `protoc`,
+  `bindgen` needs libclang. Debian/Ubuntu:
+  `apt install protobuf-compiler libclang-dev pkg-config cmake`.
+- **Docker** — only for the `poc/blokli-env` stack (`run.sh image-up`).
+- **wasm tooling** — only for the wasm builds; see
+  [Building the wasm](#building-the-wasm).
+
 ## Build & test (native)
 
 ```bash

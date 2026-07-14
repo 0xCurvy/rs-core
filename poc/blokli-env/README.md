@@ -5,9 +5,12 @@
 > smoke test and strict Curvy E2E. Run `./run.sh image-down` to stop it. Nix/image
 > validation must run in the Linux VM. The compose and standalone-deployer sections
 > below are retained temporarily as rollback documentation until that acceptance run
-> passes; they are not the release path. A system Cargo installation is optional:
-> `run.sh` uses Blokli's Nix shell for Blokli builds and rs-core's Nix shell (including
-> libclang/libffi) for the smoke and SDK builds. The strict E2E also needs the three
+> passes; they are not the release path. `./run.sh e2e` re-runs just the strict Curvy
+> E2E against an already-running stack. A system Cargo installation is optional:
+> `run.sh` uses the host toolchain only when it is complete (cargo **and** libclang —
+> `bindgen` needs the latter); otherwise it falls back to Blokli's Nix shell for Blokli
+> builds and rs-core's Nix shell (which provides libclang/libffi) for the smoke and
+> SDK builds. The strict E2E also needs the three
 > proving keys, which ship in this repo under `zk-keys/v2` via Git LFS — run
 > `git lfs pull` and `run.sh` discovers them automatically. `CURVY_ZK_KEYS_DIR` can
 > still point at an external `packages/zk-keys/v2` checkout to override.
@@ -94,6 +97,7 @@ Prereqs on host: **docker**, **foundry** (`cast`/`forge`/`anvil`), **cargo**, **
 cd /Users/vanja/Projects/rs-core/poc/blokli-env
 ./run.sh up          # full stack + all checks   (≈6–8 min cold, ≈2–3 min warm)
 ./run.sh smoke       # re-run blokli-smoke only
+./run.sh e2e         # re-run the strict Curvy E2E only (stack must be up)
 ./run.sh deploy      # re-run the Curvy deploy+init only (curvy-deployer)
 ./run.sh logs        # follow bloklid logs
 ./run.sh down        # tear down + wipe volumes

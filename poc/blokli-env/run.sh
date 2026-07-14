@@ -5,6 +5,7 @@
 #   ./run.sh image-down  stop it and remove generated state
 #   ./run.sh down    tear everything down + remove volumes
 #   ./run.sh smoke   re-run the Rust smoke test only
+#   ./run.sh e2e     re-run the strict Curvy E2E only (stack must be up)
 #   ./run.sh check-proving-keys  validate the external v3-e2e zkeys
 #   ./run.sh logs    follow bloklid logs
 #
@@ -27,16 +28,26 @@ IMAGE_NAME="${IMAGE_NAME:-bloklid-anvil-curvy:latest}"
 IMAGE_CONTAINER="${IMAGE_CONTAINER:-curvy-bloklid-anvil}"
 REBUILD_IMAGE="${REBUILD_IMAGE:-true}"
 
+# bindgen (circom-witnesscalc) needs libclang; the host toolchain often lacks it,
+# so a bare `cargo` on PATH is not enough to build the workspace.
+host_toolchain_complete() {
+  command -v cargo >/dev/null 2>&1 || return 1
+  [ -n "${LIBCLANG_PATH:-}" ] && return 0
+  ldconfig -p 2>/dev/null | grep -q 'libclang.*\.so' && return 0
+  command -v llvm-config >/dev/null 2>&1 && [ -e "$(llvm-config --libdir)/libclang.so" ] && return 0
+  return 1
+}
+
 run_cargo_in() {
   local flake="$1"
   shift
-  if command -v cargo >/dev/null 2>&1; then
+  if host_toolchain_complete; then
     cargo "$@"
   elif command -v nix >/dev/null 2>&1; then
-    echo "    cargo not on PATH; using Nix dev shell: $flake" >&2
+    echo "    host toolchain incomplete (no cargo or no libclang); using Nix dev shell: $flake" >&2
     nix develop "$flake" -c cargo "$@"
   else
-    echo "FATAL: cargo is unavailable and nix cannot provide it" >&2
+    echo "FATAL: cargo/libclang unavailable and nix cannot provide them" >&2
     exit 1
   fi
 }
@@ -271,6 +282,10 @@ case "${1:-up}" in
     ;;
 
   smoke)  ( cd rs && run_cargo run --release --quiet --bin blokli-smoke ) ;;
+  e2e)
+    prepare_proving_keys
+    ( cd "$SDK_DIR" && run_cargo run --release --locked --quiet -p curvy-e2e )
+    ;;
   deploy) deploy_curvy ;;
   logs)   $COMPOSE logs -f bloklid ;;
 
@@ -279,5 +294,5 @@ case "${1:-up}" in
   image-logs) docker logs -f "$IMAGE_CONTAINER" ;;
   check-proving-keys) prepare_proving_keys ;;
 
-  *) echo "usage: $0 [up|down|smoke|deploy|logs|image-up|image-down|image-logs|check-proving-keys]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…, CURVY_ZK_KEYS_DIR=…)" >&2; exit 1 ;;
+  *) echo "usage: $0 [up|down|smoke|e2e|deploy|logs|image-up|image-down|image-logs|check-proving-keys]  (env: CURVY_LEGACY_DEPLOY=1, BLOKLI_FORK=…, CURVY_ZK_KEYS_DIR=…)" >&2; exit 1 ;;
 esac
