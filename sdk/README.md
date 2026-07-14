@@ -41,9 +41,10 @@ chain access is only via the adapter crates behind the L2 traits.
 #    ≈6–8 min cold, ≈2–3 min warm. Writes poc/blokli-env/curvy_deployed_addresses.json.
 cd /Users/vanja/Projects/rs-core/poc/blokli-env && ./run.sh image-up
 
-# 2. Point at the v3-e2e Git-LFS proving keys, then run the e2e
+# 2. Fetch the in-repo Git-LFS proving keys, then run the e2e
 #    (release — arkworks proving is far faster than debug).
-export CURVY_ZK_KEYS_DIR=/path/to/v3-e2e/packages/zk-keys/v2
+git lfs pull   # populates rs-core/zk-keys/v2 (run.sh discovers it automatically)
+export CURVY_ZK_KEYS_DIR=/path/to/rs-core/zk-keys/v2
 cd /Users/vanja/Projects/rs-core/sdk && cargo run --locked --release -p curvy-e2e
 # The integration test is strict and fails when the stack is unavailable:
 cargo test --locked --release -p curvy-e2e

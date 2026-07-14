@@ -49,6 +49,7 @@ prepare_proving_keys() {
   local candidate
   if [ -z "$root" ]; then
     for candidate in \
+      "$RS_CORE_ROOT/zk-keys/v2" \
       "${V3_E2E:-}/packages/zk-keys/v2" \
       "$RS_CORE_ROOT/../v3-e2e/packages/zk-keys/v2" \
       "$RS_CORE_ROOT/../curvy-monorepo/packages/zk-keys/v2"; do
@@ -79,8 +80,8 @@ prepare_proving_keys() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    echo "Set CURVY_ZK_KEYS_DIR to the v3-e2e packages/zk-keys/v2 directory" >&2
-    echo "and fetch its Git LFS objects before running the strict E2E." >&2
+    echo "Fetch the in-repo keys with 'git lfs pull' (rs-core zk-keys/v2)," >&2
+    echo "or set CURVY_ZK_KEYS_DIR to a packages/zk-keys/v2 checkout." >&2
     exit 1
   fi
   if [ -n "$root" ]; then
