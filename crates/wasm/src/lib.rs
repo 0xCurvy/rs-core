@@ -8,9 +8,13 @@
 //! reduction (`dec_to_biguint`) — see the core crate for why.
 
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
-use curvy_core::eddsa::{ephemeral_pub_key, pub_from_private_key_hex, sign_hex};
+use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
+use curvy_core::eddsa::{
+    ephemeral_pub_key, pub_from_private_key_hex, sign_hex, verify_scalar_compat,
+    ScalarSignature, ScalarSigningKey,
+};
 use curvy_core::encoding::dec_to_biguint;
-use curvy_core::field::{fr_from_dec, fr_to_dec};
+use curvy_core::field::{fr_from_dec, fr_to_dec, Bn254Fr};
 use curvy_core::hash_utils::sha256_bigint as core_sha256_bigint;
 use curvy_core::note;
 use curvy_core::poseidon::poseidon as core_poseidon;
@@ -66,6 +70,47 @@ pub fn ephemeral_pub_key_wasm(scalar: String) -> Vec<String> {
 pub fn sign(message: String, private_key_hex: String) -> Vec<String> {
     let sig = sign_hex(&dec_to_biguint(&message), &private_key_hex);
     vec![fr_to_dec(&sig.r8.0), fr_to_dec(&sig.r8.1), sig.s.to_string()]
+}
+
+/// BabyJubJub public key `[x, y] = scalar * Base8` from a canonical subgroup
+/// scalar. This path performs no seed hashing, pruning, or clamping.
+#[wasm_bindgen(js_name = pubFromScalar)]
+pub fn pub_from_scalar(scalar: String) -> Result<Vec<String>, JsError> {
+    let key = ScalarSigningKey::from_decimal(&scalar).map_err(|e| JsError::new(&e.to_string()))?;
+    let public = key.verifying_key();
+    Ok(vec![fr_to_dec(&public.x()), fr_to_dec(&public.y())])
+}
+
+/// Seedless Curvy-compatible signature `[R8.x, R8.y, S]` from a canonical
+/// BabyJubJub subgroup scalar and canonical BN254 field message.
+#[wasm_bindgen(js_name = signWithScalar)]
+pub fn sign_with_scalar(message: String, scalar: String) -> Result<Vec<String>, JsError> {
+    let message = Bn254Fr::try_from_dec(&message).map_err(|e| JsError::new(&e.to_string()))?;
+    let key = ScalarSigningKey::from_decimal(&scalar).map_err(|e| JsError::new(&e.to_string()))?;
+    let signature = key.sign_curvy_v1(message).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(vec![
+        fr_to_dec(&signature.r8.x()),
+        fr_to_dec(&signature.r8.y()),
+        signature.s.to_dec(),
+    ])
+}
+
+/// Verify a scalar-native Curvy signature. Malformed or non-canonical boundary
+/// values throw; a well-formed but invalid signature returns `false`.
+#[wasm_bindgen(js_name = verifyScalarSignature)]
+pub fn verify_scalar_signature(
+    message: String,
+    public_x: String,
+    public_y: String,
+    r8_x: String,
+    r8_y: String,
+    s: String,
+) -> Result<bool, JsError> {
+    let message = Bn254Fr::try_from_dec(&message).map_err(|e| JsError::new(&e.to_string()))?;
+    let public = BabyJubPoint::try_from_dec(&public_x, &public_y).map_err(|e| JsError::new(&e.to_string()))?;
+    let r8 = BabyJubPoint::try_from_dec(&r8_x, &r8_y).map_err(|e| JsError::new(&e.to_string()))?;
+    let s = BabyJubScalar::try_from_dec(&s).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(verify_scalar_compat(message, &public, &ScalarSignature { r8, s }))
 }
 
 /// Encrypt `(amount, token)` -> `[encryptedAmount, encryptedToken]`.

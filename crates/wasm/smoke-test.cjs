@@ -1,14 +1,15 @@
 // Smoke test: the core compiled to wasm and called from the JS runtime produces
 // the expected results for the committed reference vectors.
-// Run: node crates/curvy-wasm/smoke-test.cjs
+// Run: node crates/wasm/smoke-test.cjs
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const wasm = require("./pkg-node/curvy_wasm.js");
 
-const TD = path.join(__dirname, "../curvy-core/testdata");
+const TD = path.join(__dirname, "../core/testdata");
 const poseidonVectors = require(path.join(TD, "poseidon_vectors.json"));
 const p2 = require(path.join(TD, "phase2_vectors.json"));
+const scalarSignatures = require(path.join(TD, "scalar_signature_vectors.json"));
 
 let checks = 0;
 const eq = (a, b, msg) => {
@@ -47,6 +48,18 @@ for (const s of p2.sign) {
   eq(r8x, s.R8x, "sign.R8x");
   eq(r8y, s.R8y, "sign.R8y");
   eq(S, s.S, "sign.S");
+}
+
+// Seedless scalar-native public key, signature, and verification.
+for (const v of scalarSignatures.vectors) {
+  const [x, y] = wasm.pubFromScalar(v.scalar);
+  eq(x, v.publicKey.x, "pubFromScalar.x");
+  eq(y, v.publicKey.y, "pubFromScalar.y");
+  const [r8x, r8y, S] = wasm.signWithScalar(v.message, v.scalar);
+  eq(r8x, v.R8.x, "signWithScalar.R8x");
+  eq(r8y, v.R8.y, "signWithScalar.R8y");
+  eq(S, v.S, "signWithScalar.S");
+  eq(wasm.verifyScalarSignature(v.message, x, y, r8x, r8y, S), true, "verifyScalarSignature");
 }
 
 // cipher (encrypt + decrypt round-trip)

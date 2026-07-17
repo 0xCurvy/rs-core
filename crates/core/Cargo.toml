@@ -21,10 +21,12 @@ ark-secp256k1.workspace = true
 getrandom.workspace = true
 ctr.workspace = true
 hkdf.workspace = true
+hmac.workspace = true
 num-bigint.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 sha2.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 light-poseidon.workspace = true

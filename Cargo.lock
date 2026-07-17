@@ -313,12 +313,14 @@ dependencies = [
  "ctr",
  "getrandom",
  "hkdf",
+ "hmac",
  "light-poseidon",
  "num-bigint",
  "rayon",
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]

@@ -100,6 +100,38 @@ Key surface (all string-in / string-out): `poseidon`, `ownerHash`, `noteId`,
 / `decryptAmountToken`, `sha256BigInt`, and the stealth core `new_meta`,
 `get_meta`, `send`, `scan`, `viewerScan`.
 
+### Seedless scalar signatures
+
+The scalar-native compatibility profile derives `A = scalar * Base8` directly;
+it does not run the scalar through the legacy BLAKE/prune seed KDF. The deployed
+Curvy circuit equation requires `S = r + 8*h*scalar mod l`.
+
+Rust exposes `ScalarSigningKey`, `sign_curvy_v1`, checked `BabyJubPoint` /
+`BabyJubScalar` boundaries, and signer-based witness builders. WASM exposes:
+
+```js
+const [ax, ay] = pubFromScalar(scalarDecimal);
+const [r8x, r8y, S] = signWithScalar(messageDecimal, scalarDecimal);
+const ok = verifyScalarSignature(messageDecimal, ax, ay, r8x, r8y, S);
+```
+
+An independent TypeScript implementation and CircomJS compatibility tests live
+in [`typescript/`](typescript). Both implementations consume
+[`scalar_signature_vectors.json`](crates/core/testdata/scalar_signature_vectors.json).
+The normative proposal is
+[`curvy-scalar-signature-generation-proposal.md`](plans/curvy-scalar-signature-generation-proposal.md).
+
+The real pinned withdrawal graph gate runs with the SDK workspace tests. The
+production-zkey proof gate is ignored by default because the `.zkey` is external:
+
+```bash
+cd sdk
+cargo test -p curvy-witnesscalc --test scalar_signature
+CURVY_WITHDRAWAL_ZKEY=/path/to/withdrawal.zkey \
+  cargo test -p curvy-witnesscalc --test scalar_signature \
+  real_withdrawal_zkey_proves_scalar_native_signature -- --ignored
+```
+
 ## Threads, cross-origin isolation, and CORS quirks
 
 The threaded build uses WebAssembly threads (rayon over `SharedArrayBuffer`).

@@ -2036,10 +2036,12 @@ dependencies = [
  "ctr",
  "getrandom 0.2.16",
  "hkdf",
+ "hmac",
  "num-bigint",
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]

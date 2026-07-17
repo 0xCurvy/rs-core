@@ -17,6 +17,7 @@ crates/prover/pkg-web-threads
 
 # Harness node deps + large circuit artifacts (supply per www/data/README.md)
 node_modules
+.pnpm-store
 crates/prover/www/data/*.zkey
 crates/prover/www/data/*.wtns
 

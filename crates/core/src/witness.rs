@@ -10,8 +10,8 @@ use num_bigint::BigUint;
 use serde::Serialize;
 
 use crate::cipher::encrypt_amount_token;
-use crate::eddsa::sign_hex;
-use crate::field::{fr_to_biguint, fr_to_dec, Fr};
+use crate::eddsa::{sign_hex, ScalarSignatureError, ScalarSigningKey, Signature};
+use crate::field::{fr_to_biguint, fr_to_dec, Bn254Fr, Fr};
 use crate::hash_utils::sha256_bigint;
 use crate::imt::Imt;
 use crate::note as commitments;
@@ -28,6 +28,38 @@ pub struct Note {
     pub shared_secret: Fr,
     pub ephemeral_key: (Fr, Fr),
     pub view_tag: Fr,
+}
+
+/// Explicit note-owner construction for profiles that already know the checked
+/// BabyJubJub owner point and shared secret (for example a PIX allocation).
+/// Neither value is derived from the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KnownOwner {
+    pub owner: crate::babyjubjub::BabyJubPoint,
+    pub shared_secret: Bn254Fr,
+}
+
+impl KnownOwner {
+    pub fn new(owner: crate::babyjubjub::BabyJubPoint, shared_secret: Bn254Fr) -> Self {
+        Self { owner, shared_secret }
+    }
+
+    pub fn note(
+        self,
+        amount: Fr,
+        token: Fr,
+        ephemeral_key: (Fr, Fr),
+        view_tag: Fr,
+    ) -> Note {
+        Note {
+            amount,
+            token,
+            owner_pub: self.owner.as_tuple(),
+            shared_secret: self.shared_secret.into_inner(),
+            ephemeral_key,
+            view_tag,
+        }
+    }
 }
 
 impl Note {
@@ -92,6 +124,56 @@ fn flat_signature(r8: (Fr, Fr), s: &BigUint) -> [String; 3] {
     [s.to_string(), fr_to_dec(&r8.0), fr_to_dec(&r8.1)]
 }
 
+/// Source of a BabyJubJub public key and Curvy-compatible signature. Witness
+/// builders consume both from the same object so a caller cannot accidentally
+/// pair a signature with a different public key.
+pub trait NoteSigner {
+    fn public_key(&self) -> (Fr, Fr);
+    fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError>;
+}
+
+/// Legacy seed-backed signer retained for existing Curvy accounts.
+pub struct SeedNoteSigner<'a> {
+    private_key_hex: &'a str,
+    public_key: (Fr, Fr),
+}
+
+impl<'a> SeedNoteSigner<'a> {
+    /// Derive the public point using the legacy BLAKE/prune seed profile.
+    pub fn new(private_key_hex: &'a str) -> Self {
+        Self {
+            private_key_hex,
+            public_key: crate::eddsa::pub_from_private_key_hex(private_key_hex),
+        }
+    }
+
+    /// Compatibility constructor for old callers that already serialize a public
+    /// point separately. New code should use [`Self::new`].
+    fn legacy(private_key_hex: &'a str, public_key: (Fr, Fr)) -> Self {
+        Self { private_key_hex, public_key }
+    }
+}
+
+impl NoteSigner for SeedNoteSigner<'_> {
+    fn public_key(&self) -> (Fr, Fr) {
+        self.public_key
+    }
+
+    fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError> {
+        Ok(sign_hex(&fr_to_biguint(&message), self.private_key_hex))
+    }
+}
+
+impl NoteSigner for ScalarSigningKey {
+    fn public_key(&self) -> (Fr, Fr) {
+        self.verifying_key().as_tuple()
+    }
+
+    fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError> {
+        Ok(self.sign_curvy_v1(Bn254Fr::from_fr(message))?.to_legacy())
+    }
+}
+
 // ── Withdrawal ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
@@ -122,14 +204,37 @@ pub fn build_withdrawal(
     destination_address: Fr,
     token_id: Fr,
 ) -> WithdrawalWitness {
+    let signer = SeedNoteSigner::legacy(owner_key_hex, public_key);
+    build_withdrawal_with_signer(
+        notes,
+        &signer,
+        proofs,
+        notes_root,
+        destination_address,
+        token_id,
+    )
+    .expect("legacy seed signing is infallible")
+}
+
+/// Build a withdrawal witness using either a seed-backed or scalar-backed signer.
+/// The witness public key is always obtained from the signer.
+pub fn build_withdrawal_with_signer(
+    notes: &[Note],
+    signer: &impl NoteSigner,
+    proofs: &[Proof],
+    notes_root: Fr,
+    destination_address: Fr,
+    token_id: Fr,
+) -> Result<WithdrawalWitness, ScalarSignatureError> {
     let total: Fr = notes.iter().fold(Fr::ZERO, |a, n| a + n.amount);
     let mut msg: Vec<Fr> = notes.iter().map(|n| n.nullifier()).collect();
     msg.push(destination_address);
     msg.push(total);
     msg.push(token_id);
-    let sig = sign_hex(&fr_to_biguint(&poseidon(&msg)), owner_key_hex);
+    let sig = signer.sign(poseidon(&msg))?;
+    let public_key = signer.public_key();
 
-    WithdrawalWitness {
+    Ok(WithdrawalWitness {
         input_notes: notes.iter().map(|n| n.flat()).collect(),
         public_key: [fr_to_dec(&public_key.0), fr_to_dec(&public_key.1)],
         input_note_inclusion_proofs: proofs.iter().map(|p| p.flat()).collect(),
@@ -137,7 +242,7 @@ pub fn build_withdrawal(
         notes_root: fr_to_dec(&notes_root),
         destination_address: fr_to_dec(&destination_address),
         token_id: fr_to_dec(&token_id),
-    }
+    })
 }
 
 // ── Aggregation ─────────────────────────────────────────────────────────────
@@ -211,6 +316,35 @@ pub fn build_aggregation(
     gas_fee: Fr,
     fee_note_public_key: (Fr, Fr),
 ) -> AggregationWitness {
+    let signer = SeedNoteSigner::legacy(owner_key_hex, public_key);
+    build_aggregation_with_signer(
+        input_notes,
+        input_proofs,
+        output_notes,
+        fee_note,
+        &signer,
+        notes_root,
+        protocol_fee_per_thousand,
+        gas_fee,
+        fee_note_public_key,
+    )
+    .expect("legacy seed signing is infallible")
+}
+
+/// Build an aggregation witness using either a seed-backed or scalar-backed
+/// signer. The witness public key is always obtained from the signer.
+#[allow(clippy::too_many_arguments)]
+pub fn build_aggregation_with_signer(
+    input_notes: &[Note],
+    input_proofs: &[Proof],
+    output_notes: &[Note],
+    fee_note: &Note,
+    signer: &impl NoteSigner,
+    notes_root: Fr,
+    protocol_fee_per_thousand: Fr,
+    gas_fee: Fr,
+    fee_note_public_key: (Fr, Fr),
+) -> Result<AggregationWitness, ScalarSignatureError> {
     let enc_notes: Vec<Note> = output_notes.iter().chain(std::iter::once(fee_note)).cloned().collect();
     let encrypted: Vec<(Fr, Fr)> = enc_notes.iter().map(|n| n.encrypted()).collect();
 
@@ -222,7 +356,8 @@ pub fn build_aggregation(
     }
     let encrypted_note_data_hash = poseidon(&enc_flat);
     let signing_hash = poseidon(&[output_note_hash, encrypted_note_data_hash]);
-    let sig = sign_hex(&fr_to_biguint(&signing_hash), owner_key_hex);
+    let sig = signer.sign(signing_hash)?;
+    let public_key = signer.public_key();
 
     // Per-token gas fee: prove `(token -> gasFee)` membership. The leaf index is
     // the inputs' token (`input_notes[0].token`); the synthetic tree carries
@@ -230,7 +365,7 @@ pub fn build_aggregation(
     let (gas_fee_siblings, commit_pending_notes_gas_fee_root) =
         synthetic_gas_fee_proof(&input_notes[0].token, gas_fee);
 
-    AggregationWitness {
+    Ok(AggregationWitness {
         input_notes: input_notes.iter().map(|n| n.flat()).collect(),
         input_note_inclusion_proofs: input_proofs.iter().map(|p| p.flat()).collect(),
         output_notes: output_notes.iter().map(|n| n.flat()).collect(),
@@ -244,7 +379,7 @@ pub fn build_aggregation(
         gas_fee_siblings,
         commit_pending_notes_gas_fee_root,
         fee_note_public_key: [fr_to_dec(&fee_note_public_key.0), fr_to_dec(&fee_note_public_key.1)],
-    }
+    })
 }
 
 // ── Pending-notes commitment ────────────────────────────────────────────────

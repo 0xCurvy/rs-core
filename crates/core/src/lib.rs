@@ -39,9 +39,15 @@
 //! The public API speaks **decimal strings** (and `"X.Y"` for curve points). Two
 //! conversions are easy to get wrong, so each lives in exactly one place:
 //!
-//! - **Field elements** → [`field::fr_from_dec`] / [`field::fr_to_dec`], which
+//! - **Trusted/internal field elements** → [`field::fr_from_dec`] /
+//!   [`field::fr_to_dec`], which
 //!   reduce modulo the field. Use them for amounts, hashes, and commitments -
 //!   anything that *is* a field element.
+//! - **Untrusted canonical field elements** → [`field::Bn254Fr`], which rejects
+//!   values outside the field instead of reducing them.
+//! - **Scalar-native BabyJubJub keys** → [`babyjubjub::BabyJubSecretScalar`] and
+//!   [`eddsa::ScalarSigningKey`], which derive `A = scalar·Base8` directly without
+//!   the legacy seed hash/prune step.
 //! - **Raw 256-bit integers** (cipher key material, [`hash_utils::sha256_bigint`]
 //!   inputs, the EdDSA message) → `num_bigint::BigUint`, packed **without** field
 //!   reduction. See [`encoding`].
