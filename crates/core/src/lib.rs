@@ -117,4 +117,5 @@ pub mod stealth;
 
 // Convenience re-exports for the two most-used items.
 pub use field::Fr;
+pub use imt::{NOTES_SHARD_HEIGHT, NOTES_SHARD_SIZE, NOTES_TREE_DEPTH, NOTES_TREE_VERSION};
 pub use poseidon::poseidon;

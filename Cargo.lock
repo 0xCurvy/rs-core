@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-core"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "aes",
  "ark-bn254",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-wasm"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "curvy-core",
  "wasm-bindgen",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "ark-bn254",
  "ark-ff",
