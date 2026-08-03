@@ -33,16 +33,16 @@ Most native applications only need `curvy-core`:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.1"
+curvy-core = "=0.1.0-rc.2"
 ```
 
 Add witness evaluation or local proving only when your application needs it:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.1"
-curvy-witness = "=0.1.0-rc.1"
-curvy-prover = "=0.1.0-rc.1"
+curvy-core = "=0.1.0-rc.2"
+curvy-witness = "=0.1.0-rc.2"
+curvy-prover = "=0.1.0-rc.2"
 ```
 
 Rust 1.94 or newer is required.
@@ -206,14 +206,14 @@ core crate without this build script:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.1", features = ["parallel"] }
-curvy-prover = "=0.1.0-rc.1"
+curvy-core = { version = "=0.1.0-rc.2", features = ["parallel"] }
+curvy-prover = "=0.1.0-rc.2"
 ```
 
 After publication, the executable can instead be installed from crates.io:
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.0-rc.1 \
+cargo install --locked curvy-prover --version 0.1.0-rc.2 \
   --bin curvy-native-prover
 ```
 
@@ -390,7 +390,7 @@ cargo publish --locked -p curvy-wasm
 ```
 
 Tag the exact published commit with the workspace version, for example
-`v0.1.0-rc.1`. The CI workflow validates native Rust, portable WASM, threaded
+`v0.1.0-rc.2`. The CI workflow validates native Rust, portable WASM, threaded
 WASM, rustdoc, dependency policy, package contents, and the prover's compact
 prove-and-verify fixture before publication.
 

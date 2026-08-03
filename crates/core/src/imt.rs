@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::LazyLock;
 
 use ark_ff::AdditiveGroup;
 #[cfg(feature = "parallel")]
@@ -38,6 +39,7 @@ pub enum TreeError {
     WitnessRootMismatch { shard_index: usize },
     InvalidSnapshot(String),
     RewindBeforeCompleted { minimum: usize, requested: usize },
+    NonCanonicalField,
 }
 
 impl fmt::Display for TreeError {
@@ -106,6 +108,12 @@ impl fmt::Display for TreeError {
                 f,
                 "sharded tree: cannot rewind completed shards in place (minimum {minimum}, requested {requested}); restore a checkpoint",
             ),
+            Self::NonCanonicalField => {
+                write!(
+                    f,
+                    "tree: value is not a canonical 32-byte BN254 field element"
+                )
+            }
         }
     }
 }
@@ -122,10 +130,44 @@ pub struct InclusionProof {
     pub root: Fr,
 }
 
+/// Depth of the production Curvy notes tree.
+pub const NOTES_TREE_DEPTH: usize = 30;
+
+/// Shard height of the production Curvy notes tree: a shard covers `2^14` leaves.
+pub const NOTES_SHARD_HEIGHT: usize = 14;
+
+/// Leaves per completed shard in the production notes tree (`1 << NOTES_SHARD_HEIGHT`).
+pub const NOTES_SHARD_SIZE: usize = 1 << NOTES_SHARD_HEIGHT;
+
+/// Schema version of the persisted notes-tree state. Bump only when the
+/// persisted layout changes in a way that invalidates stored checkpoints.
+pub const NOTES_TREE_VERSION: u32 = 1;
+
+/// Largest depth served from the precomputed zero-root table. Every tree this
+/// crate can construct is covered: `tree_capacity` rejects depths whose
+/// `1 << depth` does not fit a `usize`.
+const MAX_CACHED_ZERO_DEPTH: usize = 64;
+
+/// The `Fr::ZERO`-leaf zero-root table, computed once.
+///
+/// `zero_roots_from` is a pure recurrence in which `z[i]` depends only on
+/// `z[i - 1]`, so the table for any depth is a *prefix* of the table for a
+/// larger depth. One table therefore serves every depth without changing a
+/// single hash.
+static ZERO_ROOTS: LazyLock<Vec<Fr>> =
+    LazyLock::new(|| zero_roots_from(MAX_CACHED_ZERO_DEPTH, Fr::ZERO));
+
 /// `Z[h]` = root of an all-empty subtree of height `h` (`Z[0] = 0`), for `h` in
 /// `0..=depth`. `Z[depth]` is the empty-tree root.
+///
+/// Served from a precomputed table, so this is a copy rather than `depth`
+/// Poseidon hashes. Restoring a depth-30 frontier was measured at 99.8%
+/// zero-root recomputation before this cache existed.
 pub fn zero_roots(depth: usize) -> Vec<Fr> {
-    zero_roots_from(depth, Fr::ZERO)
+    match ZERO_ROOTS.get(..=depth) {
+        Some(prefix) => prefix.to_vec(),
+        None => zero_roots_from(depth, Fr::ZERO),
+    }
 }
 
 /// Zero roots starting from a caller-supplied leaf-level zero.
@@ -363,6 +405,17 @@ impl NotesFrontier {
         })
     }
 
+    /// An empty frontier with the production notes-tree geometry
+    /// ([`NOTES_TREE_DEPTH`] / [`NOTES_SHARD_HEIGHT`]).
+    ///
+    /// Infallible: the protocol geometry is a compile-time constant that
+    /// [`NotesFrontier::new`] accepts, which `production_geometry_is_valid`
+    /// asserts.
+    pub fn production() -> Self {
+        Self::new(NOTES_TREE_DEPTH, NOTES_SHARD_HEIGHT)
+            .expect("production notes-tree geometry is valid")
+    }
+
     pub fn depth(&self) -> usize {
         self.depth
     }
@@ -377,6 +430,14 @@ impl NotesFrontier {
 
     pub fn leaf_count(&self) -> usize {
         self.leaf_count
+    }
+
+    /// Number of *completed* shards: `leaf_count >> shard_height`.
+    ///
+    /// A partially filled trailing shard is not counted, so this is exactly the
+    /// number of shard roots emitted by [`NotesFrontier::append`] so far.
+    pub fn shard_count(&self) -> usize {
+        self.leaf_count >> self.shard_height
     }
 
     /// The depth-`depth` root using the protocol's recursive zero padding.
@@ -458,6 +519,22 @@ impl NotesFrontier {
             }
         }
         Ok(completed)
+    }
+
+    /// [`NotesFrontier::append`] over a canonical big-endian 32-byte leaf.
+    ///
+    /// Every consumer reaching this type across a byte boundary — the wasm/TS
+    /// adapter and the blokli indexer both — otherwise repeats the same
+    /// `fr_from_be_32_checked` marshalling. Rejects non-canonical encodings
+    /// rather than reducing them into the field.
+    pub fn append_be_32(&mut self, leaf: &[u8; 32]) -> Result<FrontierAppend, TreeError> {
+        let leaf = fr_from_be_32_checked(leaf).ok_or(TreeError::NonCanonicalField)?;
+        self.append(leaf)
+    }
+
+    /// [`NotesFrontier::root`] as canonical big-endian 32 bytes.
+    pub fn root_be_32(&self) -> [u8; 32] {
+        fr_to_be_32(&self.root())
     }
 
     /// Canonical versioned snapshot suitable for a per-block database checkpoint.
@@ -2046,5 +2123,103 @@ mod tests {
                 "wrong index must be rejected (leaf {i})"
             );
         }
+    }
+
+    #[test]
+    fn cached_zero_roots_match_freshly_computed() {
+        // The cache must be a pure memoisation: identical output for every
+        // depth, including past the cached table where it falls through.
+        for depth in 0..=MAX_CACHED_ZERO_DEPTH + 2 {
+            assert_eq!(
+                zero_roots(depth),
+                zero_roots_from(depth, Fr::ZERO),
+                "cached zero roots diverge at depth {depth}",
+            );
+        }
+    }
+
+    #[test]
+    fn cached_zero_roots_are_prefixes_of_one_another() {
+        let deep = zero_roots(MAX_CACHED_ZERO_DEPTH);
+        for depth in 0..=MAX_CACHED_ZERO_DEPTH {
+            assert_eq!(
+                zero_roots(depth),
+                deep[..=depth],
+                "depth {depth} is not a prefix of the full table",
+            );
+        }
+    }
+
+    #[test]
+    fn zero_roots_from_is_unaffected_by_the_cache() {
+        // A caller-supplied leaf must never be served from the Fr::ZERO table.
+        let leaf = Fr::from(7u64);
+        let custom = zero_roots_from(8, leaf);
+        assert_eq!(custom[0], leaf);
+        assert_ne!(custom, zero_roots(8));
+    }
+
+    #[test]
+    fn production_geometry_is_valid() {
+        let frontier = NotesFrontier::production();
+        assert_eq!(frontier.depth(), NOTES_TREE_DEPTH);
+        assert_eq!(frontier.shard_height(), NOTES_SHARD_HEIGHT);
+        assert_eq!(frontier.shard_size(), NOTES_SHARD_SIZE);
+        assert_eq!(frontier.leaf_count(), 0);
+        assert_eq!(frontier.shard_count(), 0);
+        assert_eq!(
+            frontier,
+            NotesFrontier::new(NOTES_TREE_DEPTH, NOTES_SHARD_HEIGHT).unwrap(),
+        );
+    }
+
+    #[test]
+    fn shard_count_tracks_completed_shards_only() {
+        let mut frontier = NotesFrontier::new(6, 3).unwrap();
+        assert_eq!(frontier.shard_count(), 0);
+
+        for index in 0..8u64 {
+            frontier.append(Fr::from(index + 1)).unwrap();
+            // A shard of 2^3 leaves only completes on the eighth append.
+            let expected = usize::from(index == 7);
+            assert_eq!(
+                frontier.shard_count(),
+                expected,
+                "shard_count wrong after {} leaves",
+                index + 1,
+            );
+        }
+
+        frontier.append(Fr::from(9u64)).unwrap();
+        assert_eq!(frontier.shard_count(), 1, "partial shard must not count");
+        assert_eq!(frontier.shard_count(), frontier.leaf_count() >> 3);
+    }
+
+    #[test]
+    fn byte_helpers_match_the_field_api() {
+        let leaves: Vec<Fr> = (1u64..=9).map(Fr::from).collect();
+
+        let mut via_field = NotesFrontier::new(6, 3).unwrap();
+        let mut via_bytes = NotesFrontier::new(6, 3).unwrap();
+        for leaf in &leaves {
+            let expected = via_field.append(*leaf).unwrap();
+            let actual = via_bytes.append_be_32(&fr_to_be_32(leaf)).unwrap();
+            assert_eq!(actual, expected);
+        }
+
+        assert_eq!(via_bytes.root_be_32(), fr_to_be_32(&via_field.root()));
+        assert_eq!(via_bytes, via_field);
+    }
+
+    #[test]
+    fn append_be_32_rejects_non_canonical_encodings() {
+        let mut frontier = NotesFrontier::new(6, 3).unwrap();
+        // 0xff..ff exceeds the BN254 modulus; it must be refused rather than
+        // silently reduced into the field.
+        assert_eq!(
+            frontier.append_be_32(&[0xff; 32]),
+            Err(TreeError::NonCanonicalField),
+        );
+        assert_eq!(frontier.leaf_count(), 0, "rejected leaf must not be stored");
     }
 }

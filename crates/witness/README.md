@@ -11,7 +11,7 @@ local Groth16 proving should be one operation.
 
 ```toml
 [dependencies]
-curvy-witness = "=0.1.0-rc.1"
+curvy-witness = "=0.1.0-rc.2"
 ```
 
 ## Evaluate a graph

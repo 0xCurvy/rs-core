@@ -383,6 +383,15 @@ impl WasmNotesFrontier {
         })
     }
 
+    /// An empty frontier with the production notes-tree geometry, so callers
+    /// stop restating `depth = 30` / `shardHeight = 14` on the JS side.
+    #[wasm_bindgen(js_name = production)]
+    pub fn production() -> WasmNotesFrontier {
+        Self {
+            inner: CoreNotesFrontier::production(),
+        }
+    }
+
     #[wasm_bindgen(js_name = restore)]
     pub fn restore(snapshot: &[u8]) -> Result<WasmNotesFrontier, JsError> {
         Ok(Self {
@@ -439,6 +448,33 @@ impl WasmNotesFrontier {
     pub fn leaf_count(&self) -> u32 {
         self.inner.leaf_count() as u32
     }
+
+    #[wasm_bindgen(getter, js_name = shardCount)]
+    pub fn shard_count(&self) -> u32 {
+        self.inner.shard_count() as u32
+    }
+}
+
+/// Protocol notes-tree parameters, exported so JavaScript consumers read them
+/// from the core rather than hardcoding a second copy.
+#[wasm_bindgen(js_name = notesTreeDepth)]
+pub fn notes_tree_depth() -> u32 {
+    curvy_core::NOTES_TREE_DEPTH as u32
+}
+
+#[wasm_bindgen(js_name = notesShardHeight)]
+pub fn notes_shard_height() -> u32 {
+    curvy_core::NOTES_SHARD_HEIGHT as u32
+}
+
+#[wasm_bindgen(js_name = notesShardSize)]
+pub fn notes_shard_size() -> u32 {
+    curvy_core::NOTES_SHARD_SIZE as u32
+}
+
+#[wasm_bindgen(js_name = notesTreeVersion)]
+pub fn notes_tree_version() -> u32 {
+    curvy_core::NOTES_TREE_VERSION
 }
 
 #[wasm_bindgen(js_name = NotesFrontierAppend)]
