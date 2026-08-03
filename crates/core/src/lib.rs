@@ -1,67 +1,85 @@
-//! # Curvy crypto core
+#![doc = include_str!("../README.md")]
 //!
-//! A self-contained implementation of the cryptography behind the Curvy privacy
-//! protocol. It is split into two parts that are quite different and are best read
-//! separately.
+//! ## Implementation notes
 //!
-//! - **The circuit / commitment layer.** BabyJubjub + Poseidon over the BN254
-//!   scalar field, a note-data cipher, note commitments, and the incremental Merkle
-//!   trees and circuit witness builders. This is where most of the code is and is
-//!   the gentler starting point.
-//! - **Stealth addressing** ([`stealth`]). Dual-curve and pairing-based (secp256k1
-//!   spend keys + BN254 viewing keys); the more involved part.
+//! One Rust implementation of Curvy's cryptography, replacing the old split across
+//! a Go-WASM core and TypeScript re-implementations. Every function here is a
+//! faithful port of an existing implementation and is pinned to it by **golden
+//! vectors** (see "Verification" below) — so behaviour must stay byte-for-byte
+//! identical, even where that means code that looks unusual.
+//!
+//! ## New here? Read this first
+//!
+//! The crate is split into two cryptographic *domains*. They are very different;
+//! treat them separately.
+//!
+//! - **Domain B — the circuit/commitment layer.** BabyJubjub + Poseidon over the
+//!   BN254 scalar field, a note cipher, note commitments, and the Merkle trees and
+//!   witness builders the zk-circuits consume. Start here — it is self-contained
+//!   and where most code lives.
+//! - **Domain A — the stealth addressing core** ([`stealth`]). The hard part:
+//!   *dual-curve* and *pairing-based* (secp256k1 spend keys + BN254 viewing keys),
+//!   ported from the Go `curvy-core`.
 //!
 //! ## Module map
 //!
-//! | Module | What it is |
-//! |---|---|
-//! | [`field`] | BN254 scalar field `Fr` and decimal⇄`Fr` conversion (the boundary) |
-//! | [`encoding`] | hex / little-endian / big-endian byte helpers |
-//! | [`poseidon`](mod@poseidon) | Poseidon hash over `Fr` |
-//! | [`babyjubjub`] | BabyJubjub curve (point addition + scalar multiplication) |
-//! | [`blake512`] | BLAKE-512 (the original SHA-3 finalist, not BLAKE2) |
-//! | [`eddsa`] | EdDSA-Poseidon signing + key derivation on BabyJubjub |
-//! | [`cipher`] | note-data cipher (AES-256-CTR additive field one-time pad) |
-//! | [`note`] | note `id` / `ownerHash` / `nullifier` commitments |
-//! | [`hash_utils`] | `sha256BigInt` |
-//! | [`imt`] | incremental Merkle tree (+ sharded variant) |
-//! | [`witness`] | aggregation / withdrawal / pending-commit witness builders |
-//! | [`stealth`] | dual-curve, pairing-based stealth addressing |
-//!
-//! The standard primitives follow the circomlib / iden3 conventions used across
-//! the Circom ecosystem: Poseidon uses the circomlib round constants and MDS
-//! matrices, and BabyJubjub, EdDSA-Poseidon, and the incremental Merkle tree match
-//! the corresponding `@zk-kit` / iden3 reference implementations. The conformance
-//! test suite pins each against those references (see "Verification").
+//! | Module | What it is | Mirrors |
+//! |---|---|---|
+//! | [`field`] | BN254 scalar field `Fr` + decimal⇄`Fr` helpers (the boundary) | — |
+//! | [`encoding`] | hex / little-endian / big-endian byte helpers | — |
+//! | [`poseidon`](mod@poseidon) | Poseidon hash over `Fr` | `poseidon-lite` |
+//! | [`babyjubjub`] | BabyJubjub curve (point add + scalar mul) | `@zk-kit/baby-jubjub` |
+//! | [`blake512`] | original BLAKE-512 (not BLAKE2) | `@zk-kit/eddsa-poseidon` |
+//! | [`eddsa`] | EdDSA-Poseidon signing + key derivation | `@zk-kit/eddsa-poseidon` |
+//! | [`cipher`] | note-data AES-256-CTR additive field-OTP | `balanceCipher.ts` |
+//! | [`note`] | note `id` / `ownerHash` / `nullifier` commitments | `note.ts` |
+//! | [`hash_utils`] | `sha256BigInt` | `proving/utils.ts` |
+//! | [`imt`] | indexed IMT + stateful bounded sharded tree | `@zk-kit/imt` / `shardedNotesTree.ts` |
+//! | [`witness`] | aggregation / withdrawal / pending-commit witness builders | `witnessFromNotes.ts` |
+//! | [`stealth`] | **Domain A** stealth addressing (pairing) | Go `curvy-core` |
 //!
 //! ## The boundary: how values cross in and out
 //!
-//! The public API speaks **decimal strings** (and `"X.Y"` for curve points). Two
-//! conversions are easy to get wrong, so each lives in exactly one place:
+//! Scalar crypto boundaries speak **decimal strings** (and `"X.Y"` for points),
+//! matching the existing TypeScript/Go wire shapes. Bulk tree boundaries use
+//! canonical packed 32-byte field elements. Two conversions matter and are easy
+//! to get wrong, so they live in exactly one place each:
 //!
-//! - **Field elements** → [`field::fr_from_dec`] / [`field::fr_to_dec`], which
-//!   reduce modulo the field. Use them for amounts, hashes, and commitments -
+//! - **Trusted/internal field elements** → [`field::fr_from_dec`] /
+//!   [`field::fr_to_dec`], which reduce modulo the field. Use them for amounts,
+//!   hashes, and commitments —
 //!   anything that *is* a field element.
-//! - **Raw 256-bit integers** (cipher key material, [`hash_utils::sha256_bigint`]
+//! - **Untrusted canonical field elements** → [`field::Bn254Fr`], which rejects
+//!   values outside the field instead of reducing them.
+//! - **Scalar-native BabyJubJub keys** → [`babyjubjub::BabyJubSecretScalar`] and
+//!   [`eddsa::ScalarSigningKey`], which derive `A = scalar·Base8` directly without
+//!   the seed-backed profile's hash/prune step.
+//! - **Raw 256-bit integers** (the cipher key material, [`hash_utils::sha256_bigint`]
 //!   inputs, the EdDSA message) → `num_bigint::BigUint`, packed **without** field
 //!   reduction. See [`encoding`].
-//! - **Endianness:** big-endian for the cipher and `sha256BigInt`; little-endian
-//!   for EdDSA. Both are named explicitly in [`encoding`] to keep them distinct.
+//! - **Endianness:** big-endian for the cipher / `sha256BigInt`; little-endian for
+//!   EdDSA. They are named explicitly in [`encoding`] so the two never get mixed up.
 //!
 //! ## Error convention
 //!
-//! The [`stealth`] module validates untrusted input and returns
-//! [`stealth::StealthError`]. The commitment-layer boundary parsers instead
-//! **panic** on malformed input (e.g. a non-numeric "decimal"): callers pass
-//! already-validated values, so malformed input there is a programming error and a
-//! panic surfaces it loudly rather than silently producing a wrong field element.
+//! Internal boundary parsers **panic** on malformed input (e.g. a non-numeric
+//! "decimal"), because callers pass already-validated values and a panic surfaces a
+//! programming error loudly. Untrusted input is validated at the wasm boundary
+//! before reaching here.
+//!
+//! ## Signing profiles
+//!
+//! Seed-backed keys and direct-scalar keys are co-equal supported profiles. Use
+//! [`witness::SeedNoteSigner`] for established seed-derived accounts and
+//! [`eddsa::ScalarSigningKey`] when the account stores a canonical BabyJubjub
+//! subgroup scalar. Both implement [`witness::NoteSigner`] and produce the same
+//! Curvy circuit-input shapes; neither profile is deprecated.
 //!
 //! ## Verification
 //!
-//! Correctness is measured, not argued: each module is checked against committed
-//! test vectors in `tests/` - Poseidon additionally against an independent audited
-//! implementation ([`light-poseidon`](https://crates.io/crates/light-poseidon)),
-//! and the standard primitives against their circomlib / `@zk-kit` references.
+//! Committed compatibility vectors from the production TypeScript and Go
+//! implementations are asserted in the crate's test suite. Primitive behavior
+//! must remain byte-for-byte compatible with those vectors.
 //!
 //! ## Example
 //!
@@ -81,7 +99,7 @@
 pub mod encoding;
 pub mod field;
 
-// ── Circuit / commitment layer (BabyJubjub + Poseidon over BN254 Fr) ────────────
+// ── Domain B: circuit/commitment layer (BabyJubjub + Poseidon over BN254 Fr) ────
 pub mod babyjubjub;
 pub mod blake512;
 pub mod cipher;
@@ -90,11 +108,11 @@ pub mod hash_utils;
 pub mod note;
 pub mod poseidon;
 
-// ── Trees & witness builders (consumed by the zk-circuits) ──────────────────────
+// ── Trees & witness builders (consumed by the v2 zk-circuits) ───────────────────
 pub mod imt;
 pub mod witness;
 
-// ── Stealth addressing (secp256k1 + BN254 pairing) ──────────────────────────────
+// ── Domain A: stealth addressing core (secp256k1 + BN254 pairing) ───────────────
 pub mod stealth;
 
 // Convenience re-exports for the two most-used items.

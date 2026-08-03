@@ -1,0 +1,26 @@
+[package]
+name = "curvy-witness"
+description = "Authenticated Curvy witness-graph parser and BN254 evaluator"
+keywords = ["curvy", "circom", "witness", "zero-knowledge", "bn254"]
+categories = ["cryptography"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/curvy-witness"
+
+[package.metadata.docs.rs]
+targets = []
+rustdoc-args = ["-D", "warnings"]
+
+[dependencies]
+ark-bn254 = { workspace = true, default-features = false, features = ["curve"] }
+ark-ff = { workspace = true, default-features = false }
+num-bigint.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

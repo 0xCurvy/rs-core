@@ -1,47 +1,70 @@
-# arkworks Groth16 prover over snarkjs .zkey/.wtns artifacts — native (rayon) and
-# wasm32 from one source. Detached workspace (own [workspace]) so its dependency
-# set stays independent of the core crates.
-#
-# src/zkey.rs and src/qap.rs are vendored from ark-circom 0.5.0 (MIT OR Apache-2.0,
-# https://github.com/arkworks-rs/circom-compat), minus its wasmer witness calculator.
 [package]
 name = "curvy-prover"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-publish = false
+description = "Authenticated Circom witness and Groth16 prover for the Curvy protocol"
+keywords = ["curvy", "groth16", "snarkjs", "zero-knowledge", "bn254"]
+categories = ["cryptography"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/curvy-prover"
 
-[workspace]
+[package.metadata.docs.rs]
+all-features = true
+targets = []
+rustdoc-args = ["-D", "warnings"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
-ark-ec = { version = "0.5.0", default-features = false }
-ark-ff = { version = "0.5.0", default-features = false }
-ark-groth16 = { version = "0.5.0", default-features = false }
-ark-poly = { version = "0.5.0", default-features = false }
-ark-relations = { version = "0.5.0", default-features = false }
-ark-serialize = { version = "0.5.0", default-features = false }
-ark-std = { version = "0.5.0", default-features = false }
-byteorder = "1.5"
-num-bigint = "0.4"
-num-traits = "0.2"
-rand = "0.8"
-rayon = { version = "1", optional = true }
-getrandom = { version = "0.2", features = ["js"] }
-wasm-bindgen = { version = "=0.2.114", optional = true }
-wasm-bindgen-rayon = { version = "1.3", optional = true }
+ark-bn254 = { workspace = true, default-features = false, features = ["curve"] }
+ark-ec = { workspace = true, default-features = false }
+ark-ff = { workspace = true, default-features = false }
+ark-groth16 = { workspace = true, default-features = false }
+ark-poly = { workspace = true, default-features = false }
+ark-relations = { workspace = true, default-features = false }
+ark-serialize = { workspace = true, default-features = false }
+ark-std = { workspace = true, default-features = false }
+byteorder.workspace = true
+curvy-witness = { version = "=0.1.0-rc.1", path = "../witness" }
+getrandom.workspace = true
+num-bigint.workspace = true
+rayon = { workspace = true, optional = true }
+sha2.workspace = true
+thiserror.workspace = true
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-rayon = { workspace = true, optional = true }
 
 [features]
 default = ["std", "parallel"]
-std = ["ark-bn254/std", "ark-ec/std", "ark-ff/std", "ark-groth16/std", "ark-poly/std", "ark-relations/std", "ark-serialize/std", "ark-std/std"]
-parallel = ["dep:rayon", "ark-ec/parallel", "ark-ff/parallel", "ark-groth16/parallel", "ark-poly/parallel", "ark-std/parallel"]
+std = [
+  "ark-bn254/std",
+  "ark-ec/std",
+  "ark-ff/std",
+  "ark-groth16/std",
+  "ark-poly/std",
+  "ark-relations/std",
+  "ark-serialize/std",
+  "ark-std/getrandom",
+  "ark-std/std",
+]
+parallel = [
+  "dep:rayon",
+  "ark-ec/parallel",
+  "ark-ff/parallel",
+  "ark-groth16/parallel",
+  "ark-poly/parallel",
+  "ark-std/parallel",
+]
 wasm = ["dep:wasm-bindgen"]
-# Threaded browser build: nightly + atomics + build-std + COOP/COEP page (see README).
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 
-[profile.release]
-opt-level = 3
-lto = "thin"
+[[bin]]
+name = "curvy-native-prover"
+path = "src/bin/curvy-native-prover.rs"
+required-features = ["std"]

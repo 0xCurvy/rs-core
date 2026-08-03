@@ -1,15 +1,16 @@
 //! Poseidon round constants (`C`) and MDS matrices (`M`), one set per arity `1..=16`.
 //!
-//! These are the circomlib parameters, committed as decimal JSON so they are
-//! human-auditable, compiled into the binary via `include_str!`, and parsed once
-//! into field elements on first use (no runtime file I/O).
+//! These are dumped verbatim from `poseidon-lite@0.2.1`'s circomlib parameters and
+//! committed as decimal JSON so they are human-auditable. They are compiled into
+//! the binary via `include_str!` and parsed once into field elements on first use —
+//! no runtime file IO (WASM-safe).
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-use crate::field::{fr_from_dec, Fr};
+use crate::field::{Fr, fr_from_dec};
 
 const CONSTANTS_JSON: &str = include_str!("../../testdata/poseidon_constants.json");
 
@@ -56,14 +57,13 @@ static PARAMS: LazyLock<BTreeMap<usize, Params>> = LazyLock::new(|| {
             );
             assert_eq!(a.m.len(), a.t, "arity {arity}: M must be t x t");
             let c = a.c.iter().map(|s| fr_from_dec(s)).collect();
-            let m = a
-                .m
-                .iter()
-                .map(|row| {
-                    assert_eq!(row.len(), a.t, "arity {arity}: M row must have t entries");
-                    row.iter().map(|s| fr_from_dec(s)).collect()
-                })
-                .collect();
+            let m =
+                a.m.iter()
+                    .map(|row| {
+                        assert_eq!(row.len(), a.t, "arity {arity}: M row must have t entries");
+                        row.iter().map(|s| fr_from_dec(s)).collect()
+                    })
+                    .collect();
             (
                 arity,
                 Params {

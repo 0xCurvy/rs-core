@@ -1,7 +1,9 @@
-//! Poseidon hash over BN254 Fr - the canonical *unoptimized* HadesHash from the
-//! Poseidon whitepaper as used by circomlib: `x^5` S-box, `[0, ...inputs]` state
-//! initialization, and the circomlib round constants (`C`) and MDS matrices (`M`).
-//! Conforms to circomlib / `poseidon-lite` and is checked against both in `tests/`.
+//! Poseidon hash over BN254 Fr — a faithful port of `poseidon-lite@0.2.1`
+//! (the canonical *unoptimized* HadesHash from the Poseidon whitepaper, as used by
+//! circomlib). Same round counts, same x^5 S-box, same `[0, ...inputs]` state init,
+//! same round constants (`C`) and MDS matrix (`M`) — so outputs match bit-for-bit.
+//!
+//! Reference: `node_modules/poseidon-lite/poseidon/index.js`.
 //!
 //! Uses (order matters), all via [`poseidon()`]:
 //! - `ownerHash = poseidon([pub.x, pub.y, sharedSecret])`
@@ -14,7 +16,7 @@ mod constants;
 use crate::field::Fr;
 use ark_ff::AdditiveGroup;
 
-/// Number of full rounds (R_F) - split half before / half after the partial rounds.
+/// Number of full rounds (R_F) — split half before / half after the partial rounds.
 const N_ROUNDS_F: usize = 8;
 
 /// `v^5` S-box (BN254 Fr arithmetic reduces mod p automatically).
@@ -40,11 +42,14 @@ fn mix(state: &[Fr], m: &[Vec<Fr>]) -> Vec<Fr> {
 
 /// Poseidon hash of `1..=16` field elements. Input order is significant.
 ///
-/// Panics on `0` or `> 16` inputs (the supported arity range).
+/// Panics on `0` or `> 16` inputs (matches `poseidon-lite`'s arity bounds).
 pub fn poseidon(inputs: &[Fr]) -> Fr {
     let arity = inputs.len();
     assert!(arity >= 1, "poseidon: at least 1 input required");
-    assert!(arity <= 16, "poseidon: at most 16 inputs supported, got {arity}");
+    assert!(
+        arity <= 16,
+        "poseidon: at most 16 inputs supported, got {arity}"
+    );
 
     let p = constants::params(arity);
     let t = p.t; // == arity + 1

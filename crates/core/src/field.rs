@@ -1,4 +1,4 @@
-//! BN254 scalar field (`Fr`) - the SNARK scalar field shared by circom, snarkjs,
+//! BN254 scalar field (`Fr`) — the SNARK scalar field shared by circom, snarkjs,
 //! poseidon-lite, and @zk-kit:
 //!
 //! ```text
@@ -8,7 +8,7 @@
 //! The public API speaks **decimal strings** at the boundary; internally we use
 //! `ark_bn254::Fr`. These helpers are the single conversion point.
 
-use core::str::FromStr;
+use core::{fmt, str::FromStr};
 
 use ark_ff::{BigInteger, PrimeField};
 use num_bigint::BigUint;
@@ -20,13 +20,89 @@ pub use ark_bn254::Fr;
 pub const FIELD_MODULUS_DEC: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
+/// A canonically parsed BN254 field element for untrusted protocol boundaries.
+///
+/// Unlike [`fr_from_dec`], this type rejects non-canonical encodings instead of
+/// reducing them modulo the field. Internally trusted arithmetic can continue to
+/// use [`Fr`] directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bn254Fr(Fr);
+
+/// Failure to parse a canonical BN254 field element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Bn254FrError {
+    InvalidDecimal,
+    NonCanonicalDecimal,
+    OutOfRange,
+}
+
+impl fmt::Display for Bn254FrError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDecimal => f.write_str("invalid unsigned decimal field element"),
+            Self::NonCanonicalDecimal => f.write_str("non-canonical decimal field element"),
+            Self::OutOfRange => {
+                f.write_str("field element is greater than or equal to the BN254 modulus")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Bn254FrError {}
+
+impl Bn254Fr {
+    /// Parse a canonical unsigned decimal integer in `[0, p)`.
+    pub fn try_from_dec(s: &str) -> Result<Self, Bn254FrError> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Bn254FrError::InvalidDecimal);
+        }
+        if s.len() > 1 && s.starts_with('0') {
+            return Err(Bn254FrError::NonCanonicalDecimal);
+        }
+        let value = BigUint::parse_bytes(s.as_bytes(), 10).ok_or(Bn254FrError::InvalidDecimal)?;
+        let modulus =
+            BigUint::parse_bytes(FIELD_MODULUS_DEC.as_bytes(), 10).expect("valid BN254 modulus");
+        if value >= modulus {
+            return Err(Bn254FrError::OutOfRange);
+        }
+        Ok(Self(fr_from_biguint(&value)))
+    }
+
+    /// Wrap an already canonical internal field element.
+    #[inline]
+    pub fn from_fr(value: Fr) -> Self {
+        Self(value)
+    }
+
+    #[inline]
+    pub fn as_fr(&self) -> &Fr {
+        &self.0
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> Fr {
+        self.0
+    }
+
+    pub fn to_dec(self) -> String {
+        fr_to_dec(&self.0)
+    }
+
+    pub fn to_le_32(self) -> [u8; 32] {
+        let bytes = fr_to_biguint(&self.0).to_bytes_le();
+        let mut out = [0u8; 32];
+        out[..bytes.len()].copy_from_slice(&bytes);
+        out
+    }
+}
+
 /// Parse a decimal string into a field element, **reducing modulo the field
 /// modulus** (`modulus + 5` → `5`, `-1` → `modulus − 1`).
 ///
 /// This is deliberate: it mirrors how poseidon-lite / circom coerce inputs, so it
 /// is the correct boundary for *field-element* values (Poseidon inputs, amounts,
-/// commitments). For *raw 256-bit* integers that must NOT be reduced - the cipher
-/// key material, `sha256BigInt` inputs, and the EdDSA signing message - use a
+/// commitments). For *raw 256-bit* integers that must NOT be reduced — the cipher
+/// key material, `sha256BigInt` inputs, and the EdDSA signing message — use a
 /// [`num_bigint::BigUint`] with the raw byte encodings in [`crate::encoding`].
 ///
 /// Panics only if `s` is not a valid (optionally signed) decimal integer.
@@ -64,6 +140,19 @@ pub fn fr_from_be_bytes_mod(bytes: &[u8]) -> Fr {
     Fr::from_be_bytes_mod_order(bytes)
 }
 
+/// Decode one canonical 32-byte big-endian field element.
+///
+/// Unlike [`fr_from_be_bytes_mod`], this rejects encodings greater than or equal
+/// to the modulus instead of silently reducing them. Use it for persisted or
+/// network-supplied tree data where non-canonical encodings indicate corruption.
+pub fn fr_from_be_32_checked(bytes: &[u8]) -> Option<Fr> {
+    if bytes.len() != 32 {
+        return None;
+    }
+    let value = Fr::from_be_bytes_mod_order(bytes);
+    (fr_to_be_32(&value).as_slice() == bytes).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,7 +173,8 @@ mod tests {
     fn from_dec_reduces_out_of_range() {
         // Documents the boundary contract: fr_from_dec reduces mod modulus rather
         // than rejecting (matching poseidon-lite/circom coercion).
-        let p_plus_5 = "21888242871839275222246405745257275088548364400416034343698204186575808495622";
+        let p_plus_5 =
+            "21888242871839275222246405745257275088548364400416034343698204186575808495622";
         assert_eq!(fr_from_dec(p_plus_5), Fr::from(5u64));
         assert_eq!(fr_from_dec("-1"), -Fr::from(1u64));
     }
@@ -95,5 +185,32 @@ mod tests {
         let be = <Fr as PrimeField>::MODULUS.to_bytes_be();
         let dec = BigUint::from_bytes_be(&be).to_str_radix(10);
         assert_eq!(dec, FIELD_MODULUS_DEC);
+    }
+
+    #[test]
+    fn canonical_binary_decoder_rejects_reduction_and_wrong_lengths() {
+        let five = fr_to_be_32(&Fr::from(5u64));
+        assert_eq!(fr_from_be_32_checked(&five), Some(Fr::from(5u64)));
+        assert_eq!(fr_from_be_32_checked(&five[..31]), None);
+
+        let modulus = <Fr as PrimeField>::MODULUS.to_bytes_be();
+        assert_eq!(fr_from_be_32_checked(&modulus), None);
+    }
+
+    #[test]
+    fn checked_field_parser_rejects_reduction_and_noncanonical_decimal() {
+        assert_eq!(Bn254Fr::try_from_dec("42").unwrap().to_dec(), "42");
+        assert_eq!(
+            Bn254Fr::try_from_dec("00"),
+            Err(Bn254FrError::NonCanonicalDecimal)
+        );
+        assert_eq!(
+            Bn254Fr::try_from_dec("-1"),
+            Err(Bn254FrError::InvalidDecimal)
+        );
+        assert_eq!(
+            Bn254Fr::try_from_dec(FIELD_MODULUS_DEC),
+            Err(Bn254FrError::OutOfRange)
+        );
     }
 }

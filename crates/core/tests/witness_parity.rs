@@ -1,10 +1,11 @@
-//! Conformance for the witness builders against committed test vectors: each
-//! builder's flat snarkjs input object must **deep-equal** the recorded reference
-//! object for the aggregation, withdrawal, and pending-notes-commitment circuits.
+//! Production-compatibility vectors for the native Rust witness builders. The
+//! Rust flat snarkjs input object must match Curvy's committed reference shape.
 
-use curvy_core::field::{fr_from_dec, Fr};
+use curvy_core::field::{Fr, fr_from_dec};
 use curvy_core::imt::Imt;
-use curvy_core::witness::{build_aggregation, build_pending_commitment, build_withdrawal, Note, Proof};
+use curvy_core::witness::{
+    Note, Proof, build_aggregation, build_pending_commitment, build_withdrawal,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -70,7 +71,7 @@ fn s(v: &Value, k: &str) -> String {
 }
 
 #[test]
-fn withdrawal_matches_vectors() {
+fn withdrawal_matches_ts() {
     let root: Value = serde_json::from_str(JSON).unwrap();
     let w = &root["withdrawal"];
     let rust = build_withdrawal(
@@ -85,11 +86,8 @@ fn withdrawal_matches_vectors() {
     assert_eq!(serde_json::to_value(&rust).unwrap(), w["flat"]);
 }
 
-// Includes the per-token gas feature: `build_aggregation` synthesizes the gas-fee
-// tree from `(input_notes[0].token, gas_fee)` and emits `gasFeeSiblings` +
-// `commitPendingNotesGasFeeRoot`.
 #[test]
-fn aggregation_matches_vectors() {
+fn aggregation_matches_ts() {
     let root: Value = serde_json::from_str(JSON).unwrap();
     let a = &root["aggregation"];
     let output_notes = notes(&a["outputNotes"]);
@@ -110,13 +108,23 @@ fn aggregation_matches_vectors() {
 }
 
 #[test]
-fn pending_commitment_matches_vectors() {
+fn pending_commitment_matches_ts() {
     let root: Value = serde_json::from_str(JSON).unwrap();
     let p = &root["pending"];
     let tree_depth = p["treeDepth"].as_u64().unwrap() as usize;
     let batch_size = p["batchSize"].as_u64().unwrap() as usize;
-    let initial_leaves: Vec<Fr> = p["initialLeaves"].as_array().unwrap().iter().map(|v| fr(v.as_str().unwrap())).collect();
-    let pending_ids: Vec<Fr> = p["pendingNoteIds"].as_array().unwrap().iter().map(|v| fr(v.as_str().unwrap())).collect();
+    let initial_leaves: Vec<Fr> = p["initialLeaves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| fr(v.as_str().unwrap()))
+        .collect();
+    let pending_ids: Vec<Fr> = p["pendingNoteIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| fr(v.as_str().unwrap()))
+        .collect();
 
     let tree = Imt::from_leaves(tree_depth, &initial_leaves);
     let rust = build_pending_commitment(&tree, tree_depth, batch_size, &pending_ids);

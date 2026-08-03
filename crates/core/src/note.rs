@@ -1,5 +1,4 @@
-//! Note commitments - the Poseidon derivations for a note's `ownerHash`, `id`, and
-//! `nullifier`.
+//! Note commitments — a faithful port of `note.ts`'s Poseidon derivations.
 //!
 //! Note the deliberate input ordering: `ownerHash` and `nullifier` hash the *same
 //! three values* in a *different order*.
