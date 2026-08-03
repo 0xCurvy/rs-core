@@ -1,7 +1,0 @@
-# Toolchain quarantine (plan risk 6). hoprnet's `hopr-strategy` is edition 2024 with
-# workspace rust-version 1.91 and pins toolchain channel 1.96. We match 1.96 exactly so
-# this workspace builds the real hopr crates AND the edition-2021 sdk/ crates together.
-# This file shadows rs-core's root rust-toolchain.toml (1.94.0) whenever cargo runs from
-# inside hopr/.
-[toolchain]
-channel = "1.96"

@@ -1,7 +1,7 @@
-//! BabyJubjub twisted Edwards curve over BN254 `Fr` (EIP-2494), matching the
-//! `@zk-kit/baby-jubjub` reference. Only the two operations EdDSA needs are
-//! implemented: point addition and scalar multiplication. The curve lives over the
-//! same field as everything else (`Fr`), so no separate curve crate is required.
+//! BabyJubjub twisted Edwards curve over BN254 `Fr` — a faithful port of
+//! `@zk-kit/baby-jubjub@1.0.3` (EIP-2494). Only the two operations EdDSA needs are
+//! ported: point addition and scalar multiplication. The curve lives over the same
+//! field as everything else (`Fr`), so no separate curve crate is required.
 //!
 //! Curve: `a·x² + y² = 1 + d·x²y²` with `a = 168700`, `d = 168696`.
 
@@ -11,7 +11,7 @@ use ark_ff::{AdditiveGroup, Field};
 use num_bigint::BigUint;
 use zeroize::Zeroize;
 
-use crate::field::{fr_from_dec, Bn254Fr, Bn254FrError, Fr};
+use crate::field::{Bn254Fr, Bn254FrError, Fr, fr_from_dec};
 
 /// An affine BabyJubjub point `(x, y)`.
 pub type Point = (Fr, Fr);
@@ -52,13 +52,21 @@ impl fmt::Display for BabyJubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidScalarDecimal => f.write_str("invalid unsigned decimal BabyJubJub scalar"),
-            Self::NonCanonicalScalarDecimal => f.write_str("non-canonical decimal BabyJubJub scalar"),
-            Self::ScalarOutOfRange => f.write_str("BabyJubJub scalar is greater than or equal to the subgroup order"),
+            Self::NonCanonicalScalarDecimal => {
+                f.write_str("non-canonical decimal BabyJubJub scalar")
+            }
+            Self::ScalarOutOfRange => {
+                f.write_str("BabyJubJub scalar is greater than or equal to the subgroup order")
+            }
             Self::ZeroSecretScalar => f.write_str("BabyJubJub secret scalar must be non-zero"),
             Self::InvalidCoordinate(e) => write!(f, "invalid BabyJubJub coordinate: {e}"),
             Self::PointNotOnCurve => f.write_str("point is not on BabyJubJub"),
-            Self::PointNotInSubgroup => f.write_str("point is not in the BabyJubJub prime-order subgroup"),
-            Self::IdentityPoint => f.write_str("BabyJubJub identity is not a valid public or nonce point"),
+            Self::PointNotInSubgroup => {
+                f.write_str("point is not in the BabyJubJub prime-order subgroup")
+            }
+            Self::IdentityPoint => {
+                f.write_str("BabyJubJub identity is not a valid public or nonce point")
+            }
         }
     }
 }
@@ -77,11 +85,13 @@ const COEFF_D_U64: u64 = 168696;
 static COEFF_A: LazyLock<Fr> = LazyLock::new(|| Fr::from(COEFF_A_U64));
 static COEFF_D: LazyLock<Fr> = LazyLock::new(|| Fr::from(COEFF_D_U64));
 
-/// The BabyJubjub base point `Base8` (the prime-order subgroup generator).
+/// The BabyJubjub base point `Base8` (the order-`subOrder` subgroup generator).
 pub static BASE8: LazyLock<Point> = LazyLock::new(|| {
     (
         fr_from_dec("5299619240641551281634865583518297030282874472190772894086521144482721001553"),
-        fr_from_dec("16950150798460657717958625567821834550301663161624707787222815936182638968203"),
+        fr_from_dec(
+            "16950150798460657717958625567821834550301663161624707787222815936182638968203",
+        ),
     )
 });
 
@@ -212,7 +222,10 @@ impl BabyJubPoint {
         debug_assert!(is_on_curve(point));
         debug_assert!(is_in_subgroup(point));
         debug_assert_ne!(point, identity());
-        Self { x: point.0, y: point.1 }
+        Self {
+            x: point.0,
+            y: point.1,
+        }
     }
 
     #[inline]
@@ -255,7 +268,7 @@ pub fn is_in_subgroup(point: Point) -> bool {
     is_on_curve(point) && mul_point_escalar(point, &SUB_ORDER) == identity()
 }
 
-/// Twisted Edwards point addition:
+/// Twisted Edwards point addition, mirroring `@zk-kit`'s exact formula:
 ///
 /// ```text
 /// x3 = (x1·y2 + y1·x2) / (1 + d·x1·x2·y1·y2)
@@ -274,14 +287,20 @@ pub fn add_point(p1: Point, p2: Point) -> Point {
     let delta = (y1 - a * x1) * (x2 + y2);
     let dtau = d * (beta * gamma);
 
-    let x3 = (beta + gamma) * (Fr::ONE + dtau).inverse().expect("babyjubjub: x denominator nonzero");
-    let y3 = (delta + a * beta - gamma) * (Fr::ONE - dtau).inverse().expect("babyjubjub: y denominator nonzero");
+    let x3 = (beta + gamma)
+        * (Fr::ONE + dtau)
+            .inverse()
+            .expect("babyjubjub: x denominator nonzero");
+    let y3 = (delta + a * beta - gamma)
+        * (Fr::ONE - dtau)
+            .inverse()
+            .expect("babyjubjub: y denominator nonzero");
     (x3, y3)
 }
 
-/// Scalar multiplication `e · base` via LSB-first double-and-add.
+/// Scalar multiplication `e · base` via LSB-first double-and-add (`mulPointEscalar`).
 /// `e` is consumed as a non-negative integer of any size (it need not be reduced
-/// modulo the subgroup order - the result is identical either way).
+/// modulo the subgroup order — the result is identical either way).
 pub fn mul_point_escalar(base: Point, e: &BigUint) -> Point {
     let mut res = identity();
     let mut exp = base;
@@ -296,7 +315,10 @@ pub fn mul_point_escalar(base: Point, e: &BigUint) -> Point {
 
 /// Direct public-key derivation from a canonical non-zero subgroup scalar.
 pub fn public_key_from_scalar(scalar: &BabyJubSecretScalar) -> BabyJubPoint {
-    BabyJubPoint::from_subgroup_non_identity_unchecked(mul_point_escalar(*BASE8, &scalar.to_biguint()))
+    BabyJubPoint::from_subgroup_non_identity_unchecked(mul_point_escalar(
+        *BASE8,
+        &scalar.to_biguint(),
+    ))
 }
 
 #[cfg(test)]
@@ -306,10 +328,22 @@ mod tests {
 
     #[test]
     fn scalar_boundaries_are_strict() {
-        assert_eq!(BabyJubSecretScalar::try_from_dec("0").err(), Some(BabyJubError::ZeroSecretScalar));
-        assert_eq!(BabyJubScalar::try_from_dec("00").unwrap_err(), BabyJubError::NonCanonicalScalarDecimal);
-        assert_eq!(BabyJubScalar::try_from_dec(&SUB_ORDER.to_string()).unwrap_err(), BabyJubError::ScalarOutOfRange);
-        assert_eq!(BabyJubSecretScalar::try_from_dec("1").unwrap().to_dec(), "1");
+        assert_eq!(
+            BabyJubSecretScalar::try_from_dec("0").err(),
+            Some(BabyJubError::ZeroSecretScalar)
+        );
+        assert_eq!(
+            BabyJubScalar::try_from_dec("00").unwrap_err(),
+            BabyJubError::NonCanonicalScalarDecimal
+        );
+        assert_eq!(
+            BabyJubScalar::try_from_dec(&SUB_ORDER.to_string()).unwrap_err(),
+            BabyJubError::ScalarOutOfRange
+        );
+        assert_eq!(
+            BabyJubSecretScalar::try_from_dec("1").unwrap().to_dec(),
+            "1"
+        );
     }
 
     #[test]
@@ -317,8 +351,17 @@ mod tests {
         let one = BabyJubSecretScalar::try_from_dec("1").unwrap();
         assert_eq!(public_key_from_scalar(&one).as_tuple(), *BASE8);
         assert!(BabyJubPoint::try_from_xy(BASE8.0, BASE8.1).is_ok());
-        assert_eq!(BabyJubPoint::try_from_xy_non_identity(Fr::ZERO, Fr::ONE), Err(BabyJubError::IdentityPoint));
-        assert_eq!(BabyJubPoint::try_from_xy(Fr::ZERO, Fr::ZERO), Err(BabyJubError::PointNotOnCurve));
-        assert!(matches!(BabyJubPoint::try_from_dec(FIELD_MODULUS_DEC, "1"), Err(BabyJubError::InvalidCoordinate(_))));
+        assert_eq!(
+            BabyJubPoint::try_from_xy_non_identity(Fr::ZERO, Fr::ONE),
+            Err(BabyJubError::IdentityPoint)
+        );
+        assert_eq!(
+            BabyJubPoint::try_from_xy(Fr::ZERO, Fr::ZERO),
+            Err(BabyJubError::PointNotOnCurve)
+        );
+        assert!(matches!(
+            BabyJubPoint::try_from_dec(FIELD_MODULUS_DEC, "1"),
+            Err(BabyJubError::InvalidCoordinate(_))
+        ));
     }
 }

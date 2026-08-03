@@ -1,9 +1,13 @@
-// Vendored from ark-circom 0.5.0 (https://github.com/arkworks-rs/circom-compat),
-// licensed MIT OR Apache-2.0. The Circom-compatible QAP witness reduction.
+// Migrated from the ark-circom 0.6.0 implementation
+// (https://github.com/arkworks-rs/circom-compat), licensed MIT OR Apache-2.0.
+// The cfg iterator macros retain our portable single-threaded WASM build.
 use ark_ff::PrimeField;
-use ark_groth16::r1cs_to_qap::{evaluate_constraint, LibsnarkReduction, R1CSToQAP};
+use ark_groth16::r1cs_to_qap::{LibsnarkReduction, R1CSToQAP, evaluate_constraint};
 use ark_poly::EvaluationDomain;
-use ark_relations::r1cs::{ConstraintMatrices, ConstraintSystemRef, SynthesisError};
+use ark_relations::{
+    gr1cs::{ConstraintSystemRef, SynthesisError},
+    utils::matrix::Matrix,
+};
 use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, vec};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -25,7 +29,7 @@ impl R1CSToQAP for CircomReduction {
     }
 
     fn witness_map_from_matrices<F: PrimeField, D: EvaluationDomain<F>>(
-        matrices: &ConstraintMatrices<F>,
+        matrices: &[Matrix<F>],
         num_inputs: usize,
         num_constraints: usize,
         full_assignment: &[F],
@@ -40,8 +44,8 @@ impl R1CSToQAP for CircomReduction {
 
         cfg_iter_mut!(a[..num_constraints])
             .zip(cfg_iter_mut!(b[..num_constraints]))
-            .zip(cfg_iter!(&matrices.a))
-            .zip(cfg_iter!(&matrices.b))
+            .zip(cfg_iter!(&matrices[0]))
+            .zip(cfg_iter!(&matrices[1]))
             .for_each(|(((a, b), at_i), bt_i)| {
                 *a = evaluate_constraint(at_i, full_assignment);
                 *b = evaluate_constraint(bt_i, full_assignment);

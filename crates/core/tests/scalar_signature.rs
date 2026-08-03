@@ -1,6 +1,8 @@
-use curvy_core::babyjubjub::{BabyJubError, BabyJubPoint, BabyJubScalar, BabyJubSecretScalar, SUB_ORDER};
-use curvy_core::eddsa::{verify_scalar_compat, ScalarSigningKey};
-use curvy_core::field::{fr_to_dec, Bn254Fr, Bn254FrError, FIELD_MODULUS_DEC};
+use curvy_core::babyjubjub::{
+    BabyJubError, BabyJubPoint, BabyJubScalar, BabyJubSecretScalar, SUB_ORDER,
+};
+use curvy_core::eddsa::{ScalarSigningKey, verify_scalar_compat};
+use curvy_core::field::{Bn254Fr, Bn254FrError, FIELD_MODULUS_DEC, fr_to_dec};
 use serde::Deserialize;
 
 const JSON: &str = include_str!("../testdata/scalar_signature_vectors.json");
@@ -62,21 +64,43 @@ fn scalar_signature_matches_cross_language_vector() {
     assert_eq!(fr_to_dec(&signature.r8.x()), v.r8.x);
     assert_eq!(fr_to_dec(&signature.r8.y()), v.r8.y);
     assert_eq!(signature.s.to_dec(), v.s);
-    assert!(verify_scalar_compat(message, key.verifying_key(), &signature));
+    assert!(verify_scalar_compat(
+        message,
+        key.verifying_key(),
+        &signature
+    ));
 }
 
 #[test]
 fn scalar_and_field_boundaries_do_not_reduce() {
-    assert_eq!(BabyJubSecretScalar::try_from_dec("0").err(), Some(BabyJubError::ZeroSecretScalar));
-    assert_eq!(BabyJubScalar::try_from_dec("00"), Err(BabyJubError::NonCanonicalScalarDecimal));
-    assert_eq!(BabyJubScalar::try_from_dec(&SUB_ORDER.to_string()), Err(BabyJubError::ScalarOutOfRange));
-    assert_eq!(Bn254Fr::try_from_dec(FIELD_MODULUS_DEC), Err(Bn254FrError::OutOfRange));
+    assert_eq!(
+        BabyJubSecretScalar::try_from_dec("0").err(),
+        Some(BabyJubError::ZeroSecretScalar)
+    );
+    assert_eq!(
+        BabyJubScalar::try_from_dec("00"),
+        Err(BabyJubError::NonCanonicalScalarDecimal)
+    );
+    assert_eq!(
+        BabyJubScalar::try_from_dec(&SUB_ORDER.to_string()),
+        Err(BabyJubError::ScalarOutOfRange)
+    );
+    assert_eq!(
+        Bn254Fr::try_from_dec(FIELD_MODULUS_DEC),
+        Err(Bn254FrError::OutOfRange)
+    );
 }
 
 #[test]
 fn point_boundaries_reject_identity_off_curve_and_noncanonical_coordinates() {
-    assert_eq!(BabyJubPoint::try_from_dec("0", "1"), Err(BabyJubError::IdentityPoint));
-    assert_eq!(BabyJubPoint::try_from_dec("0", "0"), Err(BabyJubError::PointNotOnCurve));
+    assert_eq!(
+        BabyJubPoint::try_from_dec("0", "1"),
+        Err(BabyJubError::IdentityPoint)
+    );
+    assert_eq!(
+        BabyJubPoint::try_from_dec("0", "0"),
+        Err(BabyJubError::PointNotOnCurve)
+    );
     assert!(matches!(
         BabyJubPoint::try_from_dec(FIELD_MODULUS_DEC, "1"),
         Err(BabyJubError::InvalidCoordinate(Bn254FrError::OutOfRange))
@@ -89,5 +113,9 @@ fn wrong_message_does_not_verify() {
     let message = Bn254Fr::try_from_dec("424242").unwrap();
     let wrong_message = Bn254Fr::try_from_dec("424243").unwrap();
     let signature = key.sign_curvy_v1(message).unwrap();
-    assert!(!verify_scalar_compat(wrong_message, key.verifying_key(), &signature));
+    assert!(!verify_scalar_compat(
+        wrong_message,
+        key.verifying_key(),
+        &signature
+    ));
 }

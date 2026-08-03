@@ -1,6 +1,0 @@
-target/
-vendor/
-build/
-# Pending-notes-commitment(5,30) golden witness is reproducible test output. The
-# 13.3 MB evaluation graph is tracked because the SDK needs it at runtime.
-fixtures/pending/golden.wtns

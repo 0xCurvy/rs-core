@@ -1,20 +1,20 @@
-//! Dual-curve, pairing-based stealth addressing.
+//! Domain A — stealth addressing core. Native Rust port of `curvy-core` (Go/gnark).
 //!
-//! - **secp256k1** spending keys: `s` (private), `S = s·G` (public).
-//! - **BN254** viewing keys and ephemerals: `v`/`V`, `r`/`R`, combined via a pairing.
+//! Dual-curve & pairing-based:
+//! - **secp256k1** spending keys: `s` (priv), `S = s·G` (pub).
+//! - **BN254** viewing keys + ephemerals: `v`/`V`, `r`/`R`, with a pairing.
 //!
-//! Sender: `R = r·G_bn`, `secret = e(r·V, G2)`, `b = secret.c0.c0.c0 (mod n_secp)`,
+//! Sender: `R = r·G_bn`, `secret = e(r·V, G2)`, `b = secret.c0.c0.c0 (mod secp order)`,
 //! `spendingPubKey = b·S`, `viewTag = hex(rV.x)[:2]`.
-//! Recipient: for each announcement `(R_i, viewTag_i)`, compute `v·R_i`, match the
-//! view tag, then derive `b`, `spendingPubKey = b·S`, `spendingPrivKey = s·b`.
+//! Recipient: for each `(R_i, viewTag_i)`, compute `v·R_i`, match the view tag, then
+//! derive `b`, `spendingPubKey = b·S`, `spendingPrivKey = s·b`.
 //!
-//! Points cross the API boundary as `"X.Y"` big-endian decimal strings; private
-//! keys as big-endian hex.
+//! Points cross the boundary as `"X.Y"` big-endian **decimal** strings; private keys
+//! as big-endian hex.
 //!
-//! Implementation note: the scalar `b` is taken from a specific coordinate of the
-//! GT pairing result (`Fq12.c0.c0.c0`) reduced into the secp256k1 scalar field;
-//! this coordinate and the BN254 G1/G2 and secp256k1 generators are fixed by the
-//! protocol and pinned by the conformance test vectors.
+//! Parity hazard (validated by golden vectors from the Go WASM): gnark's GT field
+//! tower `C0.B0.A0` must equal arkworks' `Fq12.c0.c0.c0`, and the BN254 G1/G2 + the
+//! secp256k1 generators must match gnark's.
 
 use core::str::FromStr;
 
@@ -24,32 +24,40 @@ use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, PrimeField, Zero};
 use ark_secp256k1::{Affine as SecpG1, Fq as SecpFq, Fr as SecpFr};
 use num_bigint::BigUint;
-
-use crate::encoding::from_hex;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-// Map announcements to the sparse, input-ordered list of matches: the closure
-// returns `Some(match)` for a matching announcement and `None` otherwise. Each
-// item is independent (one G1 multiplication and, on a tag match, one pairing);
-// with the `parallel` feature the work fans out over rayon, and the indexed
-// collect preserves input order in both arms.
+use crate::encoding::from_hex;
+
+// Map announcements → the SPARSE list of matches (the closure returns
+// `Option<Match>`), in input order. With the `parallel` feature the work fans
+// out over rayon (each item is an independent G1 mul +, on a tag match, one
+// pairing — embarrassingly parallel); rayon's `collect` preserves the input
+// order even through `filter_map`, so both arms are output-identical.
 macro_rules! map_announcements {
     ($rs:expr, $tags:expr, $f:expr) => {{
         #[cfg(feature = "parallel")]
         {
-            $rs.par_iter().zip($tags.par_iter()).enumerate().filter_map($f).collect::<Vec<_>>()
+            $rs.par_iter()
+                .zip($tags.par_iter())
+                .enumerate()
+                .filter_map($f)
+                .collect::<Vec<_>>()
         }
         #[cfg(not(feature = "parallel"))]
         {
-            $rs.iter().zip($tags.iter()).enumerate().filter_map($f).collect::<Vec<_>>()
+            $rs.iter()
+                .zip($tags.iter())
+                .enumerate()
+                .filter_map($f)
+                .collect::<Vec<_>>()
         }
     }};
 }
 
-/// Boundary-validation failure: malformed, off-curve, or degenerate input. Own-key
-/// problems are hard errors; per-announcement problems in [`scan`]/[`viewer_scan`]
-/// are treated as non-matches instead (see there).
+/// Boundary-validation failure: malformed, off-curve, or degenerate input to the
+/// stealth core. Own-key problems are hard errors; per-announcement problems in
+/// [`scan`]/[`viewer_scan`] are treated as non-matches instead (see there).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StealthError(String);
 
@@ -79,7 +87,9 @@ fn xy_secp(p: &SecpG1) -> String {
 }
 
 fn parse_xy<F: PrimeField>(s: &str) -> Result<(F, F), StealthError> {
-    let (x, y) = s.split_once('.').ok_or_else(|| err(format!("point must be \"X.Y\", got {s:?}")))?;
+    let (x, y) = s
+        .split_once('.')
+        .ok_or_else(|| err(format!("point must be \"X.Y\", got {s:?}")))?;
     Ok((
         F::from_str(x).map_err(|_| err(format!("bad point X: {x:?}")))?,
         F::from_str(y).map_err(|_| err(format!("bad point Y: {y:?}")))?,
@@ -87,9 +97,9 @@ fn parse_xy<F: PrimeField>(s: &str) -> Result<(F, F), StealthError> {
 }
 
 // Both BN254 G1 and secp256k1 have cofactor 1, so on-curve already implies the
-// prime-order subgroup - no separate subgroup check is needed. The check also
+// prime-order subgroup — no separate subgroup check is needed. The check also
 // excludes (0, 0) (off-curve for both), so a parsed point is never the identity
-// and the downstream `x()/y().unwrap()` on it cannot fire.
+// and downstream `x()/y().unwrap()` on it cannot fire.
 fn parse_bn(s: &str, what: &str) -> Result<BnG1, StealthError> {
     let (x, y) = parse_xy::<BnFq>(s)?;
     let p = BnG1::new_unchecked(x, y);
@@ -131,26 +141,32 @@ fn secp_mul(p: SecpG1, scalar: SecpFr) -> SecpG1 {
     (p.into_group() * scalar).into_affine()
 }
 
-/// `b = e(rV, G2).c0.c0.c0` reduced into the secp256k1 scalar field.
+/// `compute_b_asElement`: `e(rV, G2).c0.c0.c0` reduced into the secp256k1 scalar field.
 fn compute_b(secret: &Fq12) -> SecpFr {
-    let a0: BnFq = secret.c0.c0.c0;
+    let a0: BnFq = secret.c0.c0.c0; // gnark GT.C0.B0.A0
     SecpFr::from_le_bytes_mod_order(&a0.into_bigint().to_bytes_le())
 }
 
-/// View tag: the first byte (2 hex chars) of the point's X coordinate.
+/// `viewTag` ("v1-1byte"): first 2 hex chars of the point's X coordinate.
 fn view_tag(p: &BnG1) -> String {
-    fp_to_biguint(p.x().unwrap()).to_str_radix(16).chars().take(2).collect()
+    fp_to_biguint(p.x().unwrap())
+        .to_str_radix(16)
+        .chars()
+        .take(2)
+        .collect()
 }
 
-/// Compare a computed `v·R` tag against an announcement's tag. A match requires the
-/// announcement tag's first 2 chars to equal the computed tag exactly. A malformed
-/// tag (shorter than 2 chars, or a non-char-boundary prefix) is a non-match rather
-/// than an error, so a single bad announcement cannot abort a whole scan.
+/// Compare a computed `v·R` tag against an announcement's tag. Matching means the
+/// tag's first 2 chars equal the computed tag exactly (a computed 1-char tag — a
+/// tiny X coordinate — never matches a 2-char one, same as before). A malformed
+/// tag (shorter than 2 chars, or a non-char-boundary prefix) is a NON-MATCH, not
+/// a panic — the Go core panicked here on 1-char tags, which turned one bad
+/// announcement into a dead scan.
 fn tag_matches(vri: &BnG1, vt: &str) -> bool {
     vt.get(..2).is_some_and(|prefix| view_tag(vri) == prefix)
 }
 
-/// Derive the public meta-keys `(K, V)` from the private `(k, v)` hex.
+/// `get_meta`: derive the public meta-keys `(K, V)` from the private `(k, v)` hex.
 pub fn get_meta(k_hex: &str, v_hex: &str) -> Result<(String, String), StealthError> {
     let s = parse_secp_scalar(k_hex, "spend private key")?;
     let big_s = secp_mul(SecpG1::generator(), s);
@@ -159,8 +175,8 @@ pub fn get_meta(k_hex: &str, v_hex: &str) -> Result<(String, String), StealthErr
     Ok((xy_secp(&big_s), xy_bn(&big_v)))
 }
 
-/// Announcement output `{R, viewTag, spendingPubKey}` for a **given** ephemeral `r`
-/// (decimal). Deterministic - pass a recorded `r` to reproduce a specific send.
+/// `send` output `{R, viewTag, spendingPubKey}` for a **given** ephemeral `r`
+/// (decimal). The Go `send` picks `r` randomly; pass the recorded `r` to reproduce.
 pub struct SendOutput {
     pub big_r: String,
     pub view_tag: String,
@@ -172,9 +188,9 @@ pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, 
     if r.is_zero() {
         return Err(err("ephemeral r must be nonzero"));
     }
-    // Validate the recipient meta-keys hard: a send computed from an off-curve
-    // K/V would announce a garbage spendingPubKey - funds committed to an address
-    // for which nobody can ever derive the spending key.
+    // The recipient meta-keys come from the registry — validate hard. A send
+    // computed from an off-curve K/V would announce a garbage spendingPubKey:
+    // funds committed to an address nobody can ever derive the key for.
     let big_v_pt = parse_bn(big_v, "recipient view key V")?;
     let big_k_pt = parse_secp(big_k, "recipient spend key K")?;
     let big_r = bn_mul(BnG1::generator(), r);
@@ -189,10 +205,10 @@ pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, 
     })
 }
 
-/// One matched announcement: `index` into the input `rs`/`view_tags`, plus the
-/// derived one-time keys. A tag match is a **candidate**, not proof of ownership:
-/// the 1-byte view tag yields ~1/256 false positives, which the caller resolves by
-/// recomputing and checking the note commitment.
+/// One matched announcement: `index` into the input `rs`/`view_tags` arrays,
+/// plus the derived one-time keys. A tag match is a CANDIDATE, not proof of
+/// ownership — the 1-byte viewTag false-positives at ~1/256, and the caller's
+/// note-commitment recompute (`discoverOwnedNotes`) is what confirms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanMatch {
     pub index: u32,
@@ -200,29 +216,42 @@ pub struct ScanMatch {
     pub spending_priv_key: String,
 }
 
-/// A viewer-scan candidate: derived spending **public** key only (no spend key).
+/// A viewer-scan candidate: derived spending PUBLIC key only (no spend key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewerMatch {
     pub index: u32,
     pub spending_pub_key: String,
 }
 
-/// The sparse, input-ordered list of tag-matching announcements. Announcements
-/// arrive from an untrusted feed, so a malformed or off-curve `R_i` (or malformed
-/// tag) is simply not a match - one hostile or corrupt announcement must not abort
-/// the scan. Errors are reserved for the caller's own inputs (keys, array lengths).
-pub fn scan(k_hex: &str, v_hex: &str, rs: &[String], view_tags: &[String]) -> Result<Vec<ScanMatch>, StealthError> {
+/// Returns the SPARSE, input-ordered list of tag-matching announcements.
+/// Announcements (`R_i`, `viewTag_i`) come off the network, so a malformed or
+/// off-curve `R_i` (or malformed tag) is simply not a match — one hostile or
+/// corrupt announcement must not abort a whole wallet scan. Errors are reserved
+/// for the caller's own inputs (keys, mismatched array lengths).
+pub fn scan(
+    k_hex: &str,
+    v_hex: &str,
+    rs: &[String],
+    view_tags: &[String],
+) -> Result<Vec<ScanMatch>, StealthError> {
     if rs.len() != view_tags.len() {
-        return Err(err(format!("Rs.len ({}) != viewTags.len ({})", rs.len(), view_tags.len())));
+        return Err(err(format!(
+            "Rs.len ({}) != viewTags.len ({})",
+            rs.len(),
+            view_tags.len()
+        )));
     }
     let s = parse_secp_scalar(k_hex, "spend private key")?;
     let big_s = secp_mul(SecpG1::generator(), s);
     let v = parse_bn_scalar(v_hex, "view private key")?;
 
-    Ok(map_announcements!(rs, view_tags, |(i, (ri_str, vt)): (usize, (&String, &String))| {
+    Ok(map_announcements!(rs, view_tags, |(i, (ri_str, vt)): (
+        usize,
+        (&String, &String)
+    )| {
         let ri = parse_bn(ri_str, "announcement R").ok()?;
         // v ≠ 0 and R is a valid affine point of the prime-order G1, so v·R is
-        // never the identity - view_tag/xy on it cannot panic.
+        // never the identity — view_tag/xy on it cannot panic.
         let vri = bn_mul(ri, v);
         if !tag_matches(&vri, vt) {
             return None;
@@ -237,9 +266,9 @@ pub fn scan(k_hex: &str, v_hex: &str, rs: &[String], view_tags: &[String]) -> Re
     }))
 }
 
-/// Like [`scan`], but the caller holds only the view key `v` and the recipient
-/// spend public key `S` (no `k`), so it recovers spending **public** keys only.
-/// Same sparse shape and per-announcement skip semantics; own inputs error hard.
+/// `viewerScan`: like [`scan`] but the viewer holds only `v` + the spend pubkey `S`
+/// (no `k`), so it recovers spending PUBLIC keys only. Same sparse shape and
+/// skip semantics for per-announcement inputs; own inputs (`v`, `S`) error hard.
 pub fn viewer_scan(
     v_hex: &str,
     big_s: &str,
@@ -247,11 +276,18 @@ pub fn viewer_scan(
     view_tags: &[String],
 ) -> Result<Vec<ViewerMatch>, StealthError> {
     if rs.len() != view_tags.len() {
-        return Err(err(format!("Rs.len ({}) != viewTags.len ({})", rs.len(), view_tags.len())));
+        return Err(err(format!(
+            "Rs.len ({}) != viewTags.len ({})",
+            rs.len(),
+            view_tags.len()
+        )));
     }
     let v = parse_bn_scalar(v_hex, "view private key")?;
     let s = parse_secp(big_s, "spend public key S")?;
-    Ok(map_announcements!(rs, view_tags, |(i, (ri_str, vt)): (usize, (&String, &String))| {
+    Ok(map_announcements!(rs, view_tags, |(i, (ri_str, vt)): (
+        usize,
+        (&String, &String)
+    )| {
         let ri = parse_bn(ri_str, "announcement R").ok()?;
         let vri = bn_mul(ri, v);
         if !tag_matches(&vri, vt) {
@@ -265,10 +301,11 @@ pub fn viewer_scan(
     }))
 }
 
-fn random_scalar_bytes() -> [u8; 32] {
+fn random_scalar_bytes() -> Result<[u8; 32], StealthError> {
     let mut b = [0u8; 32];
-    getrandom::getrandom(&mut b).expect("getrandom failed");
-    b
+    getrandom::getrandom(&mut b)
+        .map_err(|error| err(format!("secure randomness unavailable: {error}")))?;
+    Ok(b)
 }
 
 fn pad_even(s: &str) -> String {
@@ -279,46 +316,46 @@ fn pad_even(s: &str) -> String {
     }
 }
 
-fn nonzero<F: PrimeField>(make: impl Fn() -> F) -> F {
+fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
     // A zero draw has probability ~2⁻²⁵⁴; redraw rather than emit a degenerate key.
     loop {
-        let x = make();
+        let x = F::from_le_bytes_mod_order(&random_scalar_bytes()?);
         if !x.is_zero() {
-            return x;
+            return Ok(x);
         }
     }
 }
 
-/// Generate a fresh random meta-key pair. Returns `(k, v, K, V)` - private keys as
-/// big-endian hex, public keys as `"X.Y"` decimal.
-pub fn new_meta() -> (String, String, String, String) {
-    let s = nonzero(|| SecpFr::from_le_bytes_mod_order(&random_scalar_bytes()));
-    let v = nonzero(|| BnFr::from_le_bytes_mod_order(&random_scalar_bytes()));
+/// `new_meta`: generate a fresh random meta-key pair. Returns `(k, v, K, V)` —
+/// private keys as big-endian hex, public keys as `"X.Y"` decimal.
+pub fn new_meta() -> Result<(String, String, String, String), StealthError> {
+    let s = random_nonzero::<SecpFr>()?;
+    let v = random_nonzero::<BnFr>()?;
     let k_hex = pad_even(&fp_to_biguint(s).to_str_radix(16));
     let v_hex = pad_even(&fp_to_biguint(v).to_str_radix(16));
-    (
+    Ok((
         k_hex,
         v_hex,
         xy_secp(&secp_mul(SecpG1::generator(), s)),
         xy_bn(&bn_mul(BnG1::generator(), v)),
-    )
+    ))
 }
 
-/// Pick a fresh ephemeral `r` and produce the announcement. Returns `(r_dec,
-/// output)`. Errors on malformed / off-curve recipient keys.
+/// `send`: pick a fresh ephemeral `r` and produce the announcement.
+/// Returns `(r_dec, output)`. Errors on malformed / off-curve recipient keys.
 pub fn send(big_k: &str, big_v: &str) -> Result<(String, SendOutput), StealthError> {
-    let r = nonzero(|| BnFr::from_le_bytes_mod_order(&random_scalar_bytes()));
+    let r = random_nonzero::<BnFr>()?;
     let r_dec = fp_to_biguint(r).to_str_radix(10);
     let out = send_with_r(&r_dec, big_k, big_v)?;
     Ok((r_dec, out))
 }
 
-/// Whether `"X.Y"` is a valid point on BN254 G1.
+/// `dbg_isValidBN254Point`: is `"X.Y"` a valid point on BN254 G1?
 pub fn is_valid_bn254_point(point: &str) -> bool {
     parse_bn(point, "point").is_ok()
 }
 
-/// Whether `"X.Y"` is a valid point on secp256k1.
+/// `dbg_isValidSECP256k1Point`: is `"X.Y"` a valid point on secp256k1?
 pub fn is_valid_secp256k1_point(point: &str) -> bool {
     parse_secp(point, "point").is_ok()
 }
@@ -331,7 +368,7 @@ mod tests {
     fn new_meta_round_trips_through_get_meta() {
         // The derived publics must match what get_meta recomputes from the privates,
         // and a self-send must be discoverable by a self-scan.
-        let (k, v, big_k, big_v) = new_meta();
+        let (k, v, big_k, big_v) = new_meta().unwrap();
         let (rk, rv) = get_meta(&k, &v).unwrap();
         assert_eq!((rk, rv), (big_k.clone(), big_v.clone()));
 
@@ -348,14 +385,14 @@ mod tests {
 
     #[test]
     fn scan_skips_bad_announcements_without_aborting() {
-        let (k, v, big_k, big_v) = new_meta();
+        let (k, v, big_k, big_v) = new_meta().unwrap();
         let (_r, sent) = send(&big_k, &big_v).unwrap();
 
         let rs = vec![
-            OFF_CURVE.to_string(),        // off-curve point
-            "not-a-point".to_string(),    // unparseable
-            sent.big_r.clone(),           // real match
-            sent.big_r.clone(),           // real point, malformed 1-char tag
+            OFF_CURVE.to_string(),     // off-curve point
+            "not-a-point".to_string(), // unparseable
+            sent.big_r.clone(),        // real match
+            sent.big_r.clone(),        // real point, malformed 1-char tag
         ];
         let tags = vec!["ab".into(), "cd".into(), sent.view_tag.clone(), "a".into()];
 
@@ -366,24 +403,39 @@ mod tests {
 
         let seen = viewer_scan(&v, &big_k, &rs, &tags).unwrap();
         assert_eq!(seen.len(), 1);
-        assert_eq!((seen[0].index, seen[0].spending_pub_key.as_str()), (2, sent.spending_pub_key.as_str()));
+        assert_eq!(
+            (seen[0].index, seen[0].spending_pub_key.as_str()),
+            (2, sent.spending_pub_key.as_str())
+        );
     }
 
     #[test]
     fn send_rejects_malformed_recipient_keys() {
-        let (_k, _v, big_k, big_v) = new_meta();
-        assert!(send(OFF_CURVE, &big_v).is_err(), "off-curve K must be rejected");
-        assert!(send(&big_k, OFF_CURVE).is_err(), "off-curve V must be rejected");
+        let (_k, _v, big_k, big_v) = new_meta().unwrap();
+        assert!(
+            send(OFF_CURVE, &big_v).is_err(),
+            "off-curve K must be rejected"
+        );
+        assert!(
+            send(&big_k, OFF_CURVE).is_err(),
+            "off-curve V must be rejected"
+        );
         assert!(send("garbage", &big_v).is_err());
-        assert!(send_with_r("0", &big_k, &big_v).is_err(), "zero ephemeral r must be rejected");
+        assert!(
+            send_with_r("0", &big_k, &big_v).is_err(),
+            "zero ephemeral r must be rejected"
+        );
     }
 
     #[test]
     fn own_key_and_shape_errors_are_hard() {
-        let (k, v, _big_k, _big_v) = new_meta();
+        let (k, v, _big_k, _big_v) = new_meta().unwrap();
         assert!(get_meta("00", &v).is_err(), "zero spend key");
         assert!(get_meta(&k, "00").is_err(), "zero view key");
-        assert!(scan(&k, &v, &["1.2".into()], &[]).is_err(), "length mismatch");
+        assert!(
+            scan(&k, &v, &["1.2".into()], &[]).is_err(),
+            "length mismatch"
+        );
         assert!(viewer_scan(&v, OFF_CURVE, &[], &[]).is_err(), "off-curve S");
     }
 

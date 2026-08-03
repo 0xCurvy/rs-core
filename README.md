@@ -1,262 +1,403 @@
-# rs-core
+# Curvy Rust core
 
-The complete Rust implementation of the Curvy privacy protocol's cryptography:
-the crypto core, the WebAssembly bindings, a rayon-threaded scanner, and a
-Groth16 prover with a browser benchmark harness.
+Production-compatible Rust cryptography, witness evaluation, and Groth16 proving
+for the Curvy protocol.
 
-This repository is the **source of truth** for the Rust core. Consumers (the web
-SDK, node services) use the **built wasm artifacts** produced here; nothing here
-is compiled inside the consuming projects.
+## Crates and documentation
 
-## Crates
+This repository publishes four crates. Choose the narrowest crate that owns the
+layer you need:
 
-| Crate | What it is |
-|---|---|
-| [`curvy-core`](crates/core) | The cryptography: Poseidon, BabyJubjub + EdDSA-Poseidon, BLAKE-512, the note cipher, note commitments, incremental Merkle trees, dual-curve stealth addressing, and the circuit witness builders. Pure compute - no I/O, no global state. |
-| [`curvy-wasm`](crates/wasm) | `wasm-bindgen` bindings exposing the core to JavaScript across a decimal-string boundary. Builds single-threaded, or threaded (rayon) for cross-origin-isolated pages. |
-| [`curvy-prover`](crates/prover) | arkworks Groth16 prover over snarkjs `.zkey`/`.wtns` artifacts - native (rayon) and wasm32 - with a browser benchmark harness. Detached workspace; contains vendored `ark-circom` code (see its README). |
+| Crate | Add it when you need | API documentation |
+|---|---|---|
+| `curvy-core` | Poseidon, BabyJubjub, both supported signing profiles, note commitments, stealth addressing, Merkle trees, or circuit-input builders | [docs.rs/curvy-core](https://docs.rs/curvy-core) |
+| `curvy-witness` | Authenticated `curvy-graph-v1` parsing and Circom witness evaluation without a prover | [docs.rs/curvy-witness](https://docs.rs/curvy-witness) |
+| `curvy-prover` | Authenticated graph evaluation plus snarkjs `.zkey` parsing and self-verified arkworks Groth16 proofs; it also provides the native prover executable and prover WASM module | [docs.rs/curvy-prover](https://docs.rs/curvy-prover) |
+| `curvy-wasm` | JavaScript bindings for the `curvy-core` cryptography and tree APIs | [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) |
 
+The docs.rs links go live automatically after each release candidate is
+published to crates.io; there is no separate documentation upload step.
+
+This README is the workspace and integration guide. Each crate has a focused
+README used for its own crates.io page and included at the top of its docs.rs
+landing page. Item-level Rust documentation remains beside the API it describes.
+This keeps crate selection and build guidance here without making every
+published crate present the same generic landing page.
+
+The crates are release candidates. Pin the exact version until the stable API is
+published.
+
+## Install
+
+Most native applications only need `curvy-core`:
+
+```toml
+[dependencies]
+curvy-core = "=0.1.0-rc.1"
 ```
-Cargo.toml            workspace (curvy-core, curvy-wasm)
-rust-toolchain.toml   pinned toolchain
-deny.toml             cargo-deny supply-chain policy
-scripts/
-  build-wasm.sh          single-threaded wasm build (nodejs | web | bundler)
-  build-wasm-threads.sh  threaded (rayon) wasm build for isolated pages
-crates/
-  curvy-core/         the cryptography (+ conformance tests, committed vectors)
-  curvy-wasm/         the wasm-bindgen bindings
-  prover/             the Groth16 prover + www/ browser harness
+
+Add witness evaluation or local proving only when your application needs it:
+
+```toml
+[dependencies]
+curvy-core = "=0.1.0-rc.1"
+curvy-witness = "=0.1.0-rc.1"
+curvy-prover = "=0.1.0-rc.1"
 ```
 
-## Build & test (native)
+Rust 1.94 or newer is required.
+
+## BabyJubjub signing profiles
+
+`curvy-core` supports two first-class BabyJubjub signing profiles. Both are
+supported APIs, both produce Curvy-compatible EdDSA-Poseidon signatures, and
+both can build the same withdrawal and aggregation witness shapes. Neither
+profile is deprecated and using one does not imply a migration away from the
+other.
+
+| Profile | Key material and public-key derivation | Rust entry points |
+|---|---|---|
+| Seed-backed | Hex-encoded private seed bytes; the established Curvy BLAKE-512 and pruning derivation produces the signing scalar and public point | `pub_from_private_key_hex`, `sign_hex`, and `SeedNoteSigner` |
+| Direct-scalar | A checked, non-zero canonical BabyJubjub subgroup scalar; the public point is `scalar * Base8` | `ScalarSigningKey`, `BabyJubSecretScalar`, and `BabyJubPoint` |
+
+Select the profile that matches how the account key was created and stored. The
+same byte or number interpreted through the other profile represents a different
+key, so implementers must not silently convert between profiles.
+
+The direct-scalar API is:
+
+```rust
+use curvy_core::eddsa::{verify_scalar_compat, ScalarSigningKey};
+use curvy_core::field::Bn254Fr;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let key = ScalarSigningKey::from_decimal("1")?;
+    let message = Bn254Fr::try_from_dec("42")?;
+    let signature = key.sign_curvy_v1(message)?;
+
+    assert!(verify_scalar_compat(
+        message,
+        key.verifying_key(),
+        &signature,
+    ));
+    Ok(())
+}
+```
+
+Use the checked boundary types for values received from storage, RPC, or users:
+
+- `Bn254Fr` rejects non-canonical BN254 field encodings.
+- `BabyJubSecretScalar` rejects zero and values outside the BabyJubjub subgroup
+  scalar range.
+- `BabyJubPoint` validates the curve, prime-order subgroup, and identity rules.
+- `ScalarSigningKey` keeps the scalar and its derived public key together.
+
+`SeedNoteSigner` and `ScalarSigningKey` both implement `NoteSigner`, so either can
+be passed to `build_withdrawal_with_signer` and
+`build_aggregation_with_signer`. The original `build_withdrawal` and
+`build_aggregation` functions continue to use the seed-backed profile for source
+compatibility.
+
+## Witness evaluation and proving
+
+`curvy-witness` evaluates a deployment's compiled `curvy-graph-v1` artifact.
+`curvy-prover` combines that graph with the matching snarkjs `.zkey` and returns a
+self-verified Groth16 proof in snarkjs JSON format:
+
+```rust
+use curvy_prover::CircuitProver;
+
+fn prove(
+    zkey: &[u8],
+    zkey_sha256: &str,
+    graph: &[u8],
+    graph_sha256: &str,
+    inputs: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let prover = CircuitProver::from_artifacts(
+        zkey,
+        zkey_sha256,
+        graph,
+        graph_sha256,
+    )?;
+    let proof = prover.prove_json(inputs)?;
+
+    Ok((proof.proof_json, proof.public_signals_json))
+}
+```
+
+Both artifact hashes are required. Authentication happens before unchecked
+proving-key coordinates or graph data are parsed. The graph and `.zkey` must be
+the matching pair supplied by the Curvy deployment you are interacting with;
+they are not bundled into these crates.
+
+## Build targets
+
+The repository has two complete build entry points: native and WASM. Both build
+the crypto core, witness evaluator, and Groth16 prover.
+
+### Select a build
+
+Run the selector without arguments for an interactive menu:
 
 ```bash
-cargo test                                   # conformance + unit tests (single-threaded)
-cargo test --features curvy-core/parallel    # same, with the rayon scan path
-cargo clippy --all-targets                   # lints
-cargo deny check                             # advisories / licenses / bans / sources
+scripts/build.sh
 ```
 
-`curvy-core` builds on stable Rust. The `parallel` feature turns on rayon for the
-scan loop; it changes throughput, not results - the sparse match list is
-byte-identical either way, pinned by the tests.
-
-## Building the wasm
-
-Two build variants come out of the same source. Requirements:
-
-- `rustup target add wasm32-unknown-unknown`
-- `cargo install wasm-bindgen-cli --version 0.2.114`
-- for the threaded build only: `rustup toolchain install nightly --component rust-src`
-
-### Single-threaded (works everywhere)
+For CI or repeatable local builds, pass the choice directly:
 
 ```bash
-scripts/build-wasm.sh web       # → crates/curvy-wasm/pkg-web      (async ESM, browser)
-scripts/build-wasm.sh nodejs    # → crates/curvy-wasm/pkg-node     (CommonJS, node)
-scripts/build-wasm.sh bundler   # → crates/curvy-wasm/pkg-bundler  (ESM for Vite/webpack)
+scripts/build.sh native
+scripts/build.sh wasm-web
+scripts/build.sh --help
 ```
 
-Each produces the `.wasm` plus the wasm-bindgen JS/TS glue in the named directory.
-This variant runs on any page - no special headers.
+| Selector choice | What it builds | Output | Parallel behavior |
+|---|---|---|---|
+| `native` | `curvy-core`, `curvy-witness`, `curvy-prover`, and `curvy-native-prover` | Native Cargo artifacts and `target/release/curvy-native-prover` | Rayon support is compiled in; thread count is selected at runtime |
+| `wasm-nodejs` | Portable `curvy-wasm` core bindings and `curvy-prover` bindings for Node.js | `crates/wasm/pkg-node` and `crates/prover/pkg-node` with CommonJS metadata | Single-threaded; no shared-memory or browser isolation requirement |
+| `wasm-web` | Portable ES-module bindings for direct browser loading | Matching `pkg-web` directories | Single-threaded and supported without cross-origin isolation |
+| `wasm-bundler` | Portable bindings intended for webpack, Vite, Rollup, and similar bundlers | Matching `pkg-bundler` directories | Single-threaded |
+| `wasm-web-threads` | Browser ES modules compiled with WASM atomics, shared memory, and Rayon workers | Matching `pkg-web-threads` directories | Thread count is supplied to each module's `initThreadPool(n)` |
+| `all-portable` | Native plus Node.js, web, and bundler portable builds | All non-threaded outputs above | Excludes `wasm-web-threads` because that target requires nightly and browser isolation |
 
-### Threaded (rayon) - for cross-origin-isolated pages
+Every WASM choice emits two independent modules: `curvy-wasm` contains the core
+cryptography/tree bindings, while `curvy-prover` contains witness evaluation and
+Groth16 proving. An application may ship only the module it actually uses.
+
+Install [rustup](https://rustup.rs/) before using any build target. The root
+`rust-toolchain.toml` then selects Rust 1.94 and installs the portable WASM
+standard library automatically. Run all commands below from the repository
+root.
+
+### Native
+
+Install the native toolchain and build the complete host target:
 
 ```bash
-scripts/build-wasm-threads.sh   # → crates/curvy-wasm/pkg-web-threads
+rustup toolchain install 1.94.0 --profile minimal
+scripts/build-native.sh
 ```
 
-Nightly-only: it uses `-Z build-std` plus a specific set of link flags (shared
-imported memory + the TLS/heap symbol exports the wasm-bindgen threads transform
-requires). The script encodes them; see "Threads and cross-origin isolation"
-below for what they mean. The output additionally exports `initThreadPool(n)` and
-ships a `snippets/` directory of rayon worker helpers.
-
-## Using the wasm
-
-The bindings cross the boundary as **decimal strings** (`"X.Y"` for curve
-points). Load once, then call synchronously:
-
-```js
-import init, { scan, poseidon, initThreadPool } from "./pkg-web/curvy_wasm.js";
-
-await init();                      // instantiate the wasm (once)
-// threaded build only, on a cross-origin-isolated page:
-// await initThreadPool(Math.min(navigator.hardwareConcurrency, 8));
-
-// Recipient scan: sparse matches (index into the input arrays + derived keys).
-const matches = scan(spendPrivHex, viewPrivHex, ephemeralPoints, viewTags);
-```
-
-The **single-threaded** and **threaded** builds export the identical API and
-produce identical results - the threaded one just parallelizes `scan` across a
-worker pool. A consumer typically feature-detects `crossOriginIsolated` and loads
-the threaded package when it is `true`, falling back to the single-threaded one
-otherwise (see below).
-
-Key surface (all string-in / string-out): `poseidon`, `ownerHash`, `noteId`,
-`nullifier`, `pubFromPrivateKey`, `ephemeralPubKey`, `sign`, `encryptAmountToken`
-/ `decryptAmountToken`, `sha256BigInt`, and the stealth core `new_meta`,
-`get_meta`, `send`, `scan`, `viewerScan`.
-
-### Seedless scalar signatures
-
-The scalar-native compatibility profile derives `A = scalar * Base8` directly;
-it does not run the scalar through the legacy BLAKE/prune seed KDF. The deployed
-Curvy circuit equation requires `S = r + 8*h*scalar mod l`.
-
-Rust exposes `ScalarSigningKey`, `sign_curvy_v1`, checked `BabyJubPoint` /
-`BabyJubScalar` boundaries, and signer-based witness builders. WASM exposes:
-
-```js
-const [ax, ay] = pubFromScalar(scalarDecimal);
-const [r8x, r8y, S] = signWithScalar(messageDecimal, scalarDecimal);
-const ok = verifyScalarSignature(messageDecimal, ax, ay, r8x, r8y, S);
-```
-
-An independent TypeScript implementation and CircomJS compatibility tests live
-in [`typescript/`](typescript). Both implementations consume
-[`scalar_signature_vectors.json`](crates/core/testdata/scalar_signature_vectors.json).
-The normative proposal is
-[`curvy-scalar-signature-generation-proposal.md`](plans/curvy-scalar-signature-generation-proposal.md).
-
-The real pinned withdrawal graph gate runs with the SDK workspace tests. The
-production-zkey proof gate is ignored by default because the `.zkey` is external:
+This builds `curvy-core`, `curvy-witness`, and `curvy-prover` as optimized native
+Rust libraries, enables native core parallelism, and produces
+`target/release/curvy-native-prover`. The equivalent Cargo command is:
 
 ```bash
-cd sdk
-cargo test -p curvy-witnesscalc --test scalar_signature
-CURVY_WITHDRAWAL_ZKEY=/path/to/withdrawal.zkey \
-  cargo test -p curvy-witnesscalc --test scalar_signature \
-  real_withdrawal_zkey_proves_scalar_native_signature -- --ignored
+cargo build --locked --release \
+  -p curvy-core -p curvy-witness -p curvy-prover \
+  --features curvy-core/parallel
 ```
 
-## Threads, cross-origin isolation, and CORS quirks
+Applications that depend on these crates normally do not need this command;
+Cargo compiles the appropriate native libraries as part of the consuming build.
+The executable uses the same `curvy-witness` evaluator and arkworks prover as
+the library API.
 
-The threaded build uses WebAssembly threads (rayon over `SharedArrayBuffer`).
-Browsers only expose `SharedArrayBuffer` and wasm threads to pages that are
-**cross-origin isolated** - this is the single biggest operational constraint, so
-it's worth understanding fully.
+The script compiles multithreading support; it does not hard-code a machine's
+core count. Parallel work currently covers independent stealth scans, bulk
+Merkle parent construction, proving-key point conversion, and parallel-enabled
+arkworks proving operations. Witness-graph evaluation itself remains
+deterministic and single-threaded.
 
-### Getting `crossOriginIsolated === true`
+For Cargo consumers, `curvy-prover` enables its `parallel` feature by default.
+`curvy-core` keeps parallelism opt-in, so enable it explicitly when using the
+core crate without this build script:
 
-A page is cross-origin isolated when it is served with one of:
+```toml
+[dependencies]
+curvy-core = { version = "=0.1.0-rc.1", features = ["parallel"] }
+curvy-prover = "=0.1.0-rc.1"
+```
 
-- **`Document-Isolation-Policy: isolate-and-credentialless`** (recommended).
-  Chromium ≥ 137 becomes isolated with **no side effects** - popups keep
-  `window.opener`, and cross-origin no-CORS subresources still load (fetched
-  without credentials). Firefox and Safari currently ignore this header, so they
-  simply stay non-isolated. One header, no collateral damage.
-- **`Cross-Origin-Opener-Policy: same-origin`** + **`Cross-Origin-Embedder-Policy:
-  require-corp`** (the classic pair). Isolates on **all** browsers, but has two
-  costs: it severs `window.opener` for cross-origin popups (breaks popup-based
-  OAuth / wallet flows), and it requires every embedded cross-origin subresource
-  to opt in via CORS or a `Cross-Origin-Resource-Policy` header (so no-CORS images
-  / fonts / widgets break unless proxied or self-hosted). `COEP: credentialless`
-  relaxes the subresource rule (fetch without cookies instead of requiring CORP),
-  but Safari does not support it.
-
-Verify at runtime with `globalThis.crossOriginIsolated` (also available in
-workers, which inherit the document's isolation).
-
-### The fallback ladder
-
-Because isolation is not universally available, a consumer should degrade
-gracefully:
-
-1. `crossOriginIsolated` is `true` and `initThreadPool` succeeds → threaded scan.
-2. isolated but thread-pool init fails (older engines) → catch and fall back.
-3. not isolated → load the single-threaded build.
-
-All three produce correct results; only throughput differs.
-
-### Build-flag quirks (why the threaded script looks the way it does)
-
-The threaded build needs more than `--target-feature=+atomics`:
-
-- `-Z build-std=panic_abort,std` - the standard library must be recompiled with
-  atomics; the prebuilt std is not thread-enabled.
-- `--shared-memory --import-memory --max-memory=…` - the wasm memory must be a
-  **shared, imported** memory so the main thread and workers address the same
-  bytes.
-- `--export=__heap_base --export=__wasm_init_tls --export=__tls_size/…` - the
-  wasm-bindgen threads transform injects thread-local setup and needs these
-  symbols exported, or it fails with `failed to find __heap_base` /
-  `__wasm_init_tls`.
-
-### Serving / bundler quirks
-
-- **`wasm-bindgen-rayon` imports the package *directory***. Its worker helper does
-  `import("../../..")` (the package root), so a plain static file server must map
-  a request for the package directory to its main JS module - bundlers do this
-  automatically, but a hand-rolled server (like the harness `server.mjs`) needs a
-  small rule for it.
-- **Serve the threaded package's `snippets/` directory** alongside the `.wasm`;
-  the rayon worker helpers live there.
-- **COOP/COEP (or DIP) must be on every response**, including the worker scripts
-  and the wasm, or the workers won't be created in an isolated context.
-
-### Thread count
-
-Scan throughput saturates around **8 threads** (coordination overhead dominates
-beyond that, and can even regress for small batches). Pool at
-`min(hardwareConcurrency, 8)`.
-
-## Prover and harness
-
-`curvy-prover` is a native + wasm arkworks Groth16 prover for the protocol's
-circuits. It parses a snarkjs `.zkey` and `.wtns` and emits a snarkjs-shaped proof
-(so snarkjs and the on-chain verifier accept it). It parses the `.zkey` without
-per-point on-curve re-validation (a verifying-key anchor spot-check guards against
-gross corruption) - so callers must pin/verify the `.zkey` by content hash. See
-[`crates/prover/README.md`](crates/prover/README.md) for measured performance and
-the native CLI.
-
-The browser harness in `crates/prover/www/` measures proving and scanning in
-a real cross-origin-isolated page:
+After publication, the executable can instead be installed from crates.io:
 
 ```bash
-scripts/build-wasm-threads.sh                 # build the threaded wasm the harness loads
-node crates/prover/www/server.mjs         # COOP/COEP static server on :8787
-# http://localhost:8787/scan-bench.html       (scan throughput; self-contained)
-# http://localhost:8787/index.html            (prover; needs circuit artifacts - see www/data/README.md)
+cargo install --locked curvy-prover --version 0.1.0-rc.1 \
+  --bin curvy-native-prover
 ```
 
-The **scan** harness is self-contained (it generates announcements via the wasm
-core). The **prover** harness needs the circuit `.zkey`/`.wtns` placed in
-`www/data/` - those are gitignored (large); see
-[`crates/prover/www/data/README.md`](crates/prover/www/data/README.md).
+`cargo install` places the executable at
+`$CARGO_HOME/bin/curvy-native-prover` (normally
+`~/.cargo/bin/curvy-native-prover`). It accepts authenticated zkey and
+`curvy-graph-v1` paths, an input JSON file, and output paths for
+snarkjs-compatible proof and public-signal JSON:
 
-## Verification
+```text
+curvy-native-prover <zkey> <zkey-sha256> <graph.bin> <graph-sha256> \
+  <input.json> <proof.json> <public.json>
+```
 
-Correctness is measured against committed reference vectors
-(`crates/curvy-core/testdata/`), one suite per module in
-`crates/curvy-core/tests/`:
+Set `CURVY_PROVER_NUM_THREADS` to an integer from 1 through 64. It defaults to
+one so container CPU quotas do not accidentally create an oversized Rayon pool.
+The executable authenticates and parses artifacts through `CircuitProver`; it
+does not introduce a second witness runtime or graph format.
 
-- Standard primitives (Poseidon, BabyJubjub, EdDSA-Poseidon, the incremental
-  Merkle tree) are checked against their circomlib / `@zk-kit` references.
-- Poseidon is additionally cross-checked against an independent, audited Rust
-  implementation ([`light-poseidon`](https://crates.io/crates/light-poseidon)).
-- The stealth core and witness builders are checked end-to-end against recorded
-  vectors.
+```bash
+CURVY_PROVER_NUM_THREADS=8 curvy-native-prover \
+  <zkey> <zkey-sha256> <graph.bin> <graph-sha256> \
+  <input.json> <proof.json> <public.json>
+```
 
-## Dependency policy
+Native library consumers can instead set `RAYON_NUM_THREADS` before process
+startup or install a global pool with
+`rayon::ThreadPoolBuilder::num_threads(...).build_global()` before the first
+parallel operation. Without either setting, Rayon chooses from the host's
+available parallelism. A global pool can only be configured once; applications
+that already own Rayon configuration should configure it themselves and then
+call the Curvy APIs normally.
 
-Small and pinned. `curvy-core` depends only on **arkworks** (field / curve /
-pairing) and **RustCrypto** (the note cipher), plus `num-bigint`, `getrandom`,
-and `serde` for the boundary and the compiled-in Poseidon constants. Poseidon is
-implemented directly from the circomlib constants (no thin third-party crate).
+### WASM
 
-All versions are exact-pinned (`=x.y.z`), the committed `Cargo.lock` records
-exact versions and checksums, and `cargo deny` gates advisories, licenses, bans,
-and sources (crates.io only) - see `deny.toml`.
+Every WASM target needs the pinned wasm-bindgen CLI. Install it once:
 
-`curvy-prover` additionally vendors two files from `ark-circom 0.5.0`
-(`src/zkey.rs`, `src/qap.rs`; MIT OR Apache-2.0) - flagged in their headers.
+```bash
+rustup toolchain install 1.94.0 --profile minimal \
+  --target wasm32-unknown-unknown
+cargo +1.94.0 install wasm-bindgen-cli --version 0.2.126 --locked
+```
 
-## Toolchain
+The build invokes wasm-bindgen for both modules. Outputs are written to matching
+directories under `crates/wasm/pkg-*` and `crates/prover/pkg-*`.
 
-Stable Rust for everything except the threaded wasm build, which needs nightly
-with `rust-src` (`rustup toolchain install nightly --component rust-src`). The
-stable channel is pinned in `rust-toolchain.toml`.
+#### Node.js target
+
+After installing the common WASM tools above, build CommonJS modules:
+
+```bash
+scripts/build.sh wasm-nodejs
+node crates/wasm/smoke-test.cjs
+```
+
+This creates `crates/wasm/pkg-node` and `crates/prover/pkg-node`. Install Node.js
+only when running the generated modules or the optional smoke test; CI uses
+Node.js 22. Applications load either output with `require(...)`.
+
+#### Browser target
+
+After installing the common WASM tools, build portable ES modules for direct
+browser loading:
+
+```bash
+scripts/build.sh wasm-web
+```
+
+This creates `crates/wasm/pkg-web` and `crates/prover/pkg-web`. These modules are
+single-threaded, require no cross-origin isolation headers, and are initialized
+with the default export generated by wasm-bindgen.
+
+#### Bundler target
+
+After installing the common WASM tools, build modules for Vite, webpack,
+Rollup, and similar bundlers:
+
+```bash
+scripts/build.sh wasm-bundler
+```
+
+This creates `crates/wasm/pkg-bundler` and `crates/prover/pkg-bundler`. Point the
+application's package or workspace configuration at the output directory for
+the module it uses.
+
+#### All portable targets
+
+Install both the native and common WASM prerequisites above, then run:
+
+```bash
+scripts/build.sh all-portable
+```
+
+This builds native, Node.js, browser, and bundler outputs. It intentionally does
+not install or build the nightly-only threaded target.
+
+#### Threaded browser target
+
+In addition to the common WASM tools, install the exact nightly, its standard
+library source, and its WASM target:
+
+```bash
+rustup toolchain install nightly-2026-07-03 --profile minimal \
+  --component rust-src --target wasm32-unknown-unknown
+scripts/build.sh wasm-web-threads
+```
+
+The threaded build uses the validated `nightly-2026-07-03` toolchain with the
+`rust-src` component. This post-Rust-1.94 pin is required because the older
+nightly named in wasm-bindgen-rayon's current upstream build notes does not meet
+this workspace's Rust 1.94 minimum. Override the pin with
+`CURVY_WASM_THREADS_TOOLCHAIN` when testing another nightly. It writes both
+modules to their `pkg-web-threads` directories and requires the page to be
+cross-origin isolated, normally with these response headers:
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+The generated core and prover packages are independent WebAssembly modules.
+Each threaded module that an application loads must be initialized and given
+its own worker count after the normal wasm-bindgen `init()` call:
+
+```javascript
+import initCore, {
+  initThreadPool as initCoreThreadPool,
+} from "./crates/wasm/pkg-web-threads/curvy_wasm.js";
+import initProver, {
+  initThreadPool as initProverThreadPool,
+} from "./crates/prover/pkg-web-threads/curvy_prover.js";
+
+await Promise.all([initCore(), initProver()]);
+
+const available = navigator.hardwareConcurrency || 1;
+const totalWorkers = Math.max(2, Math.min(available, 8));
+const coreThreads = Math.floor(totalWorkers / 2);
+const proverThreads = totalWorkers - coreThreads;
+
+await Promise.all([
+  initCoreThreadPool(coreThreads),
+  initProverThreadPool(proverThreads),
+]);
+```
+
+`initThreadPool(n)` sets that module's worker-pool size. If both modules are
+loaded, their worker pools are separate and the approximate total worker budget
+is `coreThreads + proverThreads`; choose both values accordingly.
+If only one module is used, initialize only that module. Use a portable build
+when the desired worker budget is one or the hosting environment cannot provide
+cross-origin isolation.
+
+## Features
+
+- `curvy-core/parallel` enables Rayon for independent stealth scans and bulk
+  Merkle-tree construction. It is disabled by default for direct Cargo users;
+  `scripts/build-native.sh` enables it.
+- `curvy-prover` enables native `std` and `parallel` features by default. The
+  `wasm` and `wasm-threads` features expose its browser integration.
+- `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a
+  cross-origin-isolated page.
+
+## Publishing a release candidate
+
+Publish from a clean, reviewed commit. Registry dependencies must exist before
+dependent crates can be packaged, so use this order and wait for crates.io to
+index each prerequisite before continuing:
+
+```bash
+cargo publish --locked -p curvy-core
+cargo publish --locked -p curvy-witness
+cargo publish --locked -p curvy-prover
+cargo publish --locked -p curvy-wasm
+```
+
+Tag the exact published commit with the workspace version, for example
+`v0.1.0-rc.1`. The CI workflow validates native Rust, portable WASM, threaded
+WASM, rustdoc, dependency policy, package contents, and the prover's compact
+prove-and-verify fixture before publication.
+
+## License
+
+[MIT](LICENSE) © Curvy Protocol d.o.o.
+
+Portions of this software are ported from permissively licensed third-party
+projects. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full
+attribution list.

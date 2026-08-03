@@ -1,9 +1,0 @@
-# Runtime-generated bloklid config + HOPR contract addresses (produced by run.sh).
-/generated/*
-!/generated/.gitkeep
-
-# Curvy deploy output written by curvy-deployer (sdk/curvy-deployer).
-/curvy_deployed_addresses.json
-
-# Rust build artifacts (detached workspace).
-/rs/target/

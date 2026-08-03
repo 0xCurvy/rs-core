@@ -1,9 +1,11 @@
-//! Original **BLAKE-512** (the SHA-3 finalist, *not* BLAKE2). EdDSA-Poseidon's
-//! default entry uses this to hash the private key, so it must be reproduced
-//! exactly; it is checked against test vectors in `tests/`.
+//! Original **BLAKE-512** (the SHA-3 finalist, *not* BLAKE2) — a faithful port of
+//! `@zk-kit/eddsa-poseidon`'s `blake.ts` (itself adapted from the `blake-hash` npm
+//! package). EdDSA-Poseidon's default entry uses this to hash the private key, so
+//! the Rust core must reproduce it exactly. Validated by direct golden vectors.
 //!
-//! No maintained Rust crate implements the original BLAKE-512, so it is
-//! implemented here directly. Being a pure hash, it is fully test-vector-checkable.
+//! This module is a traceable Rust port of the protocol's established JavaScript
+//! reference; cross-language parity vectors pin its behavior and prevent an
+//! accidental substitution with the incompatible BLAKE2 family.
 
 /// BLAKE-512 initial hash value (IV).
 const IV: [u64; 8] = [
@@ -69,7 +71,16 @@ const PADDING: [u8; BLOCK_BYTES] = {
 // Mirrors the reference BLAKE-512 G mixing function's signature exactly.
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn g(v: &mut [u64; 16], m: &[u64; 16], round: usize, a: usize, b: usize, c: usize, d: usize, e: usize) {
+fn g(
+    v: &mut [u64; 16],
+    m: &[u64; 16],
+    round: usize,
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    e: usize,
+) {
     let se = SIGMA[round][e];
     let se1 = SIGMA[round][e + 1];
     v[a] = v[a].wrapping_add(v[b]).wrapping_add(m[se] ^ C[se1]);

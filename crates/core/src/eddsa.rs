@@ -1,28 +1,28 @@
-//! EdDSA-Poseidon over BabyJubjub, matching the default (original BLAKE-512) entry
-//! of the `@zk-kit/eddsa-poseidon` reference.
+//! EdDSA-Poseidon over BabyJubjub — a faithful port of `@zk-kit/eddsa-poseidon`'s
+//! default (BLAKE-1 / original BLAKE-512) entry, which the SDK's `babyJubjub.ts`
+//! wraps as `pubFromPrivateKey`, `ephemeralPubKey`, and `sign`.
 //!
-//! Two subtleties where this scheme diverges from circomlibjs (it deliberately
-//! follows the `@zk-kit/eddsa-poseidon` convention, which the verifier circuit
-//! expects):
+//! Parity hazards baked in here (each diverges from circomlibjs):
 //! - the private key is hashed with **original BLAKE-512** (see [`crate::blake512`]);
-//! - signing computes `S = r + hm·s mod l` with the **un-shifted** pruned scalar
-//!   `s` (not `s >> 3`). Because key pruning zeroes the low 3 bits, `s = 8·(s>>3)`,
-//!   so the signature still verifies — but the `S` *value* differs from circomlibjs
-//!   by a factor of 8.
+//! - `signMessage` computes `S = r + hm·s mod l` with the **un-shifted** pruned
+//!   scalar `s` (not `s >> 3`). Because `pruneBuffer` zeroes the low 3 bits,
+//!   `s = 8·(s>>3)`, so it still verifies — but the `S` *value* differs from
+//!   circomlibjs by a factor of 8. We must match `@zk-kit`, which the on-chain
+//!   `EdDSAPoseidonVerifier` checks.
 
 use std::{fmt, sync::LazyLock};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use num_bigint::BigUint;
 use sha2::Sha512;
 
 use crate::babyjubjub::{
-    add_point, mul_point_escalar, public_key_from_scalar, BabyJubError, BabyJubPoint,
-    BabyJubScalar, BabyJubSecretScalar, Point, BASE8, SUB_ORDER,
+    BASE8, BabyJubError, BabyJubPoint, BabyJubScalar, BabyJubSecretScalar, Point, SUB_ORDER,
+    add_point, mul_point_escalar, public_key_from_scalar,
 };
 use crate::blake512::blake512;
 use crate::encoding::{biguint_to_le_bytes, from_hex, le_bytes_to_biguint};
-use crate::field::{fr_from_biguint, fr_to_biguint, Bn254Fr};
+use crate::field::{Bn254Fr, fr_from_biguint, fr_to_biguint};
 use crate::poseidon::poseidon;
 
 const SCALAR_NONCE_LABEL: &[u8] = b"CURVY_BABYJUB_SCALAR_NONCE_V1";
@@ -41,8 +41,8 @@ pub struct Signature {
     pub s: BigUint,
 }
 
-/// Seedless scalar-native signature with checked subgroup points and canonical
-/// response scalar.
+/// Direct-scalar signature with checked subgroup points and a canonical response
+/// scalar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScalarSignature {
     pub r8: BabyJubPoint,
@@ -50,9 +50,12 @@ pub struct ScalarSignature {
 }
 
 impl ScalarSignature {
-    /// Convert to the legacy witness shape without changing any values.
-    pub fn to_legacy(&self) -> Signature {
-        Signature { r8: self.r8.as_tuple(), s: self.s.as_biguint().clone() }
+    /// Convert to the established witness signature shape without changing values.
+    pub fn to_signature(&self) -> Signature {
+        Signature {
+            r8: self.r8.as_tuple(),
+            s: self.s.as_biguint().clone(),
+        }
     }
 }
 
@@ -75,7 +78,9 @@ impl fmt::Display for ScalarSignatureError {
         match self {
             Self::InvalidKey(e) => write!(f, "invalid scalar signing key: {e}"),
             Self::NonceCounterExhausted => f.write_str("deterministic nonce counter exhausted"),
-            Self::InternalVerificationFailed => f.write_str("scalar signature failed internal verification"),
+            Self::InternalVerificationFailed => {
+                f.write_str("scalar signature failed internal verification")
+            }
         }
     }
 }
@@ -99,7 +104,9 @@ impl ScalarSigningKey {
     }
 
     pub fn from_le_bytes(bytes: [u8; 32]) -> Result<Self, ScalarSignatureError> {
-        Ok(Self::from_secret(BabyJubSecretScalar::try_from_le_bytes(bytes)?))
+        Ok(Self::from_secret(BabyJubSecretScalar::try_from_le_bytes(
+            bytes,
+        )?))
     }
 
     #[inline]
@@ -112,8 +119,8 @@ impl ScalarSigningKey {
     }
 }
 
-/// Clear the low 3 bits and force the top two bits of a 32-byte little-endian
-/// scalar buffer (BabyJubjub key clamping).
+/// `pruneBuffer`: clear the low 3 bits and force the top two bits of a 32-byte
+/// little-endian scalar buffer (BabyJubjub key clamping).
 fn prune_buffer(mut b: [u8; 32]) -> [u8; 32] {
     b[0] &= 0xf8;
     b[31] &= 0x7f;
@@ -129,35 +136,35 @@ fn pruned_scalar_buffer(private_key: &[u8]) -> [u8; 32] {
     prune_buffer(h32)
 }
 
-/// The secret scalar `(LE(pruned) >> 3) mod l`.
+/// `deriveSecretScalar` — `(LE(pruned) >> 3) mod l`.
 pub fn derive_secret_scalar(private_key: &[u8]) -> BigUint {
     let pruned = pruned_scalar_buffer(private_key);
     (le_bytes_to_biguint(&pruned) >> 3u32) % &*SUB_ORDER
 }
 
-/// Public key `derive_secret_scalar(pk) · Base8`.
+/// `derivePublicKey` — `deriveSecretScalar(pk) · Base8`.
 pub fn derive_public_key(private_key: &[u8]) -> Point {
     mul_point_escalar(*BASE8, &derive_secret_scalar(private_key))
 }
 
-/// Public key from a hex-encoded private key (`Buffer.from(hex, "hex")`
-/// semantics: the hex is decoded to raw bytes first).
+/// `pubFromPrivateKey(hex)` — public key from a hex private key
+/// (`Buffer.from(hex, "hex")` semantics: the hex is decoded to raw bytes first).
 pub fn pub_from_private_key_hex(hex: &str) -> Point {
     derive_public_key(&from_hex(hex))
 }
 
-/// Ephemeral public key `R = scalar · Base8`.
+/// `ephemeralPubKey(scalar)` — `R = scalar · Base8`.
 pub fn ephemeral_pub_key(scalar: &BigUint) -> Point {
     mul_point_escalar(*BASE8, scalar)
 }
 
-/// EdDSA-Poseidon signing over BabyJubjub.
+/// `signMessage(private_key, message)` — EdDSA-Poseidon over BabyJubjub.
 ///
-/// `message` is a **raw integer**, not a field element: it is not reduced before
-/// its little-endian bytes are packed into the `r` derivation, so a message in
+/// `message` is a **raw integer**, not a field element: the TS does not reduce it
+/// before packing its little-endian bytes into the `r` derivation, so a message in
 /// `[modulus, 2^256)` produces a different `R8`/`S` than its reduced value would.
 /// The Poseidon input `hm`, by contrast, reduces `message` (Poseidon reduces all
-/// inputs internally). Panics on a message `>= 2^256` (the 32-byte packing guard).
+/// inputs internally). Panics on a message `>= 2^256` (matches the TS 32-byte guard).
 pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     let hash = blake512(private_key);
 
@@ -182,7 +189,7 @@ pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     Signature { r8, s: s_sig }
 }
 
-/// Signing entry point keyed by a hex-encoded private key.
+/// `sign(message, privateKeyHex)` — the SDK's hex-keyed signing entry point.
 pub fn sign_hex(message: &BigUint, hex: &str) -> Signature {
     sign(message, &from_hex(hex))
 }
@@ -211,7 +218,8 @@ fn deterministic_scalar_nonce(
         }
         let reduced = candidate % &*SUB_ORDER;
         if reduced != BigUint::from(0u8) {
-            return Ok(BabyJubSecretScalar::try_from_biguint(reduced).expect("nonce is canonical and non-zero"));
+            return Ok(BabyJubSecretScalar::try_from_biguint(reduced)
+                .expect("nonce is canonical and non-zero"));
         }
     }
     Err(ScalarSignatureError::NonceCounterExhausted)
@@ -239,7 +247,8 @@ pub fn sign_scalar_compat(
     let response = (r + e * secret.to_biguint()) % &*SUB_ORDER;
     let signature = ScalarSignature {
         r8,
-        s: BabyJubScalar::try_from_biguint(response).expect("response was reduced modulo subgroup order"),
+        s: BabyJubScalar::try_from_biguint(response)
+            .expect("response was reduced modulo subgroup order"),
     };
     if !verify_scalar_compat(message, public, &signature) {
         return Err(ScalarSignatureError::InternalVerificationFailed);
@@ -266,6 +275,9 @@ pub fn verify_scalar_compat(
     ]);
     let e = (BigUint::from(8u8) * fr_to_biguint(&h)) % &*SUB_ORDER;
     let left = mul_point_escalar(*BASE8, signature.s.as_biguint());
-    let right = add_point(signature.r8.as_tuple(), mul_point_escalar(public.as_tuple(), &e));
+    let right = add_point(
+        signature.r8.as_tuple(),
+        mul_point_escalar(public.as_tuple(), &e),
+    );
     left == right
 }

@@ -1,20 +1,33 @@
 [package]
 name = "curvy-core"
 description = "Curvy privacy-protocol crypto core (Poseidon, BabyJubjub, note commitments, stealth addressing)"
+keywords = ["curvy", "cryptography", "zero-knowledge", "babyjubjub", "poseidon"]
+categories = ["cryptography", "data-structures"]
 edition.workspace = true
 license.workspace = true
 version.workspace = true
-publish = false
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/curvy-core"
+
+[package.metadata.docs.rs]
+all-features = true
+targets = []
+rustdoc-args = ["-D", "warnings"]
 
 [features]
-# Fan the scan loop out over announcements with rayon. Off by default; the
-# threaded wasm build enables it via the curvy-wasm `wasm-threads` feature.
+# Fan independent scan items and bulk Merkle parent hashes out over rayon. OFF
+# by default — stock native + wasm builds are unchanged; wasm needs the
+# atomics/threads build (see curvy-wasm `wasm-threads`).
 parallel = ["dep:rayon"]
 
 [dependencies]
 aes.workspace = true
 rayon = { workspace = true, optional = true }
-ark-bn254.workspace = true
+ark-bn254 = { workspace = true, features = ["curve"] }
 ark-ec.workspace = true
 ark-ff.workspace = true
 ark-secp256k1.workspace = true
@@ -29,6 +42,6 @@ sha2.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-light-poseidon.workspace = true
+pso-poseidon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

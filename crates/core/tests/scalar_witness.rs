@@ -1,16 +1,13 @@
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
-use curvy_core::eddsa::{verify_scalar_compat, ScalarSignature, ScalarSigningKey};
-use curvy_core::field::{fr_from_dec, fr_to_dec, Bn254Fr, Fr};
+use curvy_core::eddsa::{ScalarSignature, ScalarSigningKey, verify_scalar_compat};
+use curvy_core::field::{Bn254Fr, Fr, fr_from_dec, fr_to_dec};
 use curvy_core::poseidon::poseidon;
-use curvy_core::witness::{build_withdrawal_with_signer, KnownOwner, Proof};
+use curvy_core::witness::{KnownOwner, Proof, build_withdrawal_with_signer};
 
 #[test]
 fn scalar_signer_builds_a_compatible_withdrawal_witness() {
     let key = ScalarSigningKey::from_decimal("123456789012345678901234567890123456789").unwrap();
-    let owner = KnownOwner::new(
-        *key.verifying_key(),
-        Bn254Fr::try_from_dec("777").unwrap(),
-    );
+    let owner = KnownOwner::new(*key.verifying_key(), Bn254Fr::try_from_dec("777").unwrap());
     let note = owner.note(
         Fr::from(100u64),
         Fr::from(1u64),
@@ -22,7 +19,10 @@ fn scalar_signer_builds_a_compatible_withdrawal_witness() {
     let witness = build_withdrawal_with_signer(
         std::slice::from_ref(&note),
         &key,
-        &[Proof { leaf_index: 0, siblings: vec![] }],
+        &[Proof {
+            leaf_index: 0,
+            siblings: vec![],
+        }],
         Fr::from(9u64),
         destination,
         token,
@@ -43,7 +43,11 @@ fn scalar_signer_builds_a_compatible_withdrawal_witness() {
         Fr::from(100u64),
         token,
     ]));
-    assert!(verify_scalar_compat(message, key.verifying_key(), &signature));
+    assert!(verify_scalar_compat(
+        message,
+        key.verifying_key(),
+        &signature
+    ));
 
     // The KnownOwner path preserves the independently supplied shared secret.
     assert_eq!(note.shared_secret, fr_from_dec("777"));

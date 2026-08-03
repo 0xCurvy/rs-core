@@ -1,20 +1,31 @@
 [package]
 name = "curvy-wasm"
 description = "wasm-bindgen bindings for the Curvy crypto core (decimal-string boundary)"
+keywords = ["curvy", "wasm", "cryptography", "babyjubjub", "poseidon"]
+categories = ["cryptography", "wasm"]
 edition.workspace = true
 license.workspace = true
 version.workspace = true
-publish = false
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/curvy-wasm"
+
+[package.metadata.docs.rs]
+targets = []
+rustdoc-args = ["-D", "warnings"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Rayon-threaded scan for cross-origin-isolated pages. Needs the nightly
-# atomics build (see ../../scripts/build-wasm-threads.sh); plain builds ignore it.
+# Rayon-threaded scan and bulk Merkle construction for cross-origin-isolated
+# pages. Needs `scripts/build-wasm.sh web --threads`; plain builds ignore it.
 wasm-threads = ["curvy-core/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
-curvy-core = { path = "../core" }
+curvy-core = { version = "=0.1.0-rc.1", path = "../core" }
 wasm-bindgen.workspace = true
 wasm-bindgen-rayon = { workspace = true, optional = true }

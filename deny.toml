@@ -1,5 +1,5 @@
 # cargo-deny policy for the Curvy Rust core.
-# Run: cargo deny --manifest-path packages/core-rs/Cargo.toml check
+# Run: cargo deny check
 # (cargo-deny is a dev tool; install with `cargo install cargo-deny` — it does not
 #  enter the crate's dependency tree.)
 
@@ -8,11 +8,9 @@
 version = 2
 yanked = "deny"
 ignore = [
-  # `paste` is archived/unmaintained (informational advisory, NOT a vulnerability).
-  # It is a tiny build-time proc-macro pulled transitively by arkworks (ark-ff →
-  # paste), with no safe upgrade available. No runtime/security impact. Re-evaluate
-  # when arkworks drops it (e.g. for `pastey`).
-  "RUSTSEC-2024-0436",
+  # `derivative` is an unmaintained proc-macro pulled by Arkworks 0.6 through
+  # ark-crypto-primitives. It is build-time-only and has no fixed release yet.
+  "RUSTSEC-2024-0388",
 ]
 
 [bans]
@@ -24,9 +22,9 @@ allow-wildcard-paths = true # ...but allow internal workspace path deps (curvy-c
 [licenses]
 version = 2
 # Permissive licenses only — exactly those present in the dependency tree (arkworks
-# + RustCrypto are MIT/Apache-2.0; a few BSD-3-Clause / Unicode-3.0). Add to this
+# + RustCrypto are MIT/Apache-2.0; a few BSD-3-Clause / Unicode-3.0 / Zlib). Add to this
 # list (never remove the gate) if a new vetted dependency introduces another.
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "Unicode-3.0"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.9
 
 [sources]

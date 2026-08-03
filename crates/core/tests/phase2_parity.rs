@@ -1,14 +1,15 @@
-//! Conformance for the commitment-layer primitives against their reference
-//! implementations (`@zk-kit/eddsa-poseidon`, `@zk-kit/baby-jubjub`,
-//! `poseidon-lite`, and WebCrypto SHA-256).
+//! Golden-vector parity for the Domain-B primitives against the exact libraries the
+//! SDK uses (@zk-kit/eddsa-poseidon, @zk-kit/baby-jubjub, poseidon-lite, WebCrypto).
 
 use std::str::FromStr;
 
 use curvy_core::blake512::blake512;
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
-use curvy_core::eddsa::{derive_secret_scalar, ephemeral_pub_key, pub_from_private_key_hex, sign_hex};
+use curvy_core::eddsa::{
+    derive_secret_scalar, ephemeral_pub_key, pub_from_private_key_hex, sign_hex,
+};
 use curvy_core::encoding::from_hex;
-use curvy_core::field::{fr_from_dec, fr_to_dec, Fr};
+use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
 use curvy_core::hash_utils::sha256_bigint;
 use curvy_core::note::{note_id, nullifier, owner_hash};
 use num_bigint::BigUint;
@@ -134,11 +135,20 @@ fn cipher_matches_balance_cipher() {
         let eph_y = big(&c.ephemeral_key[1]);
         let eph = (&eph_x, &eph_y);
         let out = encrypt_amount_token(fr(&c.amount), fr(&c.token), &ss, eph);
-        assert_eq!(fr_to_dec(&out.encrypted_amount), c.encrypted_amount, "cipher {i} amount");
-        assert_eq!(fr_to_dec(&out.encrypted_token), c.encrypted_token, "cipher {i} token");
+        assert_eq!(
+            fr_to_dec(&out.encrypted_amount),
+            c.encrypted_amount,
+            "cipher {i} amount"
+        );
+        assert_eq!(
+            fr_to_dec(&out.encrypted_token),
+            c.encrypted_token,
+            "cipher {i} token"
+        );
 
         // round-trip
-        let (amount, token) = decrypt_amount_token(out.encrypted_amount, out.encrypted_token, &ss, eph);
+        let (amount, token) =
+            decrypt_amount_token(out.encrypted_amount, out.encrypted_token, &ss, eph);
         assert_eq!(fr_to_dec(&amount), c.amount, "cipher {i} decrypt amount");
         assert_eq!(fr_to_dec(&token), c.token, "cipher {i} decrypt token");
     }
@@ -150,7 +160,12 @@ fn blake512_matches_zk_kit() {
     assert!(!v.blake512.is_empty());
     for (i, b) in v.blake512.iter().enumerate() {
         let digest = blake512(&from_hex(&b.input));
-        assert_eq!(to_hex(&digest), b.digest, "blake512 vector {i} (input len {})", b.input.len() / 2);
+        assert_eq!(
+            to_hex(&digest),
+            b.digest,
+            "blake512 vector {i} (input len {})",
+            b.input.len() / 2
+        );
     }
 }
 
@@ -206,8 +221,16 @@ fn note_commitments_match() {
         let pk = (fr(&n.pub_x), fr(&n.pub_y));
         let oh = owner_hash(pk, fr(&n.shared_secret));
         assert_eq!(fr_to_dec(&oh), n.owner_hash, "note {i} ownerHash");
-        assert_eq!(fr_to_dec(&note_id(oh, fr(&n.amount), fr(&n.token))), n.id, "note {i} id");
-        assert_eq!(fr_to_dec(&nullifier(fr(&n.shared_secret), pk)), n.nullifier, "note {i} nullifier");
+        assert_eq!(
+            fr_to_dec(&note_id(oh, fr(&n.amount), fr(&n.token))),
+            n.id,
+            "note {i} id"
+        );
+        assert_eq!(
+            fr_to_dec(&nullifier(fr(&n.shared_secret), pk)),
+            n.nullifier,
+            "note {i} nullifier"
+        );
     }
 }
 
@@ -217,6 +240,10 @@ fn sha256_bigint_matches() {
     assert!(!v.sha256_bigint.is_empty());
     for (i, s) in v.sha256_bigint.iter().enumerate() {
         let inputs: Vec<BigUint> = s.inputs.iter().map(|x| big(x)).collect();
-        assert_eq!(sha256_bigint(&inputs).to_string(), s.output, "sha256BigInt {i}");
+        assert_eq!(
+            sha256_bigint(&inputs).to_string(),
+            s.output,
+            "sha256BigInt {i}"
+        );
     }
 }

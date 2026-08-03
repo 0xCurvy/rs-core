@@ -1,23 +1,25 @@
 //! Byte/integer encodings used at the EdDSA boundary.
 //!
-//! EdDSA-Poseidon (matching `@zk-kit/eddsa-poseidon`) is **little-endian** for
-//! all buffer/integer conversions — the opposite of the note cipher, which is
-//! big-endian. Keeping the two explicit here prevents accidental endianness flips.
+//! EdDSA-Poseidon (`@zk-kit/eddsa-poseidon`) is **little-endian** for all
+//! buffer<->integer conversions (`leBufferToBigInt` / `leBigIntToBuffer`) — the
+//! opposite of the note cipher, which is big-endian. Keeping the two explicit
+//! here prevents accidental endianness flips.
 
 use core::str::FromStr;
 
 use num_bigint::BigUint;
 
-/// Parse a non-negative decimal string into a raw integer (no field reduction) -
+/// Parse a non-negative decimal string into a raw integer (no field reduction) —
 /// the boundary for the cipher key material, `sha256BigInt`, and the EdDSA message.
 pub fn dec_to_biguint(s: &str) -> BigUint {
     BigUint::from_str(s).unwrap_or_else(|_| panic!("invalid decimal integer: {s:?}"))
 }
 
 /// Decode a hex string into bytes with the **lenient semantics of Node's
-/// `Buffer.from(hex, "hex")`** - the hex decoding used for EdDSA private keys:
+/// `Buffer.from(hex, "hex")`** (the EdDSA private-key encoding the SDK relies on):
 /// parse byte pairs left-to-right, stop at the first invalid hex character, and
-/// drop a trailing odd nibble. No `0x` stripping (it would stop at the `x`).
+/// drop a trailing odd nibble. No `0x` stripping — `Buffer.from` does not strip it
+/// either (it would stop at the `x`).
 pub fn from_hex(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);
@@ -43,7 +45,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-/// Little-endian bytes to integer.
+/// Little-endian bytes -> integer (`leBufferToBigInt`).
 pub fn le_bytes_to_biguint(bytes: &[u8]) -> BigUint {
     BigUint::from_bytes_le(bytes)
 }
@@ -51,10 +53,13 @@ pub fn le_bytes_to_biguint(bytes: &[u8]) -> BigUint {
 /// Integer -> fixed 32-byte **big-endian** bytes (`bigIntToBytes(value, 32)`), used
 /// for the cipher key material and `sha256BigInt`. Packs the **raw** value with NO
 /// field reduction (left-padded with zeros). Panics if the value does not fit in 32
-/// bytes (i.e. `value >= 2^256`).
+/// bytes (matches the TS overflow guard at `value >= 2^256`).
 pub fn biguint_to_be_32(value: &BigUint) -> [u8; 32] {
     let be = value.to_bytes_be();
-    assert!(be.len() <= 32, "biguint_to_be_32: value exceeds 32 bytes (>= 2^256)");
+    assert!(
+        be.len() <= 32,
+        "biguint_to_be_32: value exceeds 32 bytes (>= 2^256)"
+    );
     let mut out = [0u8; 32];
     out[32 - be.len()..].copy_from_slice(&be);
     out
@@ -64,7 +69,10 @@ pub fn biguint_to_be_32(value: &BigUint) -> [u8; 32] {
 /// Panics if the value does not fit in `len` bytes (matches the JS overflow guard).
 pub fn biguint_to_le_bytes(value: &BigUint, len: usize) -> Vec<u8> {
     let mut out = value.to_bytes_le();
-    assert!(out.len() <= len, "biguint_to_le_bytes: value exceeds {len} bytes");
+    assert!(
+        out.len() <= len,
+        "biguint_to_le_bytes: value exceeds {len} bytes"
+    );
     out.resize(len, 0);
     out
 }

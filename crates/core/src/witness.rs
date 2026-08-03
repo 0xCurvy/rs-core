@@ -1,17 +1,18 @@
-//! Circuit witness builders (aggregation, withdrawal, pending-notes-commitment).
-//! They produce the flat snarkjs input objects, in circom field-declaration order,
-//! by composing the commitment-layer primitives and the [`crate::imt`] tree. Pure
-//! assembly: no randomness, no I/O.
+//! Witness builders — native Rust port of `witnessFromNotes.ts` /
+//! `pendingNotesCommitmentInputs.ts`. They produce the **flat snarkjs input
+//! objects** (circom field-declaration order) by composing the ported Domain-B
+//! primitives + the [`crate::imt`] tree. Pure assembly: no randomness, no IO.
 //!
-//! Inclusion proofs are supplied by the caller: each is `(leaf_index, siblings)`.
+//! Inclusion proofs are **supplied** (Mode A, the lean/stateless path): each is
+//! `(leaf_index, siblings)`, matching `SuppliedInclusionProofs`.
 
 use ark_ff::AdditiveGroup;
 use num_bigint::BigUint;
 use serde::Serialize;
 
 use crate::cipher::encrypt_amount_token;
-use crate::eddsa::{sign_hex, ScalarSignatureError, ScalarSigningKey, Signature};
-use crate::field::{fr_to_biguint, fr_to_dec, Bn254Fr, Fr};
+use crate::eddsa::{ScalarSignatureError, ScalarSigningKey, Signature, sign_hex};
+use crate::field::{Bn254Fr, Fr, fr_to_biguint, fr_to_dec};
 use crate::hash_utils::sha256_bigint;
 use crate::imt::Imt;
 use crate::note as commitments;
@@ -41,16 +42,13 @@ pub struct KnownOwner {
 
 impl KnownOwner {
     pub fn new(owner: crate::babyjubjub::BabyJubPoint, shared_secret: Bn254Fr) -> Self {
-        Self { owner, shared_secret }
+        Self {
+            owner,
+            shared_secret,
+        }
     }
 
-    pub fn note(
-        self,
-        amount: Fr,
-        token: Fr,
-        ephemeral_key: (Fr, Fr),
-        view_tag: Fr,
-    ) -> Note {
+    pub fn note(self, amount: Fr, token: Fr, ephemeral_key: (Fr, Fr), view_tag: Fr) -> Note {
         Note {
             amount,
             token,
@@ -72,7 +70,7 @@ impl Note {
     pub fn nullifier(&self) -> Fr {
         commitments::nullifier(self.shared_secret, self.owner_pub)
     }
-    /// Flattened note layout: `[owner.x, owner.y, sharedSecret, amount, token]`.
+    /// `flatNote`: `[owner.x, owner.y, sharedSecret, amount, token]`.
     fn flat(&self) -> Vec<String> {
         vec![
             fr_to_dec(&self.owner_pub.0),
@@ -88,11 +86,14 @@ impl Note {
             self.amount,
             self.token,
             &fr_to_biguint(&self.shared_secret),
-            (&fr_to_biguint(&self.ephemeral_key.0), &fr_to_biguint(&self.ephemeral_key.1)),
+            (
+                &fr_to_biguint(&self.ephemeral_key.0),
+                &fr_to_biguint(&self.ephemeral_key.1),
+            ),
         );
         (out.encrypted_amount, out.encrypted_token)
     }
-    /// Flattened encrypted-data layout: `[encAmount, encToken, eph.x, eph.y, viewTag]`.
+    /// `flatEncrypted`: `[encAmount, encToken, eph.x, eph.y, viewTag]`.
     fn flat_encrypted(&self) -> Vec<String> {
         let (ea, et) = self.encrypted();
         vec![
@@ -112,7 +113,7 @@ pub struct Proof {
 }
 
 impl Proof {
-    /// Flattened inclusion-proof layout: `[leafIndex, ...siblings]`.
+    /// `flatInclusion`: `[leafIndex, ...siblings]`.
     fn flat(&self) -> Vec<String> {
         let mut out = vec![self.leaf_index.to_string()];
         out.extend(self.siblings.iter().map(fr_to_dec));
@@ -132,14 +133,14 @@ pub trait NoteSigner {
     fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError>;
 }
 
-/// Legacy seed-backed signer retained for existing Curvy accounts.
+/// Seed-backed signer for Curvy accounts that use BLAKE/prune key derivation.
 pub struct SeedNoteSigner<'a> {
     private_key_hex: &'a str,
     public_key: (Fr, Fr),
 }
 
 impl<'a> SeedNoteSigner<'a> {
-    /// Derive the public point using the legacy BLAKE/prune seed profile.
+    /// Derive the public point using the seed-backed BLAKE/prune profile.
     pub fn new(private_key_hex: &'a str) -> Self {
         Self {
             private_key_hex,
@@ -147,10 +148,13 @@ impl<'a> SeedNoteSigner<'a> {
         }
     }
 
-    /// Compatibility constructor for old callers that already serialize a public
-    /// point separately. New code should use [`Self::new`].
-    fn legacy(private_key_hex: &'a str, public_key: (Fr, Fr)) -> Self {
-        Self { private_key_hex, public_key }
+    /// Constructor for established callers that serialize a public point
+    /// separately. New integrations should prefer [`Self::new`], which derives it.
+    fn from_parts(private_key_hex: &'a str, public_key: (Fr, Fr)) -> Self {
+        Self {
+            private_key_hex,
+            public_key,
+        }
     }
 }
 
@@ -170,7 +174,9 @@ impl NoteSigner for ScalarSigningKey {
     }
 
     fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError> {
-        Ok(self.sign_curvy_v1(Bn254Fr::from_fr(message))?.to_legacy())
+        Ok(self
+            .sign_curvy_v1(Bn254Fr::from_fr(message))?
+            .to_signature())
     }
 }
 
@@ -193,7 +199,7 @@ pub struct WithdrawalWitness {
     pub token_id: String,
 }
 
-/// Build the withdrawal circuit witness.
+/// `generateWithdrawalCircuitInputsFromNotes` + `flattenWithdrawalCircuitInputs`.
 /// Signing message: `Poseidon([...nullifiers, destinationAddress, withdrawnAmount, tokenId])`.
 pub fn build_withdrawal(
     notes: &[Note],
@@ -204,7 +210,7 @@ pub fn build_withdrawal(
     destination_address: Fr,
     token_id: Fr,
 ) -> WithdrawalWitness {
-    let signer = SeedNoteSigner::legacy(owner_key_hex, public_key);
+    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key);
     build_withdrawal_with_signer(
         notes,
         &signer,
@@ -213,7 +219,7 @@ pub fn build_withdrawal(
         destination_address,
         token_id,
     )
-    .expect("legacy seed signing is infallible")
+    .expect("seed-backed signing is infallible")
 }
 
 /// Build a withdrawal witness using either a seed-backed or scalar-backed signer.
@@ -268,40 +274,12 @@ pub struct AggregationWitness {
     pub protocol_fee_per_thousand: String,
     #[serde(rename = "gasFee")]
     pub gas_fee: String,
-    /// Per-token gas fee: the gas-fee-tree Merkle path (leaf index = the inputs'
-    /// token) proving `gasFee` is the committed cost for this token. See below.
-    #[serde(rename = "gasFeeSiblings")]
-    pub gas_fee_siblings: Vec<String>,
-    /// Public root the `gasFeeSiblings` path is verified under.
-    #[serde(rename = "commitPendingNotesGasFeeRoot")]
-    pub commit_pending_notes_gas_fee_root: String,
     #[serde(rename = "feeNotePublicKey")]
     pub fee_note_public_key: [String; 2],
 }
 
-/// Depth of the per-token gas-fee tree (indexed by token id).
-const GAS_FEE_TREE_DEPTH: usize = 6;
-
-/// Synthesize the depth-`GAS_FEE_TREE_DEPTH` gas-fee tree holding `gas_fee` at
-/// `token_index` (zeros elsewhere) and return the `(siblings, root)` inclusion
-/// proof at that index. Real flows pass the actual committed gas-fee tree; the
-/// synthetic tree here proves against its own root (self-contained).
-fn synthetic_gas_fee_proof(token: &Fr, gas_fee: Fr) -> (Vec<String>, String) {
-    let token_index: usize = fr_to_biguint(token)
-        .try_into()
-        .ok()
-        .filter(|&i: &usize| i < (1usize << GAS_FEE_TREE_DEPTH))
-        .unwrap_or_else(|| {
-            panic!("aggregation: token out of range for the gas-fee tree (0..2^{GAS_FEE_TREE_DEPTH}-1)")
-        });
-    let mut leaves = vec![Fr::ZERO; token_index + 1];
-    leaves[token_index] = gas_fee;
-    let proof = Imt::from_leaves(GAS_FEE_TREE_DEPTH, &leaves).create_proof(token_index);
-    (proof.siblings.iter().map(fr_to_dec).collect(), fr_to_dec(&proof.root))
-}
-
-/// Build the aggregation circuit witness.
-/// `input_notes`/`output_notes` are already resolved and padded (no randomness here).
+/// `buildAggregationWitnessBundle` (deterministic tail) + `flattenAggregationCircuitInputs`.
+/// `input_notes`/`output_notes` are already resolved + padded (no randomness here).
 /// Signing message: `Poseidon([ Poseidon(outputNoteIds), Poseidon(encNoteData flat amount/token) ])`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_aggregation(
@@ -316,7 +294,7 @@ pub fn build_aggregation(
     gas_fee: Fr,
     fee_note_public_key: (Fr, Fr),
 ) -> AggregationWitness {
-    let signer = SeedNoteSigner::legacy(owner_key_hex, public_key);
+    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key);
     build_aggregation_with_signer(
         input_notes,
         input_proofs,
@@ -328,7 +306,7 @@ pub fn build_aggregation(
         gas_fee,
         fee_note_public_key,
     )
-    .expect("legacy seed signing is infallible")
+    .expect("seed-backed signing is infallible")
 }
 
 /// Build an aggregation witness using either a seed-backed or scalar-backed
@@ -345,7 +323,11 @@ pub fn build_aggregation_with_signer(
     gas_fee: Fr,
     fee_note_public_key: (Fr, Fr),
 ) -> Result<AggregationWitness, ScalarSignatureError> {
-    let enc_notes: Vec<Note> = output_notes.iter().chain(std::iter::once(fee_note)).cloned().collect();
+    let enc_notes: Vec<Note> = output_notes
+        .iter()
+        .chain(std::iter::once(fee_note))
+        .cloned()
+        .collect();
     let encrypted: Vec<(Fr, Fr)> = enc_notes.iter().map(|n| n.encrypted()).collect();
 
     let output_note_hash = poseidon(&output_notes.iter().map(|n| n.id()).collect::<Vec<_>>());
@@ -359,12 +341,6 @@ pub fn build_aggregation_with_signer(
     let sig = signer.sign(signing_hash)?;
     let public_key = signer.public_key();
 
-    // Per-token gas fee: prove `(token -> gasFee)` membership. The leaf index is
-    // the inputs' token (`input_notes[0].token`); the synthetic tree carries
-    // `gasFee` at that index and proves against its own root.
-    let (gas_fee_siblings, commit_pending_notes_gas_fee_root) =
-        synthetic_gas_fee_proof(&input_notes[0].token, gas_fee);
-
     Ok(AggregationWitness {
         input_notes: input_notes.iter().map(|n| n.flat()).collect(),
         input_note_inclusion_proofs: input_proofs.iter().map(|p| p.flat()).collect(),
@@ -376,9 +352,10 @@ pub fn build_aggregation_with_signer(
         notes_root: fr_to_dec(&notes_root),
         protocol_fee_per_thousand: fr_to_dec(&protocol_fee_per_thousand),
         gas_fee: fr_to_dec(&gas_fee),
-        gas_fee_siblings,
-        commit_pending_notes_gas_fee_root,
-        fee_note_public_key: [fr_to_dec(&fee_note_public_key.0), fr_to_dec(&fee_note_public_key.1)],
+        fee_note_public_key: [
+            fr_to_dec(&fee_note_public_key.0),
+            fr_to_dec(&fee_note_public_key.1),
+        ],
     })
 }
 
@@ -399,8 +376,8 @@ pub struct PendingCommitmentWitness {
     pub new_notes_root: String,
 }
 
-/// Build the pending-notes-commitment circuit witness. Mutates a copy of the tree:
-/// each non-zero pending id is inserted (zero ids are skip slots with zero siblings).
+/// `generatePendingNotesCommitmentCircuitInputs`. Mutates a copy of the tree: each
+/// non-zero pending id is inserted (zero ids are skip slots with zero siblings).
 /// `inputHash = sha256BigInt([...paddedIds, currentRoot, newRoot, currentIndex, newIndex])`.
 pub fn build_pending_commitment(
     tree: &Imt,
@@ -408,7 +385,10 @@ pub fn build_pending_commitment(
     batch_size: usize,
     pending_note_ids: &[Fr],
 ) -> PendingCommitmentWitness {
-    assert!(pending_note_ids.len() <= batch_size, "pending ids exceed batch size");
+    assert!(
+        pending_note_ids.len() <= batch_size,
+        "pending ids exceed batch size"
+    );
     let current_notes_root = tree.root();
     let current_note_index = tree.leaf_count() as u64;
 
@@ -442,7 +422,10 @@ pub fn build_pending_commitment(
         input_hash: input_hash.to_string(),
         current_notes_root: fr_to_dec(&current_notes_root),
         pending_note_ids: padded.iter().map(fr_to_dec).collect(),
-        siblings: siblings.iter().map(|row| row.iter().map(fr_to_dec).collect()).collect(),
+        siblings: siblings
+            .iter()
+            .map(|row| row.iter().map(fr_to_dec).collect())
+            .collect(),
         new_notes_root: fr_to_dec(&new_notes_root),
     }
 }
