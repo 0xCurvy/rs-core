@@ -15,6 +15,7 @@ choices:
   wasm-bundler       complete portable WASM core for bundlers
   wasm-web-threads   complete threaded WASM core for browsers
   all-portable       native plus all portable WASM targets
+  npm                assemble the npm package from the browser WASM output
 EOF
 }
 
@@ -40,6 +41,11 @@ run_choice() {
       scripts/build-wasm.sh nodejs
       scripts/build-wasm.sh web
       scripts/build-wasm.sh bundler
+      ;;
+    npm)
+      scripts/build-wasm.sh web
+      scripts/build-wasm.sh web --threads
+      node scripts/build-npm.mjs
       ;;
     help|--help|-h)
       usage
@@ -70,8 +76,9 @@ What do you want to build?
   4) Complete portable WASM core for bundlers
   5) Complete threaded WASM core for browsers
   6) Native plus all portable WASM targets
+  7) npm package (@0xcurvy/rs-core-wasm) from the browser WASM output
 EOF
-read -r -p "Select [1-6]: " selection
+read -r -p "Select [1-7]: " selection
 
 case "$selection" in
   1) run_choice native ;;
@@ -80,6 +87,7 @@ case "$selection" in
   4) run_choice wasm-bundler ;;
   5) run_choice wasm-web-threads ;;
   6) run_choice all-portable ;;
+  7) run_choice npm ;;
   *)
     echo "invalid selection: $selection" >&2
     exit 1
