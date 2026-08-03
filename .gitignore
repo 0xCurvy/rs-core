@@ -21,6 +21,11 @@ crates/prover/pkg-web
 crates/prover/pkg-web-threads
 crates/prover/pkg-bundler
 
+# Assembled npm package (scripts/build-npm.mjs) and its tarball. Rebuild it
+# from the wasm-bindgen output; CI publishes it from a tagged release.
+/dist
+*.tgz
+
 # Local JavaScript tooling.
 node_modules
 

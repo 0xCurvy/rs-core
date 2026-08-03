@@ -299,6 +299,25 @@ This creates `crates/wasm/pkg-bundler` and `crates/prover/pkg-bundler`. Point th
 application's package or workspace configuration at the output directory for
 the module it uses.
 
+#### npm package
+
+JavaScript consumers do not build this repository. The browser output is
+assembled into a single npm package, `@0xcurvy/rs-core-wasm`, so downstream
+projects depend on a version instead of a working copy:
+
+```bash
+scripts/build.sh npm          # web + web-threads, then assemble dist/npm
+node scripts/build-npm.mjs --pack   # ... and produce the tarball
+```
+
+The package exposes one entry per browser artifact — `core`, `core-threads`,
+`prover`, `prover-threads` — plus each raw `.wasm`. The wasm-bindgen output is
+copied **unmodified**: its `new URL('curvy_wasm_bg.wasm', import.meta.url)` and
+the Rayon helper's self-spawning `new Worker(...)` are the patterns bundlers
+resolve natively, so consumers get working assets and workers without patching
+generated code. Each entry also carries its own `package.json`, which is what
+makes the Rayon snippet's `../../..` import resolve inside a bundler.
+
 #### All portable targets
 
 Install both the native and common WASM prerequisites above, then run:
