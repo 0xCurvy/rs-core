@@ -1,5 +1,8 @@
 # Curvy Rust core
 
+[![Static Badge](https://img.shields.io/badge/crates-v0.1.0-white?style=plastic&logo=rust&logoColor=black&label=crates.io&labelColor=white&color=orange)](https://crates.io/crates/curvy-core)
+[![Static Badge](https://img.shields.io/badge/npm-v0.1.0-white?style=plastic&logo=npm&logoColor=red&label=wasm-bindings&labelColor=white&color=red)](https://www.npmjs.com/package/@0xcurvy/rs-core-wasm)
+
 Production-compatible Rust cryptography, witness evaluation, and Groth16 proving
 for the Curvy protocol.
 
