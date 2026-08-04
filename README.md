@@ -18,16 +18,13 @@ layer you need:
 | `curvy-prover` | Authenticated graph evaluation plus snarkjs `.zkey` parsing and self-verified arkworks Groth16 proofs; it also provides the native prover executable and prover WASM module | [docs.rs/curvy-prover](https://docs.rs/curvy-prover) |
 | `curvy-wasm` | JavaScript bindings for the `curvy-core` cryptography and tree APIs | [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) |
 
-The docs.rs links go live automatically after each release candidate is
-published to crates.io; there is no separate documentation upload step.
-
 This README is the workspace and integration guide. Each crate has a focused
 README used for its own crates.io page and included at the top of its docs.rs
 landing page. Item-level Rust documentation remains beside the API it describes.
 This keeps crate selection and build guidance here without making every
 published crate present the same generic landing page.
 
-The crates are release candidates. Pin the exact version until the stable API is
+> The crates are release candidates. Pin the exact version until the stable API is
 published.
 
 ## Install
@@ -400,9 +397,8 @@ cross-origin isolation.
 
 ## Publishing a release candidate
 
-Publish from a clean, reviewed commit. Registry dependencies must exist before
-dependent crates can be packaged, so use this order and wait for crates.io to
-index each prerequisite before continuing:
+Registry dependencies must exist before
+dependent crates can be packaged, so publish must be done in this order:
 
 ```bash
 cargo publish --locked -p curvy-core
@@ -414,7 +410,7 @@ cargo publish --locked -p curvy-wasm
 Tag the exact published commit with the workspace version, for example
 `v0.1.0-rc.2`. The CI workflow validates native Rust, portable WASM, threaded
 WASM, rustdoc, dependency policy, package contents, and the prover's compact
-prove-and-verify fixture before publication.
+prove-and-verify fixture before publication. Npm piblish workflow is triggered by new "v*" tag push.
 
 ## License
 
