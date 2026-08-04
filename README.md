@@ -395,23 +395,6 @@ cross-origin isolation.
 - `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a
   cross-origin-isolated page.
 
-## Publishing a release candidate
-
-Registry dependencies must exist before
-dependent crates can be packaged, so publish must be done in this order:
-
-```bash
-cargo publish --locked -p curvy-core
-cargo publish --locked -p curvy-witness
-cargo publish --locked -p curvy-prover
-cargo publish --locked -p curvy-wasm
-```
-
-Tag the exact published commit with the workspace version, for example
-`v0.1.0-rc.2`. The CI workflow validates native Rust, portable WASM, threaded
-WASM, rustdoc, dependency policy, package contents, and the prover's compact
-prove-and-verify fixture before publication. Npm piblish workflow is triggered by new "v*" tag push.
-
 ## License
 
 [MIT](LICENSE) © Curvy Protocol d.o.o.
