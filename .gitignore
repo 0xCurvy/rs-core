@@ -1,4 +1,4 @@
-# Rust build artifacts — regenerate with `cargo build`. NEVER commit these.
+# Rust build artifacts - regenerate with `cargo build`. NEVER commit these.
 /target
 **/target
 
@@ -33,6 +33,6 @@ node_modules
 .DS_Store
 .idea
 
-# NOT ignored (deliberately tracked — do not add here):
+# NOT ignored (deliberately tracked - do not add here):
 #   Cargo.lock                pinned dependency graph + checksums (supply-chain gate)
 #   crates/*/testdata/*.json  committed golden vectors (parity oracles)

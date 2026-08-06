@@ -1,4 +1,4 @@
-//! Witness builders — native Rust port of `witnessFromNotes.ts` /
+//! Witness builders - native Rust port of `witnessFromNotes.ts` /
 //! `pendingNotesCommitmentInputs.ts`. They produce the **flat snarkjs input
 //! objects** (circom field-declaration order) by composing the ported Domain-B
 //! primitives + the [`crate::imt`] tree. Pure assembly: no randomness, no IO.

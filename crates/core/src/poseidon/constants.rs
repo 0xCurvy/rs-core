@@ -2,7 +2,7 @@
 //!
 //! These are dumped verbatim from `poseidon-lite@0.2.1`'s circomlib parameters and
 //! committed as decimal JSON so they are human-auditable. They are compiled into
-//! the binary via `include_str!` and parsed once into field elements on first use —
+//! the binary via `include_str!` and parsed once into field elements on first use -
 //! no runtime file IO (WASM-safe).
 
 use std::collections::BTreeMap;

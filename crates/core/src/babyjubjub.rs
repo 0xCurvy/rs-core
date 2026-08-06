@@ -1,4 +1,4 @@
-//! BabyJubjub twisted Edwards curve over BN254 `Fr` — a faithful port of
+//! BabyJubjub twisted Edwards curve over BN254 `Fr` - a faithful port of
 //! `@zk-kit/baby-jubjub@1.0.3` (EIP-2494). Only the two operations EdDSA needs are
 //! ported: point addition and scalar multiplication. The curve lives over the same
 //! field as everything else (`Fr`), so no separate curve crate is required.
@@ -300,7 +300,7 @@ pub fn add_point(p1: Point, p2: Point) -> Point {
 
 /// Scalar multiplication `e · base` via LSB-first double-and-add (`mulPointEscalar`).
 /// `e` is consumed as a non-negative integer of any size (it need not be reduced
-/// modulo the subgroup order — the result is identical either way).
+/// modulo the subgroup order - the result is identical either way).
 pub fn mul_point_escalar(base: Point, e: &BigUint) -> Point {
     let mut res = identity();
     let mut exp = base;

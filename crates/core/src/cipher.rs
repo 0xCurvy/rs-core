@@ -1,4 +1,4 @@
-//! Note-data cipher — a faithful port of `balanceCipher.ts`.
+//! Note-data cipher - a faithful port of `balanceCipher.ts`.
 //!
 //! The encrypted amount/token are two PUBLIC field signals (each `< r`), so there
 //! is no room for an AEAD tag/IV. We use AES-256-CTR as a keystream and add it into

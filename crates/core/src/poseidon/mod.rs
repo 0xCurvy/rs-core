@@ -1,7 +1,7 @@
-//! Poseidon hash over BN254 Fr — a faithful port of `poseidon-lite@0.2.1`
+//! Poseidon hash over BN254 Fr - a faithful port of `poseidon-lite@0.2.1`
 //! (the canonical *unoptimized* HadesHash from the Poseidon whitepaper, as used by
 //! circomlib). Same round counts, same x^5 S-box, same `[0, ...inputs]` state init,
-//! same round constants (`C`) and MDS matrix (`M`) — so outputs match bit-for-bit.
+//! same round constants (`C`) and MDS matrix (`M`) - so outputs match bit-for-bit.
 //!
 //! Reference: `node_modules/poseidon-lite/poseidon/index.js`.
 //!
@@ -16,7 +16,7 @@ mod constants;
 use crate::field::Fr;
 use ark_ff::AdditiveGroup;
 
-/// Number of full rounds (R_F) — split half before / half after the partial rounds.
+/// Number of full rounds (R_F) - split half before / half after the partial rounds.
 const N_ROUNDS_F: usize = 8;
 
 /// `v^5` S-box (BN254 Fr arithmetic reduces mod p automatically).

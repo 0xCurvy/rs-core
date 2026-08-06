@@ -1,4 +1,4 @@
-//! Domain A — stealth addressing core. Native Rust port of `curvy-core` (Go/gnark).
+//! Domain A - stealth addressing core. Native Rust port of `curvy-core` (Go/gnark).
 //!
 //! Dual-curve & pairing-based:
 //! - **secp256k1** spending keys: `s` (priv), `S = s·G` (pub).
@@ -32,7 +32,7 @@ use crate::encoding::from_hex;
 // Map announcements → the SPARSE list of matches (the closure returns
 // `Option<Match>`), in input order. With the `parallel` feature the work fans
 // out over rayon (each item is an independent G1 mul +, on a tag match, one
-// pairing — embarrassingly parallel); rayon's `collect` preserves the input
+// pairing - embarrassingly parallel); rayon's `collect` preserves the input
 // order even through `filter_map`, so both arms are output-identical.
 macro_rules! map_announcements {
     ($rs:expr, $tags:expr, $f:expr) => {{
@@ -97,7 +97,7 @@ fn parse_xy<F: PrimeField>(s: &str) -> Result<(F, F), StealthError> {
 }
 
 // Both BN254 G1 and secp256k1 have cofactor 1, so on-curve already implies the
-// prime-order subgroup — no separate subgroup check is needed. The check also
+// prime-order subgroup - no separate subgroup check is needed. The check also
 // excludes (0, 0) (off-curve for both), so a parsed point is never the identity
 // and downstream `x()/y().unwrap()` on it cannot fire.
 fn parse_bn(s: &str, what: &str) -> Result<BnG1, StealthError> {
@@ -157,10 +157,10 @@ fn view_tag(p: &BnG1) -> String {
 }
 
 /// Compare a computed `v·R` tag against an announcement's tag. Matching means the
-/// tag's first 2 chars equal the computed tag exactly (a computed 1-char tag — a
-/// tiny X coordinate — never matches a 2-char one, same as before). A malformed
+/// tag's first 2 chars equal the computed tag exactly (a computed 1-char tag - a
+/// tiny X coordinate - never matches a 2-char one, same as before). A malformed
 /// tag (shorter than 2 chars, or a non-char-boundary prefix) is a NON-MATCH, not
-/// a panic — the Go core panicked here on 1-char tags, which turned one bad
+/// a panic - the Go core panicked here on 1-char tags, which turned one bad
 /// announcement into a dead scan.
 fn tag_matches(vri: &BnG1, vt: &str) -> bool {
     vt.get(..2).is_some_and(|prefix| view_tag(vri) == prefix)
@@ -188,7 +188,7 @@ pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, 
     if r.is_zero() {
         return Err(err("ephemeral r must be nonzero"));
     }
-    // The recipient meta-keys come from the registry — validate hard. A send
+    // The recipient meta-keys come from the registry - validate hard. A send
     // computed from an off-curve K/V would announce a garbage spendingPubKey:
     // funds committed to an address nobody can ever derive the key for.
     let big_v_pt = parse_bn(big_v, "recipient view key V")?;
@@ -207,7 +207,7 @@ pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, 
 
 /// One matched announcement: `index` into the input `rs`/`view_tags` arrays,
 /// plus the derived one-time keys. A tag match is a CANDIDATE, not proof of
-/// ownership — the 1-byte viewTag false-positives at ~1/256, and the caller's
+/// ownership - the 1-byte viewTag false-positives at ~1/256, and the caller's
 /// note-commitment recompute (`discoverOwnedNotes`) is what confirms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanMatch {
@@ -225,7 +225,7 @@ pub struct ViewerMatch {
 
 /// Returns the SPARSE, input-ordered list of tag-matching announcements.
 /// Announcements (`R_i`, `viewTag_i`) come off the network, so a malformed or
-/// off-curve `R_i` (or malformed tag) is simply not a match — one hostile or
+/// off-curve `R_i` (or malformed tag) is simply not a match - one hostile or
 /// corrupt announcement must not abort a whole wallet scan. Errors are reserved
 /// for the caller's own inputs (keys, mismatched array lengths).
 pub fn scan(
@@ -251,7 +251,7 @@ pub fn scan(
     )| {
         let ri = parse_bn(ri_str, "announcement R").ok()?;
         // v ≠ 0 and R is a valid affine point of the prime-order G1, so v·R is
-        // never the identity — view_tag/xy on it cannot panic.
+        // never the identity - view_tag/xy on it cannot panic.
         let vri = bn_mul(ri, v);
         if !tag_matches(&vri, vt) {
             return None;
@@ -326,7 +326,7 @@ fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
     }
 }
 
-/// `new_meta`: generate a fresh random meta-key pair. Returns `(k, v, K, V)` —
+/// `new_meta`: generate a fresh random meta-key pair. Returns `(k, v, K, V)` -
 /// private keys as big-endian hex, public keys as `"X.Y"` decimal.
 pub fn new_meta() -> Result<(String, String, String, String), StealthError> {
     let s = random_nonzero::<SecpFr>()?;

@@ -1,7 +1,7 @@
 //! Byte/integer encodings used at the EdDSA boundary.
 //!
 //! EdDSA-Poseidon (`@zk-kit/eddsa-poseidon`) is **little-endian** for all
-//! buffer<->integer conversions (`leBufferToBigInt` / `leBigIntToBuffer`) — the
+//! buffer<->integer conversions (`leBufferToBigInt` / `leBigIntToBuffer`) - the
 //! opposite of the note cipher, which is big-endian. Keeping the two explicit
 //! here prevents accidental endianness flips.
 
@@ -9,7 +9,7 @@ use core::str::FromStr;
 
 use num_bigint::BigUint;
 
-/// Parse a non-negative decimal string into a raw integer (no field reduction) —
+/// Parse a non-negative decimal string into a raw integer (no field reduction) -
 /// the boundary for the cipher key material, `sha256BigInt`, and the EdDSA message.
 pub fn dec_to_biguint(s: &str) -> BigUint {
     BigUint::from_str(s).unwrap_or_else(|_| panic!("invalid decimal integer: {s:?}"))
@@ -18,7 +18,7 @@ pub fn dec_to_biguint(s: &str) -> BigUint {
 /// Decode a hex string into bytes with the **lenient semantics of Node's
 /// `Buffer.from(hex, "hex")`** (the EdDSA private-key encoding the SDK relies on):
 /// parse byte pairs left-to-right, stop at the first invalid hex character, and
-/// drop a trailing odd nibble. No `0x` stripping — `Buffer.from` does not strip it
+/// drop a trailing odd nibble. No `0x` stripping - `Buffer.from` does not strip it
 /// either (it would stop at the `x`).
 pub fn from_hex(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();

@@ -11,7 +11,7 @@
 // The generated package ships the wasm-bindgen output UNMODIFIED. Its
 // `new URL('curvy_wasm_bg.wasm', import.meta.url)` and the Rayon helper's
 // `new Worker(new URL('./workerHelpers.js', import.meta.url))` are the patterns
-// every major bundler resolves natively — consumers must therefore keep this
+// every major bundler resolves natively - consumers must therefore keep this
 // package out of their bundler's pre-bundling/optimization step (see README).
 
 import { execFileSync } from "node:child_process";
@@ -28,7 +28,7 @@ const shouldPack = args.includes("--pack");
 const PACKAGE_NAME = "@0xcurvy/rs-core-wasm";
 
 // One npm package, four entry points. All four artifacts MUST come from the
-// same commit — a single tarball makes version skew structurally impossible
+// same commit - a single tarball makes version skew structurally impossible
 // instead of something a manifest has to assert.
 const ENTRIES = [
   { subpath: "core", source: "crates/wasm/pkg-web", module: "curvy_wasm", threaded: false },
@@ -56,7 +56,7 @@ function assertBuilt({ subpath, source, module, threaded }) {
   try {
     present = readdirSync(sourceDir);
   } catch {
-    throw new Error(`${source} is missing — run scripts/build.sh wasm-web and wasm-web-threads first`);
+    throw new Error(`${source} is missing - run scripts/build.sh wasm-web and wasm-web-threads first`);
   }
   for (const required of [`${module}.js`, `${module}.d.ts`, `${module}_bg.wasm`]) {
     if (!present.includes(required)) throw new Error(`${source}/${required} is missing`);

@@ -1,4 +1,4 @@
-//! EdDSA-Poseidon over BabyJubjub — a faithful port of `@zk-kit/eddsa-poseidon`'s
+//! EdDSA-Poseidon over BabyJubjub - a faithful port of `@zk-kit/eddsa-poseidon`'s
 //! default (BLAKE-1 / original BLAKE-512) entry, which the SDK's `babyJubjub.ts`
 //! wraps as `pubFromPrivateKey`, `ephemeralPubKey`, and `sign`.
 //!
@@ -6,7 +6,7 @@
 //! - the private key is hashed with **original BLAKE-512** (see [`crate::blake512`]);
 //! - `signMessage` computes `S = r + hm·s mod l` with the **un-shifted** pruned
 //!   scalar `s` (not `s >> 3`). Because `pruneBuffer` zeroes the low 3 bits,
-//!   `s = 8·(s>>3)`, so it still verifies — but the `S` *value* differs from
+//!   `s = 8·(s>>3)`, so it still verifies - but the `S` *value* differs from
 //!   circomlibjs by a factor of 8. We must match `@zk-kit`, which the on-chain
 //!   `EdDSAPoseidonVerifier` checks.
 
@@ -136,29 +136,29 @@ fn pruned_scalar_buffer(private_key: &[u8]) -> [u8; 32] {
     prune_buffer(h32)
 }
 
-/// `deriveSecretScalar` — `(LE(pruned) >> 3) mod l`.
+/// `deriveSecretScalar` - `(LE(pruned) >> 3) mod l`.
 pub fn derive_secret_scalar(private_key: &[u8]) -> BigUint {
     let pruned = pruned_scalar_buffer(private_key);
     (le_bytes_to_biguint(&pruned) >> 3u32) % &*SUB_ORDER
 }
 
-/// `derivePublicKey` — `deriveSecretScalar(pk) · Base8`.
+/// `derivePublicKey` - `deriveSecretScalar(pk) · Base8`.
 pub fn derive_public_key(private_key: &[u8]) -> Point {
     mul_point_escalar(*BASE8, &derive_secret_scalar(private_key))
 }
 
-/// `pubFromPrivateKey(hex)` — public key from a hex private key
+/// `pubFromPrivateKey(hex)` - public key from a hex private key
 /// (`Buffer.from(hex, "hex")` semantics: the hex is decoded to raw bytes first).
 pub fn pub_from_private_key_hex(hex: &str) -> Point {
     derive_public_key(&from_hex(hex))
 }
 
-/// `ephemeralPubKey(scalar)` — `R = scalar · Base8`.
+/// `ephemeralPubKey(scalar)` - `R = scalar · Base8`.
 pub fn ephemeral_pub_key(scalar: &BigUint) -> Point {
     mul_point_escalar(*BASE8, scalar)
 }
 
-/// `signMessage(private_key, message)` — EdDSA-Poseidon over BabyJubjub.
+/// `signMessage(private_key, message)` - EdDSA-Poseidon over BabyJubjub.
 ///
 /// `message` is a **raw integer**, not a field element: the TS does not reduce it
 /// before packing its little-endian bytes into the `r` derivation, so a message in
@@ -173,7 +173,7 @@ pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     let s = le_bytes_to_biguint(&prune_buffer(h32)); // un-shifted pruned scalar
     let a = mul_point_escalar(*BASE8, &(&s >> 3u32));
 
-    // r = LE(BLAKE-512(hash[32..64] || LE32(message))) mod l  — message un-reduced.
+    // r = LE(BLAKE-512(hash[32..64] || LE32(message))) mod l  - message un-reduced.
     let msg_buff = biguint_to_le_bytes(message, 32);
     let mut compose = Vec::with_capacity(64);
     compose.extend_from_slice(&hash[32..64]);
@@ -183,13 +183,13 @@ pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     let r8 = mul_point_escalar(*BASE8, &r);
     let hm = poseidon(&[r8.0, r8.1, a.0, a.1, fr_from_biguint(message)]);
 
-    // S = (r + hm·s) mod l  — s un-shifted (see module note).
+    // S = (r + hm·s) mod l  - s un-shifted (see module note).
     let s_sig = (r + fr_to_biguint(&hm) * s) % &*SUB_ORDER;
 
     Signature { r8, s: s_sig }
 }
 
-/// `sign(message, privateKeyHex)` — the SDK's hex-keyed signing entry point.
+/// `sign(message, privateKeyHex)` - the SDK's hex-keyed signing entry point.
 pub fn sign_hex(message: &BigUint, hex: &str) -> Signature {
     sign(message, &from_hex(hex))
 }

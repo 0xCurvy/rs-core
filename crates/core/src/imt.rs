@@ -1,4 +1,4 @@
-//! Incremental Merkle Tree (arity 2, Poseidon hash) — a faithful port of
+//! Incremental Merkle Tree (arity 2, Poseidon hash) - a faithful port of
 //! `@zk-kit/imt`'s `IMT`, plus indexed and stateful sharded engines replacing the
 //! SDK's `MerkleTree` / `ShardedNotesTree` implementations.
 //!
@@ -523,8 +523,8 @@ impl NotesFrontier {
 
     /// [`NotesFrontier::append`] over a canonical big-endian 32-byte leaf.
     ///
-    /// Every consumer reaching this type across a byte boundary — the wasm/TS
-    /// adapter and the blokli indexer both — otherwise repeats the same
+    /// Every consumer reaching this type across a byte boundary - the wasm/TS
+    /// adapter and the blokli indexer both - otherwise repeats the same
     /// `fr_from_be_32_checked` marshalling. Rejects non-canonical encodings
     /// rather than reducing them into the field.
     pub fn append_be_32(&mut self, leaf: &[u8; 32]) -> Result<FrontierAppend, TreeError> {
@@ -1738,7 +1738,7 @@ fn cap_levels(
     levels
 }
 
-/// The global root of the sharded tree — equals `Imt::from_leaves(depth, leaves).root()`.
+/// The global root of the sharded tree - equals `Imt::from_leaves(depth, leaves).root()`.
 pub fn sharded_root(leaves: &[Fr], depth: usize, shard_height: usize) -> Fr {
     let z = zero_roots(depth);
     let cap_depth = depth - shard_height;
@@ -1753,7 +1753,7 @@ pub fn sharded_root(leaves: &[Fr], depth: usize, shard_height: usize) -> Fr {
 }
 
 /// The full depth-`depth` inclusion proof for the leaf at `leaf_index`: the
-/// within-shard siblings glued to the shared cap path — equals the flat IMT proof.
+/// within-shard siblings glued to the shared cap path - equals the flat IMT proof.
 pub fn sharded_witness(
     leaves: &[Fr],
     leaf_index: usize,
@@ -2077,7 +2077,7 @@ mod tests {
         assert_eq!(restored.root(), Imt::from_leaves(4, &leaves).root());
     }
 
-    // Soundness: `verify_proof` must REJECT any tampered field — otherwise an
+    // Soundness: `verify_proof` must REJECT any tampered field - otherwise an
     // always-`true` verifier would still pass the round-trip tests above.
     #[test]
     fn verify_proof_rejects_tampering() {
