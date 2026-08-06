@@ -15,12 +15,28 @@ documentation = "https://docs.rs/curvy-witness"
 
 [package.metadata.docs.rs]
 targets = []
+all-features = true
 rustdoc-args = ["-D", "warnings"]
+
+[features]
+# Experimental. Adds the version-2 body encoding: varint distances and ZigZag
+# output deltas. Off by default - the encoding is not stable and no published
+# artifact uses it. The default build accepts the `CVYWIT01` and `SIGNET01`
+# envelopes at version 1, raw or zstd-compressed.
+signet-v2 = []
+# Back-compatible alias for the flag that used to gate the whole SIGNET surface.
+signet = ["signet-v2"]
+# Experimental. Adds SAGE, the Slot-Allocated Graph Evaluator (`sage::SageGraph`):
+# a second evaluator over the same authenticated artifacts that stores one field
+# element per *live* node instead of one per node. Off by default - the API is
+# unstable and only the default evaluator is covered by the production parity gates.
+sage = []
 
 [dependencies]
 ark-bn254 = { workspace = true, default-features = false, features = ["curve"] }
 ark-ff = { workspace = true, default-features = false }
 num-bigint.workspace = true
+ruzstd.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

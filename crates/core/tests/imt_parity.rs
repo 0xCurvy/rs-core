@@ -1,6 +1,6 @@
-//! Golden-vector parity for the IMT + sharded tree vs `@zk-kit/imt` (which the SDK
-//! `MerkleTree` / `ShardedNotesTree` wrap). The sharded witness is proven equal to
-//! the flat IMT proof, so the same `@zk-kit` proofs are the oracle for both.
+//! Golden-vector parity for the IMT + sharded tree vs `@zk-kit/imt`. The sharded
+//! witness is proven equal to the flat IMT proof, so the same `@zk-kit` proofs are
+//! the oracle for both.
 
 use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
 use curvy_core::imt::{Imt, sharded_root, sharded_witness, verify_proof};

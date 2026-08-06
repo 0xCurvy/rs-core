@@ -1,6 +1,6 @@
 # @0xcurvy/rs-core-wasm
 
-Browser WebAssembly builds of the [Curvy Rust core](https://github.com/0xCurvy/rs-core) — stealth-address
+Browser WebAssembly builds of the [Curvy Rust core](https://github.com/0xCurvy/rs-core) - stealth-address
 crypto (Poseidon, BabyJubjub/EdDSA, the note cipher, Merkle state, scanning) and the Groth16 prover.
 
 This package is generated output: `wasm-bindgen --target web`, published unmodified from a tagged
@@ -35,7 +35,7 @@ threaded builds spawn their Rayon workers with `new Worker(new URL('./workerHelp
 { type: 'module' })`. Both are the patterns bundlers are expected to resolve, and both depend on the
 files staying where they are on disk.
 
-**Vite** — exclude this package from dependency pre-bundling. The optimizer copies dependency code
+**Vite** - exclude this package from dependency pre-bundling. The optimizer copies dependency code
 into `node_modules/.vite/deps/`, where those relative URLs no longer point at anything:
 
 ```js
@@ -46,7 +46,7 @@ export default defineConfig({
 
 **webpack 5** resolves both patterns natively; no configuration is needed.
 
-For any bundler that does neither, pass the binary in yourself — `init({ module_or_path: url })`
+For any bundler that does neither, pass the binary in yourself - `init({ module_or_path: url })`
 accepts a URL, a `Response`, bytes, or a compiled `WebAssembly.Module`.
 
 ## Threads
@@ -61,7 +61,7 @@ Cross-Origin-Embedder-Policy: require-corp
 
 or, where third-party embeds must keep working, `Document-Isolation-Policy: isolate-and-credentialless`.
 Call `initThreadPool(n)` after `init()`. Feature-detect with `crossOriginIsolated` and fall back to the
-single-threaded entry — the two expose the same API.
+single-threaded entry - the two expose the same API.
 
 ## Node
 

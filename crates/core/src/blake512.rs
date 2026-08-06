@@ -1,4 +1,4 @@
-//! Original **BLAKE-512** (the SHA-3 finalist, *not* BLAKE2) — a faithful port of
+//! Original **BLAKE-512** (the SHA-3 finalist, *not* BLAKE2) - a faithful port of
 //! `@zk-kit/eddsa-poseidon`'s `blake.ts` (itself adapted from the `blake-hash` npm
 //! package). EdDSA-Poseidon's default entry uses this to hash the private key, so
 //! the Rust core must reproduce it exactly. Validated by direct golden vectors.

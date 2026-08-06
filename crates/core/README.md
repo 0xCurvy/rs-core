@@ -9,7 +9,7 @@ evaluate compiled Circom graphs or generate Groth16 proofs.
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.2"
+curvy-core = "=0.1.0-rc.3"
 ```
 
 Rust 1.94 or newer is required.
@@ -50,7 +50,7 @@ bulk Merkle-tree construction:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.2", features = ["parallel"] }
+curvy-core = { version = "=0.1.0-rc.3", features = ["parallel"] }
 ```
 
 Native applications can select the global Rayon pool size with

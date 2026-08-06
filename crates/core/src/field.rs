@@ -1,4 +1,4 @@
-//! BN254 scalar field (`Fr`) — the SNARK scalar field shared by circom, snarkjs,
+//! BN254 scalar field (`Fr`) - the SNARK scalar field shared by circom, snarkjs,
 //! poseidon-lite, and @zk-kit:
 //!
 //! ```text
@@ -101,8 +101,8 @@ impl Bn254Fr {
 ///
 /// This is deliberate: it mirrors how poseidon-lite / circom coerce inputs, so it
 /// is the correct boundary for *field-element* values (Poseidon inputs, amounts,
-/// commitments). For *raw 256-bit* integers that must NOT be reduced — the cipher
-/// key material, `sha256BigInt` inputs, and the EdDSA signing message — use a
+/// commitments). For *raw 256-bit* integers that must NOT be reduced - the cipher
+/// key material, `sha256BigInt` inputs, and the EdDSA signing message - use a
 /// [`num_bigint::BigUint`] with the raw byte encodings in [`crate::encoding`].
 ///
 /// Panics only if `s` is not a valid (optionally signed) decimal integer.

@@ -1,4 +1,4 @@
-//! Misc hash helpers — a faithful port of `proving/utils.ts`.
+//! Misc hash helpers - a faithful port of `proving/utils.ts`.
 
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use crate::encoding::biguint_to_be_32;
 
 /// `sha256BigInt`: 32-byte big-endian pack each input, concatenate, SHA-256, then
-/// interpret the 32-byte digest as a big-endian integer — **no field reduction**
+/// interpret the 32-byte digest as a big-endian integer - **no field reduction**
 /// (this is the `inputHash` digest the v2 pending-commit circuit verifies against).
 ///
 /// Inputs are **raw 256-bit integers**, not field elements: the TS packs each

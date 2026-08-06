@@ -48,7 +48,7 @@ fn poseidon_matches_poseidon_lite() {
 /// `light-poseidon` (dev-dependency only). The committed
 /// golden vectors above pin us to `poseidon-lite` (JS); this pins the same
 /// permutation to a separately maintained Rust implementation derived from
-/// Light Protocol's audited codebase. It supports arities 1..=12 — 13..=16
+/// Light Protocol's audited codebase. It supports arities 1..=12 - 13..=16
 /// remain covered by the golden vectors only.
 #[test]
 fn poseidon_matches_pso_poseidon() {

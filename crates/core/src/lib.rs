@@ -2,22 +2,20 @@
 //!
 //! ## Implementation notes
 //!
-//! One Rust implementation of Curvy's cryptography, replacing the old split across
-//! a Go-WASM core and TypeScript re-implementations. Every function here is a
-//! faithful port of an existing implementation and is pinned to it by **golden
-//! vectors** (see "Verification" below) — so behaviour must stay byte-for-byte
-//! identical, even where that means code that looks unusual.
+//! Every function here is pinned to a reference implementation by **golden
+//! vectors** (see "Verification" below), so behaviour must stay byte-for-byte
+//! identical - even where that means code that looks unusual.
 //!
 //! ## New here? Read this first
 //!
 //! The crate is split into two cryptographic *domains*. They are very different;
 //! treat them separately.
 //!
-//! - **Domain B — the circuit/commitment layer.** BabyJubjub + Poseidon over the
+//! - **Domain B - the circuit/commitment layer.** BabyJubjub + Poseidon over the
 //!   BN254 scalar field, a note cipher, note commitments, and the Merkle trees and
-//!   witness builders the zk-circuits consume. Start here — it is self-contained
+//!   witness builders the zk-circuits consume. Start here - it is self-contained
 //!   and where most code lives.
-//! - **Domain A — the stealth addressing core** ([`stealth`]). The hard part:
+//! - **Domain A - the stealth addressing core** ([`stealth`]). The hard part:
 //!   *dual-curve* and *pairing-based* (secp256k1 spend keys + BN254 viewing keys),
 //!   ported from the Go `curvy-core`.
 //!
@@ -25,8 +23,8 @@
 //!
 //! | Module | What it is | Mirrors |
 //! |---|---|---|
-//! | [`field`] | BN254 scalar field `Fr` + decimal⇄`Fr` helpers (the boundary) | — |
-//! | [`encoding`] | hex / little-endian / big-endian byte helpers | — |
+//! | [`field`] | BN254 scalar field `Fr` + decimal⇄`Fr` helpers (the boundary) | - |
+//! | [`encoding`] | hex / little-endian / big-endian byte helpers | - |
 //! | [`poseidon`](mod@poseidon) | Poseidon hash over `Fr` | `poseidon-lite` |
 //! | [`babyjubjub`] | BabyJubjub curve (point add + scalar mul) | `@zk-kit/baby-jubjub` |
 //! | [`blake512`] | original BLAKE-512 (not BLAKE2) | `@zk-kit/eddsa-poseidon` |
@@ -47,7 +45,7 @@
 //!
 //! - **Trusted/internal field elements** → [`field::fr_from_dec`] /
 //!   [`field::fr_to_dec`], which reduce modulo the field. Use them for amounts,
-//!   hashes, and commitments —
+//!   hashes, and commitments -
 //!   anything that *is* a field element.
 //! - **Untrusted canonical field elements** → [`field::Bn254Fr`], which rejects
 //!   values outside the field instead of reducing them.

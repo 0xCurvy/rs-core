@@ -31,7 +31,7 @@ ark-relations = { workspace = true, default-features = false }
 ark-serialize = { workspace = true, default-features = false }
 ark-std = { workspace = true, default-features = false }
 byteorder.workspace = true
-curvy-witness = { version = "=0.1.0-rc.2", path = "../witness" }
+curvy-witness = { version = "=0.1.0-rc.3", path = "../witness" }
 getrandom.workspace = true
 num-bigint.workspace = true
 rayon = { workspace = true, optional = true }

@@ -10,7 +10,7 @@
 //!
 //! Field-element inputs reduce mod the field (`fr_from_dec`); raw 256-bit inputs
 //! (cipher key material, EdDSA message, `sha256BigInt`) are parsed without
-//! reduction (`dec_to_biguint`) — see the core crate for why.
+//! reduction (`dec_to_biguint`) - see the core crate for why.
 
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
@@ -31,7 +31,7 @@ use curvy_core::poseidon::poseidon as core_poseidon;
 use curvy_core::stealth;
 use wasm_bindgen::prelude::*;
 
-// Threaded builds export `initThreadPool(n)` — call it once (after `init()`)
+// Threaded builds export `initThreadPool(n)` - call it once (after `init()`)
 // on a cross-origin-isolated page before scans or bulk tree construction.
 #[cfg(feature = "wasm-threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
@@ -193,7 +193,7 @@ pub fn sha256_bigint(inputs: Vec<String>) -> String {
 
 // ── Stateful sharded notes tree ──────────────────────────────────────────────
 
-/// Rust-owned replacement for the SDK's generic `@zk-kit/imt` wrapper.
+/// Generic incremental Merkle tree with a reverse leaf index.
 #[wasm_bindgen(js_name = MerkleTree)]
 pub struct WasmMerkleTree {
     inner: IndexedMerkleTree,
@@ -366,7 +366,7 @@ pub fn verify_merkle_proof(
     }))
 }
 
-/// Rust-owned constant-space frontier for the production indexer. It retains no
+/// Constant-space append frontier. It retains no
 /// leaves or witnesses and emits a shard descriptor only at an exact boundary.
 #[wasm_bindgen(js_name = NotesFrontier)]
 pub struct WasmNotesFrontier {
@@ -803,14 +803,11 @@ fn js_tree_error(error: TreeError) -> JsError {
 }
 
 // ── Domain A: the stealth core. Typed params in, plain decimal/hex string values
-// out — NO JSON envelope. (The Go-WASM core could only marshal strings, so the SDK
-// inherited a JSON-stringify/parse dance on both sides; wasm-bindgen passes
-// structured values directly, so that dance is gone.) Multi-value results use
-// `Vec<String>` — the same positional convention Domain B already uses for points
-// and signatures — except `scan`, which returns its two PAIRED arrays via a small
-// typed result. The inner value formats (points as "x.y", hex view tags / priv
-// keys) are UNCHANGED, so the SDK's Note construction + scanner post-processing are
-// untouched: only the envelope changed.
+// out - NO JSON envelope; wasm-bindgen passes structured values directly.
+// Multi-value results use `Vec<String>` - the same positional convention Domain B
+// uses for points and signatures - except `scan`, which returns its two PAIRED
+// arrays via a small typed result. Points are "x.y"; view tags and private keys
+// are hex.
 
 #[wasm_bindgen]
 pub fn version() -> String {
@@ -844,7 +841,7 @@ pub fn send(big_k: String, big_v: String) -> Result<Vec<String>, JsError> {
 /// Recipient scan → the SPARSE list of tag-matching announcements, in input
 /// order: each match carries its `index` into the input arrays plus the derived
 /// one-time keys. Matches are CANDIDATES (1-byte viewTag ⇒ ~1/256 false
-/// positives) — the caller's note-commitment recompute confirms ownership.
+/// positives) - the caller's note-commitment recompute confirms ownership.
 /// Malformed / off-curve announcements are non-matches (skipped), never fatal;
 /// throws only on the caller's own inputs (keys, mismatched array lengths).
 #[wasm_bindgen]

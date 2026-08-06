@@ -20,7 +20,7 @@ rustdoc-args = ["-D", "warnings"]
 
 [features]
 # Fan independent scan items and bulk Merkle parent hashes out over rayon. OFF
-# by default — stock native + wasm builds are unchanged; wasm needs the
+# by default - stock native + wasm builds are unchanged; wasm needs the
 # atomics/threads build (see curvy-wasm `wasm-threads`).
 parallel = ["dep:rayon"]
 

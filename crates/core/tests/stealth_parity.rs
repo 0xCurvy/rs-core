@@ -1,5 +1,5 @@
-//! Golden-vector parity for the Domain-A stealth core vs the REAL Go WASM
-//! (curvy-core). Validates the dual-curve scheme end-to-end — including the
+//! Golden-vector parity for the Domain-A stealth core against the reference
+//! implementation. Validates the dual-curve scheme end-to-end - including the
 //! gnark-GT-tower → secp256k1 `b`-coercion and the BN254/secp256k1 generators.
 
 use curvy_core::stealth::{get_meta, scan, send_with_r};
@@ -75,7 +75,7 @@ fn send_matches_go() {
         assert_eq!(out.view_tag, s.view_tag, "send viewTag ({i})");
         assert_eq!(
             out.spending_pub_key, s.spending_pub_key,
-            "send spendingPubKey ({i}) — b-coercion"
+            "send spendingPubKey ({i}) - b-coercion"
         );
     }
 }
@@ -88,7 +88,7 @@ fn scan_matches_go() {
         let out =
             scan(&sc.k, &sc.v, &sc.rs, &sc.view_tags).expect("golden-vector scan inputs are valid");
         // The fixtures record the Go core's DENSE arrays ("" at non-matches);
-        // scan is now sparse — rebuild dense from (index, keys) and compare.
+        // scan is now sparse - rebuild dense from (index, keys) and compare.
         let mut dense_pubs = vec![String::new(); sc.rs.len()];
         let mut dense_privs = vec![String::new(); sc.rs.len()];
         for m in out {

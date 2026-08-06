@@ -1,7 +1,9 @@
 # Curvy Rust core
 
-[![Static Badge](https://img.shields.io/badge/crates-v0.1.0-white?style=plastic&logo=rust&logoColor=black&label=crates.io&labelColor=white&color=orange)](https://crates.io/crates/curvy-core)
-[![Static Badge](https://img.shields.io/badge/npm-v0.1.0-white?style=plastic&logo=npm&logoColor=red&label=wasm-bindings&labelColor=white&color=red)](https://www.npmjs.com/package/@0xcurvy/rs-core-wasm)
+[![crates.io](https://img.shields.io/crates/v/curvy-core?logo=rust&logoColor=black&label=crates.io&labelColor=white&color=orange)](https://crates.io/crates/curvy-core)
+[![wasm-bindings](https://img.shields.io/npm/v/@0xcurvy/rs-core-wasm?logo=npm&logoColor=black&label=wasm-bindings&labelColor=white&color=red)](https://www.npmjs.com/package/@0xcurvy/rs-core-wasm)
+[![CI](https://img.shields.io/github/actions/workflow/status/0xCurvy/rs-core/ci.yml?branch=main&logo=github&logoColor=black&label=CI&labelColor=white)](https://github.com/0xCurvy/rs-core/actions/workflows/ci.yml)
+[![docs.rs](https://img.shields.io/docsrs/curvy-core?logo=docsdotrs&logoColor=black&label=docs.rs&labelColor=white&color=blue)](https://docs.rs/curvy-core)
 
 Production-compatible Rust cryptography, witness evaluation, and Groth16 proving
 for the Curvy protocol.
@@ -18,12 +20,6 @@ layer you need:
 | `curvy-prover` | Authenticated graph evaluation plus snarkjs `.zkey` parsing and self-verified arkworks Groth16 proofs; it also provides the native prover executable and prover WASM module | [docs.rs/curvy-prover](https://docs.rs/curvy-prover) |
 | `curvy-wasm` | JavaScript bindings for the `curvy-core` cryptography and tree APIs | [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) |
 
-This README is the workspace and integration guide. Each crate has a focused
-README used for its own crates.io page and included at the top of its docs.rs
-landing page. Item-level Rust documentation remains beside the API it describes.
-This keeps crate selection and build guidance here without making every
-published crate present the same generic landing page.
-
 > The crates are release candidates. Pin the exact version until the stable API is
 published.
 
@@ -33,16 +29,16 @@ Most native applications only need `curvy-core`:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.2"
+curvy-core = "=0.1.0-rc.3"
 ```
 
 Add witness evaluation or local proving only when your application needs it:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.2"
-curvy-witness = "=0.1.0-rc.2"
-curvy-prover = "=0.1.0-rc.2"
+curvy-core = "=0.1.0-rc.3"
+curvy-witness = "=0.1.0-rc.3"
+curvy-prover = "=0.1.0-rc.3"
 ```
 
 Rust 1.94 or newer is required.
@@ -206,14 +202,14 @@ core crate without this build script:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.2", features = ["parallel"] }
-curvy-prover = "=0.1.0-rc.2"
+curvy-core = { version = "=0.1.0-rc.3", features = ["parallel"] }
+curvy-prover = "=0.1.0-rc.3"
 ```
 
 After publication, the executable can instead be installed from crates.io:
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.0-rc.2 \
+cargo install --locked curvy-prover --version 0.1.0-rc.3 \
   --bin curvy-native-prover
 ```
 
@@ -310,8 +306,8 @@ scripts/build.sh npm          # web + web-threads, then assemble dist/npm
 node scripts/build-npm.mjs --pack   # ... and produce the tarball
 ```
 
-The package exposes one entry per browser artifact — `core`, `core-threads`,
-`prover`, `prover-threads` — plus each raw `.wasm`. The wasm-bindgen output is
+The package exposes one entry per browser artifact - `core`, `core-threads`,
+`prover`, `prover-threads` - plus each raw `.wasm`. The wasm-bindgen output is
 copied **unmodified**: its `new URL('curvy_wasm_bg.wasm', import.meta.url)` and
 the Rayon helper's self-spawning `new Worker(...)` are the patterns bundlers
 resolve natively, so consumers get working assets and workers without patching

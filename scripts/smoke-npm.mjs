@@ -4,9 +4,9 @@
 // Usage: node scripts/smoke-npm.mjs <dir-with-the-package-installed>
 //
 // The portable entries are instantiated for real. The threaded entries cannot
-// be imported here at all — their Rayon snippet registers a worker message
+// be imported here at all - their Rayon snippet registers a worker message
 // handler on `self` at module scope, which exists in browsers and workers but
-// not in Node — so they are checked structurally instead.
+// not in Node - so they are checked structurally instead.
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -26,7 +26,7 @@ for (const [subpath, binary] of [
   await entry.default({ module_or_path: bytes });
 
   if (subpath === "core") {
-    // Poseidon over a known pair — a wrong or half-linked binary fails here
+    // Poseidon over a known pair - a wrong or half-linked binary fails here
     // rather than in a consumer.
     const digest = entry.poseidon(["1", "2"]);
     if (!/^\d+$/.test(digest)) throw new Error(`core poseidon returned ${digest}`);
