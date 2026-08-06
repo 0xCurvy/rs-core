@@ -1,0 +1,35 @@
+[package]
+name = "curvy-signet"
+description = "Builds SIGNET witness-graph artifacts from curvy-signet-builder output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+# Internal artifact tooling. The evaluator that reads what this produces is the
+# published crate; this only ever runs in the graph pipeline.
+publish = false
+
+[lib]
+name = "curvy_signet"
+
+[[bin]]
+name = "signet"
+path = "src/main.rs"
+
+[dependencies]
+# The wire contract, and the evaluator `validate`/`inspect` check against. Both
+# optional consumer features are on: this tool has to be able to produce and read
+# every encoding, including the ones a stock client refuses.
+curvy-witness = { path = "../witness", features = ["signet"] }
+ark-bn254 = { workspace = true, default-features = false, features = ["curve"] }
+ark-ff = { workspace = true, default-features = false }
+ark-serialize = { version = "=0.6.0", default-features = false, features = ["derive"] }
+num-bigint.workspace = true
+postcard = { version = "=1.1.3", default-features = false, features = ["use-std"] }
+# 1.20.0 or newer: 1.19.0 is RUSTSEC-2026-0220 (shift overflow flags, and a
+# `to_base_be` infinite loop reachable from formatting untrusted values).
+ruint = { version = "=1.20.0", default-features = false, features = ["std", "serde"] }
+ruzstd = { workspace = true }
+serde = { workspace = true }
+sha2.workspace = true
+thiserror.workspace = true

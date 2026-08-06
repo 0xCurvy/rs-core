@@ -1,0 +1,13 @@
+diff --git a/node_modules/circomlib/circuits/comparators.circom b/node_modules/circomlib/circuits/comparators.circom
+--- a/node_modules/circomlib/circuits/comparators.circom
++++ b/node_modules/circomlib/circuits/comparators.circom
+@@ -23,0 +24,6 @@ include "binsum.circom";
++// Name the dynamic branch so the graph evaluator can provide the equivalent
++// trusted Rust operation at runtime.
++function bbf_inv(in) {
++    return in != 0 ? 1 / in : 0;
++}
++
+@@ -30 +36 @@ template IsZero() {
+-    inv <-- in!=0 ? 1/in : 0;
++    inv <-- bbf_inv(in);

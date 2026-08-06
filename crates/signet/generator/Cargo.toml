@@ -1,0 +1,28 @@
+[package]
+name = "signet-generator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Deliberately its own workspace, not an rs-core member. Building this needs
+# `circom`, a C++ toolchain and WITNESS_CPP pointing at a circuit, so as a member
+# it would break `cargo build --workspace` for everyone who only wants the
+# evaluator or the encoder.
+[workspace]
+
+[dependencies]
+# The pin lives in this crate's Cargo.lock, with a checksum -- not in a shell
+# variable, and not in a `git clone` the script has to trust.
+#
+# An exact version, so the resolver cannot drift onto a later release without the
+# lockfile changing in review.
+curvy-signet-builder = { version = "=0.1.0-rc.1", features = ["build-witness"] }
+
+# `build_witness()` returns `eyre::Result`, which `main` forwards. Already in the
+# tree as a dependency of the builder, so naming it here adds no new crate --
+# it only makes the existing one nameable. Exact-pinned for the same reason as
+# the builder above.
+eyre = "=0.6.12"
+
+[profile.release]
+opt-level = 3
