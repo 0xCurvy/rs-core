@@ -261,15 +261,27 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
         matrices.iter_mut().for_each(|m| {
             m.truncate(num_constraints);
         });
-        let a = matrices[0].clone();
-        let b = matrices[1].clone();
-        let matrices = ZkeyMatrices {
+        // Move the two rows out instead of cloning them: cloning held a second full
+        // copy of every retained coefficient while the source was still live.
+        // `shrink_to_fit` then releases the push-growth slack one linear combination
+        // at a time, so compaction never doubles the whole matrix either.
+        //
+        // Measured peak RSS for `Prover::from_zkey_bytes`, macOS release build:
+        //   pending(50,30), 882 MiB zkey - 3076.05 -> 2802.61 MiB, load 882 -> 808 ms
+        //   pending(5,30),  123 MiB zkey -  430.69 ->  392.81 MiB, load 128 -> 114 ms
+        // Load gets faster because 6.46M coefficient entries are no longer copied.
+        let mut rows = matrices.into_iter();
+        let mut a = rows.next().ok_or(SerializationError::InvalidData)?;
+        let mut b = rows.next().ok_or(SerializationError::InvalidData)?;
+        for combination in a.iter_mut().chain(b.iter_mut()) {
+            combination.shrink_to_fit();
+        }
+
+        Ok(ZkeyMatrices {
             num_instance_variables: header.n_public + 1,
             num_constraints,
             matrices: [a, b, vec![]],
-        };
-
-        Ok(matrices)
+        })
     }
 
     fn a_query(&mut self, n_vars: usize) -> IoResult<Vec<G1Affine>> {
@@ -437,7 +449,7 @@ pub fn deserialize_field2<R: Read>(reader: &mut R) -> IoResult<Fq2> {
 
 // UNCHECKED point construction (vendored change vs ark-circom): upstream used
 // `Affine::new`, which runs an on-curve check per point and a subgroup check
-// per G2 point — for a 226k-constraint zkey that is ~1M G1 + ~230k G2 curve
+// per G2 point - for a 226k-constraint zkey that is ~1M G1 + ~230k G2 curve
 // checks on EVERY load of a static, hash-pinnable artifact, and it dominated
 // cold start (23 s in wasm). Integrity belongs on the ARTIFACT (content hash /
 // one-time validation), not per point per load; `read_zkey` still spot-checks
@@ -467,7 +479,7 @@ fn deserialize_g2<R: Read>(reader: &mut R) -> IoResult<G2Affine> {
 const G1_BYTES: usize = 64; // two 32-byte Montgomery-form Fq limbs
 const G2_BYTES: usize = 128; // two Fq2
 
-// Bulk point sections: read the raw bytes in one go, then convert — in parallel
+// Bulk point sections: read the raw bytes in one go, then convert - in parallel
 // chunks under the `parallel` feature (the conversion is pure per-point work).
 fn deserialize_g1_vec<R: Read>(reader: &mut R, n_vars: usize) -> IoResult<Vec<G1Affine>> {
     let byte_count = n_vars
