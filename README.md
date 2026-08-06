@@ -20,12 +20,6 @@ layer you need:
 | `curvy-prover` | Authenticated graph evaluation plus snarkjs `.zkey` parsing and self-verified arkworks Groth16 proofs; it also provides the native prover executable and prover WASM module | [docs.rs/curvy-prover](https://docs.rs/curvy-prover) |
 | `curvy-wasm` | JavaScript bindings for the `curvy-core` cryptography and tree APIs | [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) |
 
-This README is the workspace and integration guide. Each crate has a focused
-README used for its own crates.io page and included at the top of its docs.rs
-landing page. Item-level Rust documentation remains beside the API it describes.
-This keeps crate selection and build guidance here without making every
-published crate present the same generic landing page.
-
 > The crates are release candidates. Pin the exact version until the stable API is
 published.
 

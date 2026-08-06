@@ -17,18 +17,16 @@
 //! [`Limits::batch_prover`] at the call site, taking 8,000,000 nodes and a ~799 MiB
 //! projection with it.
 //!
-//! That split exists because one shared constant makes the tighter consumer carry
-//! the looser one's budget: sizing globally for pending(50) would quadruple the DoS
-//! ceiling for every client that will never load it.
-//!
 //! Every allocation derived from artifact-declared counts is fallible, so an
 //! over-large graph is a typed error rather than an abort.
 //!
 //! ## Optional features
 //!
-//! - `signet` - accept the `SIGNET01` envelope, the version-2 body encoding, and
-//!   zstd-compressed artifacts. None of those are published yet, so the default
-//!   build refuses all three and carries no decompressor.
+//! A default build accepts the `CVYWIT01` and `SIGNET01` envelopes at version 1,
+//! raw or zstd-compressed.
+//!
+//! - `signet-v2` - additionally accept the version-2 body encoding. Off by
+//!   default: the encoding is not stable and no published artifact uses it.
 //! - `sage` - add [`sage::SageGraph`], a second evaluator over the same artifacts.
 
 #[cfg(feature = "sage")]
@@ -36,7 +34,6 @@ pub mod sage;
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
-#[cfg(feature = "signet")]
 use std::io::{Cursor, Read};
 
 use ark_bn254::Fr;
@@ -47,26 +44,22 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const LEGACY_MAGIC: &[u8; 8] = b"CVYWIT01";
-#[cfg(feature = "signet")]
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 /// Resource ceilings for one graph load.
 ///
-/// These are per-consumer, not global. A browser client and a batch prover run the
-/// same evaluator over very different circuits, and a single set of constants forces
-/// the tighter consumer to carry the looser one's budget: sizing for pending(50)
-/// would quadruple the DoS ceiling for every client that will never load it.
+/// These are per-consumer, not global: a browser client and a batch prover run the
+/// same evaluator over very different circuits.
 ///
 /// [`Limits::default`] is [`Limits::client`], which covers every published profile.
-/// Anything larger is opt-in at the call site, so widening the budget is a visible
-/// decision rather than a constant someone edited.
+/// Anything larger is opt-in at the call site.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Limits {
     /// Raw artifact bytes.
     pub graph_bytes: usize,
-    /// Compressed artifact bytes. Only consulted with the `signet` feature.
+    /// Compressed artifact bytes.
     pub compressed_graph_bytes: usize,
-    /// Decoder window a zstd frame may request. Only consulted with `signet`.
+    /// Decoder window a zstd frame may request.
     pub zstd_window_bytes: u64,
     /// Circuit-input JSON.
     pub input_json_bytes: usize,
@@ -187,9 +180,10 @@ pub mod wire {
     ];
 }
 
+use wire::MAGIC;
 use wire::{FIELD_BN254_FR, FORMAT_VERSION_V1, HEADER_SIZE};
-#[cfg(feature = "signet")]
-use wire::{FORMAT_VERSION_V2, MAGIC, V2_CONSTANT_TAG, V2_INPUT_TAG, V2_INVERSE_TAG};
+#[cfg(feature = "signet-v2")]
+use wire::{FORMAT_VERSION_V2, V2_CONSTANT_TAG, V2_INPUT_TAG, V2_INVERSE_TAG};
 
 #[derive(Debug, Error)]
 pub enum WitnessError {
@@ -444,7 +438,7 @@ struct InputMapping {
 #[derive(Debug, Clone, Copy)]
 enum FormatVersion {
     V1,
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     V2,
 }
 
@@ -481,7 +475,6 @@ impl WitnessGraph {
     ) -> Result<Self, WitnessError> {
         match authenticate(bytes, expected_sha256, &limits)? {
             Artifact::Raw => parse_graph(bytes, limits),
-            #[cfg(feature = "signet")]
             Artifact::Zstd => parse_graph(&decompress_graph(bytes, &limits)?, limits),
         }
     }
@@ -530,7 +523,6 @@ impl WitnessGraph {
 /// What an authenticated artifact turned out to be.
 enum Artifact {
     Raw,
-    #[cfg(feature = "signet")]
     Zstd,
 }
 
@@ -543,7 +535,6 @@ fn authenticate(
     expected_sha256: &str,
     limits: &Limits,
 ) -> Result<Artifact, WitnessError> {
-    #[cfg(feature = "signet")]
     if is_zstd_artifact(bytes) {
         if bytes.len() > limits.compressed_graph_bytes {
             return Err(WitnessError::CompressedGraphTooLarge {
@@ -566,7 +557,6 @@ fn authenticate(
 /// zstd, but our publication pipeline never emits them and honouring them would let
 /// two distinct artifacts decode to one graph. Rejecting them keeps the
 /// artifact-to-graph mapping injective and removes decoder surface.
-#[cfg(feature = "signet")]
 fn is_zstd_artifact(bytes: &[u8]) -> bool {
     let Some(magic) = bytes
         .get(..4)
@@ -628,12 +618,10 @@ fn build_input_buffer(
     Ok(inputs)
 }
 
-#[cfg(feature = "signet")]
 fn decompress_graph(bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, WitnessError> {
     decompress_graph_with_limits(bytes, limits.graph_bytes, limits.zstd_window_bytes)
 }
 
-#[cfg(feature = "signet")]
 fn decompress_graph_with_limits(
     bytes: &[u8],
     maximum_output: usize,
@@ -776,21 +764,18 @@ fn parse_graph(bytes: &[u8], limits: Limits) -> Result<WitnessGraph, WitnessErro
 /// at the first node record.
 fn read_header<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Header, Reader<'a>), WitnessError> {
     let mut reader = Reader::new(bytes);
-    // `CVYWIT01` is what every published artifact carries, so it is always
-    // accepted. `SIGNET01` is the successor envelope and version 2 the denser body
-    // encoding; neither is published, so an unflagged build refuses both rather
-    // than compiling decoder paths nothing exercises.
+    // Both envelopes are accepted at version 1: `CVYWIT01` is what earlier
+    // artifacts carry, `SIGNET01` is what the pipeline emits now. Version 2 is the
+    // denser body encoding and is not stable, so an unflagged build refuses it
+    // rather than compiling a decoder path nothing exercises.
     let magic = reader.array::<8>()?;
-    #[cfg(feature = "signet")]
     let recognised = magic == *LEGACY_MAGIC || magic == *MAGIC;
-    #[cfg(not(feature = "signet"))]
-    let recognised = magic == *LEGACY_MAGIC;
     if !recognised {
         return Err(WitnessError::InvalidMagic);
     }
     let version = match reader.u16()? {
         FORMAT_VERSION_V1 => FormatVersion::V1,
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         FORMAT_VERSION_V2 => FormatVersion::V2,
         version => return Err(WitnessError::UnsupportedVersion(version)),
     };
@@ -834,7 +819,7 @@ fn read_header<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Header, Reader<'
 fn preflight_body_size(header: &Header, available: usize) -> Result<(), WitnessError> {
     let (minimum_node_bytes, minimum_signal_bytes) = match header.version {
         FormatVersion::V1 => (5_usize, 4_usize),
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         FormatVersion::V2 => (2_usize, 1_usize),
     };
     let minimum = header
@@ -874,7 +859,7 @@ fn read_output_references(
                 signals.push(reference);
             }
         }
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         FormatVersion::V2 => {
             let mut previous = 0_usize;
             for index in 0..header.signal_count {
@@ -954,7 +939,7 @@ fn read_node_record(
             }
             _ => Err(WitnessError::InvalidNodeTag { index, tag }),
         },
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         FormatVersion::V2 => match tag {
             V2_INPUT_TAG => checked_input(reader.var_u32()? as usize, index, input_buffer_len),
             V2_CONSTANT_TAG => Ok(NodeRecord::Constant(reader.array::<32>()?)),
@@ -991,7 +976,7 @@ fn constant_from_bytes(encoded: [u8; 32], index: usize) -> Result<Fr, WitnessErr
     Fr::from_bigint(bigint_from_le_bytes(encoded)?).ok_or(WitnessError::NonCanonicalConstant(index))
 }
 
-#[cfg(feature = "signet")]
+#[cfg(feature = "signet-v2")]
 fn decode_backward_reference(reader: &mut Reader<'_>, index: usize) -> Result<usize, WitnessError> {
     let distance = reader.var_u64()?;
     let distance_usize = usize::try_from(distance)
@@ -1002,7 +987,7 @@ fn decode_backward_reference(reader: &mut Reader<'_>, index: usize) -> Result<us
     Ok(index - distance_usize)
 }
 
-#[cfg(feature = "signet")]
+#[cfg(feature = "signet-v2")]
 fn decode_output_delta(
     reader: &mut Reader<'_>,
     previous: usize,
@@ -1204,12 +1189,12 @@ impl<'a> Reader<'a> {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     fn var_u32(&mut self) -> Result<u32, WitnessError> {
         u32::try_from(self.var_u64()?).map_err(|_| WitnessError::InvalidVarint)
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     fn var_u64(&mut self) -> Result<u64, WitnessError> {
         let mut value = 0_u64;
         for index in 0..10 {
@@ -1246,17 +1231,23 @@ mod tests {
     use super::{
         FIELD_BN254_FR, FORMAT_VERSION_V1, LEGACY_MAGIC, Limits, WitnessError, WitnessGraph, fnv1a,
     };
-    #[cfg(feature = "signet")]
-    use super::{
-        FORMAT_VERSION_V2, MAGIC, V2_CONSTANT_TAG, V2_INPUT_TAG, ZSTD_MAGIC,
-        decompress_graph_with_limits, wire,
-    };
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
+    use super::{FORMAT_VERSION_V2, V2_CONSTANT_TAG, V2_INPUT_TAG, wire};
+    use super::{MAGIC, ZSTD_MAGIC, decompress_graph_with_limits};
     use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 
     fn graph_bytes(operation_reference: u32) -> Vec<u8> {
+        v1_graph_bytes(LEGACY_MAGIC, operation_reference)
+    }
+
+    /// The combination the pipeline ships: `SIGNET01` envelope, version-1 body.
+    fn signet_v1_graph_bytes(operation_reference: u32) -> Vec<u8> {
+        v1_graph_bytes(MAGIC, operation_reference)
+    }
+
+    fn v1_graph_bytes(magic: &[u8; 8], operation_reference: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(LEGACY_MAGIC);
+        bytes.extend_from_slice(magic);
         bytes.extend_from_slice(&FORMAT_VERSION_V1.to_le_bytes());
         bytes.extend_from_slice(&FIELD_BN254_FR.to_le_bytes());
         bytes.extend_from_slice(&64_u32.to_le_bytes());
@@ -1285,7 +1276,7 @@ mod tests {
         bytes
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     fn v2_graph_bytes_with_operation(operation_tag: u8, right_constant: u64) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -1316,7 +1307,7 @@ mod tests {
         bytes
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     fn push_var_u64(bytes: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
             bytes.push((value as u8 & 0x7f) | 0x80);
@@ -1349,7 +1340,6 @@ mod tests {
         assert_eq!(assignment[1].into_bigint().0[0], 7);
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn accepts_legacy_cvywit_magic_during_signet_migration() {
         let mut bytes = graph_bytes(2);
@@ -1359,7 +1349,34 @@ mod tests {
         assert_eq!(graph.assignment_size(), 2);
     }
 
-    #[cfg(feature = "signet")]
+    /// The shipping combination, on a default build: `SIGNET01` at version 1,
+    /// uncompressed. Neither the envelope nor the body encoding is behind a flag.
+    #[test]
+    fn evaluates_a_raw_signet_v1_graph() {
+        let bytes = signet_v1_graph_bytes(2);
+        assert_eq!(&bytes[..8], MAGIC.as_slice());
+        let graph =
+            WitnessGraph::from_bytes(&bytes, &digest(&bytes)).expect("signet v1 must parse");
+        let assignment = graph
+            .calculate_json(r#"{"a":"5"}"#)
+            .expect("signet v1 must evaluate");
+        assert_eq!(assignment[1].into_bigint().0[0], 7);
+    }
+
+    /// Version 2 stays gated: a default build must refuse it rather than
+    /// mis-parsing a body encoding it does not implement.
+    #[test]
+    #[cfg(not(feature = "signet-v2"))]
+    fn refuses_version_2_without_the_flag() {
+        let mut bytes = signet_v1_graph_bytes(2);
+        bytes[8..10].copy_from_slice(&2_u16.to_le_bytes());
+        let error = WitnessGraph::from_bytes(&bytes, &digest(&bytes))
+            .err()
+            .expect("version 2 must be refused without the feature");
+        assert!(matches!(error, WitnessError::UnsupportedVersion(2)));
+    }
+
+    #[cfg(feature = "signet-v2")]
     #[test]
     fn evaluates_v2_bitwise_xor_and_or_tags() {
         for (tag, expected) in [(wire::BIT_XOR, 6), (wire::BIT_OR, 7)] {
@@ -1373,7 +1390,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     #[test]
     fn every_published_operation_tag_has_a_golden_v2_record() {
         assert_eq!(
@@ -1390,10 +1407,9 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn automatically_decodes_an_authenticated_zstd_graph() {
-        let bytes = v2_graph_bytes_with_operation(wire::ADD, 2);
+        let bytes = signet_v1_graph_bytes(2);
         let compressed = compress_to_vec(bytes.as_slice(), CompressionLevel::Uncompressed);
         let graph = WitnessGraph::from_bytes(&compressed, &digest(&compressed))
             .expect("compressed graph must parse");
@@ -1403,7 +1419,6 @@ mod tests {
         assert_eq!(assignment[1].into_bigint().0[0], 7);
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn authenticates_compressed_bytes_before_zstd_decoding() {
         let error = WitnessGraph::from_bytes(&ZSTD_MAGIC, &"00".repeat(32))
@@ -1412,10 +1427,9 @@ mod tests {
         assert!(matches!(error, WitnessError::HashMismatch { .. }));
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn rejects_zstd_output_past_the_decoded_limit() {
-        let bytes = v2_graph_bytes_with_operation(wire::ADD, 2);
+        let bytes = signet_v1_graph_bytes(2);
         let compressed = compress_to_vec(bytes.as_slice(), CompressionLevel::Uncompressed);
         let error = decompress_graph_with_limits(
             &compressed,
@@ -1426,7 +1440,6 @@ mod tests {
         assert!(matches!(error, WitnessError::ZstdOutputTooLarge { .. }));
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn rejects_oversized_zstd_windows_before_decoding() {
         // Non-single-segment frame with a 16 MiB window descriptor. No block is
@@ -1445,7 +1458,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn rejects_zstd_dictionaries_and_trailing_frames() {
         // Single-segment, one-byte dictionary id, one-byte content size.
@@ -1460,7 +1472,7 @@ mod tests {
             WitnessError::ZstdDictionaryUnsupported
         ));
 
-        let bytes = v2_graph_bytes_with_operation(wire::ADD, 2);
+        let bytes = signet_v1_graph_bytes(2);
         let mut with_trailing = compress_to_vec(bytes.as_slice(), CompressionLevel::Uncompressed);
         with_trailing.extend_from_slice(&ZSTD_MAGIC);
         let trailing_error = WitnessGraph::from_bytes(&with_trailing, &digest(&with_trailing))
@@ -1469,7 +1481,6 @@ mod tests {
         assert!(matches!(trailing_error, WitnessError::ZstdTrailingData));
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn rejects_zstd_skippable_frames() {
         let skippable = [0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0];
@@ -1483,10 +1494,9 @@ mod tests {
         assert!(matches!(error, WitnessError::InvalidMagic));
     }
 
-    #[cfg(feature = "signet")]
     #[test]
     fn rejects_a_zstd_checksum_mismatch() {
-        let bytes = v2_graph_bytes_with_operation(wire::ADD, 2);
+        let bytes = signet_v1_graph_bytes(2);
         let mut compressed = compress_to_vec(bytes.as_slice(), CompressionLevel::Uncompressed);
         let checksum_byte = compressed.last_mut().expect("encoder must emit a checksum");
         *checksum_byte ^= 1;
@@ -1556,7 +1566,7 @@ mod tests {
         assert!(matches!(error, WitnessError::Truncated));
     }
 
-    #[cfg(feature = "signet")]
+    #[cfg(feature = "signet-v2")]
     #[test]
     fn rejects_non_canonical_v2_varints() {
         let mut bytes = v2_graph_bytes_with_operation(2, 2);

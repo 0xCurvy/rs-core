@@ -1,6 +1,6 @@
 //! EdDSA-Poseidon over BabyJubjub - a faithful port of `@zk-kit/eddsa-poseidon`'s
-//! default (BLAKE-1 / original BLAKE-512) entry, which the SDK's `babyJubjub.ts`
-//! wraps as `pubFromPrivateKey`, `ephemeralPubKey`, and `sign`.
+//! default (BLAKE-1 / original BLAKE-512) entry, exposed here as
+//! `pub_from_private_key_hex`, `ephemeral_pub_key` and `sign_hex`.
 //!
 //! Parity hazards baked in here (each diverges from circomlibjs):
 //! - the private key is hashed with **original BLAKE-512** (see [`crate::blake512`]);
@@ -189,7 +189,7 @@ pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     Signature { r8, s: s_sig }
 }
 
-/// `sign(message, privateKeyHex)` - the SDK's hex-keyed signing entry point.
+/// `sign(message, privateKeyHex)` - the hex-keyed signing entry point.
 pub fn sign_hex(message: &BigUint, hex: &str) -> Signature {
     sign(message, &from_hex(hex))
 }

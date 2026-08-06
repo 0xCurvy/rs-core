@@ -1,4 +1,4 @@
-//! Builds SIGNET witness-graph artifacts from `circom-witness-rs` output.
+//! Builds SIGNET witness-graph artifacts from `curvy-signet-builder` output.
 //!
 //! This is the second half of the graph pipeline. The first half - running
 //! `circom`, proving the black-box patch leaves the R1CS byte-identical, and
@@ -28,11 +28,11 @@
 //!
 //! # Defaults
 //!
-//! [`Envelope::Cvywit`] and [`FormatVersion::V1`] are the defaults because they are
-//! what `curvy-witness` accepts without any feature flag, and therefore the only
-//! combination that is publishable today. `SIGNET01` and version 2 both require the
-//! consumer's `signet` feature; emitting them by default would produce artifacts a
-//! stock client refuses.
+//! The defaults - [`Envelope::Signet`], [`FormatVersion::V1`] and
+//! [`Compression::Zstd`] - are what `curvy-witness` accepts without any feature
+//! flag, and therefore what is publishable. [`FormatVersion::V2`] requires the
+//! consumer's `signet-v2` feature; emitting it by default would produce artifacts
+//! a stock client refuses.
 
 pub mod encode;
 pub mod postcard;
@@ -47,10 +47,10 @@ pub use postcard::{Graph, OperationSchema};
 /// Which magic the artifact carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Envelope {
-    /// `CVYWIT01` - every published artifact, accepted by every build.
-    #[default]
+    /// `CVYWIT01` - what earlier artifacts carry. Still accepted by every build.
     Cvywit,
-    /// `SIGNET01` - the successor envelope; needs the consumer's `signet` feature.
+    /// `SIGNET01` - what the pipeline emits. Accepted by a default build.
+    #[default]
     Signet,
 }
 
@@ -74,12 +74,12 @@ impl Envelope {
 /// Whether the artifact ships raw or inside a zstd frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Compression {
-    /// Raw SIGNET bytes. What every published artifact is today.
-    #[default]
+    /// Raw SIGNET bytes.
     None,
-    /// A zstd frame around those bytes. Needs the consumer's `signet` feature,
-    /// and the digest to pin becomes the digest of the *compressed* file - that is
-    /// what the evaluator is handed and therefore what it authenticates.
+    /// A zstd frame around those bytes. Accepted by a default build, and the
+    /// digest to pin becomes the digest of the *compressed* file - that is what
+    /// the evaluator is handed and therefore what it authenticates.
+    #[default]
     Zstd,
 }
 
@@ -154,7 +154,7 @@ pub enum FormatVersion {
     #[default]
     V1,
     /// Varint backward distances and ZigZag output deltas; roughly 57% smaller.
-    /// Needs the consumer's `signet` feature.
+    /// Needs the consumer's `signet-v2` feature.
     V2,
 }
 

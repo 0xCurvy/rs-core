@@ -1,5 +1,5 @@
-//! Golden-vector parity for the Domain-A stealth core vs the REAL Go WASM
-//! (curvy-core). Validates the dual-curve scheme end-to-end - including the
+//! Golden-vector parity for the Domain-A stealth core against the reference
+//! implementation. Validates the dual-curve scheme end-to-end - including the
 //! gnark-GT-tower → secp256k1 `b`-coercion and the BN254/secp256k1 generators.
 
 use curvy_core::stealth::{get_meta, scan, send_with_r};

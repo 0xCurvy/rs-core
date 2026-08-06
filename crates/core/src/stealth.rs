@@ -12,7 +12,7 @@
 //! Points cross the boundary as `"X.Y"` big-endian **decimal** strings; private keys
 //! as big-endian hex.
 //!
-//! Parity hazard (validated by golden vectors from the Go WASM): gnark's GT field
+//! Parity hazard (validated by golden vectors): gnark's GT field
 //! tower `C0.B0.A0` must equal arkworks' `Fq12.c0.c0.c0`, and the BN254 G1/G2 + the
 //! secp256k1 generators must match gnark's.
 

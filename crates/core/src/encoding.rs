@@ -16,7 +16,7 @@ pub fn dec_to_biguint(s: &str) -> BigUint {
 }
 
 /// Decode a hex string into bytes with the **lenient semantics of Node's
-/// `Buffer.from(hex, "hex")`** (the EdDSA private-key encoding the SDK relies on):
+/// `Buffer.from(hex, "hex")`** (the EdDSA private-key encoding):
 /// parse byte pairs left-to-right, stop at the first invalid hex character, and
 /// drop a trailing odd nibble. No `0x` stripping - `Buffer.from` does not strip it
 /// either (it would stop at the `x`).

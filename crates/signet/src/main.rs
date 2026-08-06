@@ -22,18 +22,20 @@ signet - build and check SIGNET witness-graph artifacts
   signet inspect <artifact> <sha256>
       Print what the evaluator sees: signal count and source R1CS digest.
 
-Defaults are `--envelope cvywit --version 1`: the only combination a stock
-curvy-witness accepts. Both alternatives need the consumer's `signet` feature.
+Defaults are `--envelope signet --version 1 --compress zstd`, which a stock
+curvy-witness accepts. `--envelope cvywit` still works for older consumers. Only
+`--version 2` needs the consumer's `signet-v2` feature.
 
-`--compress zstd` shells out to the system `zstd` (default level 9, which keeps the
+Compression shells out to the system `zstd` (default level 9, which keeps the
 frame window at half the consumer's cap) and falls back to the weaker built-in
-encoder if that binary is missing. Every artifact is loaded back through the
-evaluator before it is written.
+encoder if that binary is missing. A compressed artifact pins its *compressed*
+digest; `export` prints both and labels which one. Every artifact is loaded back
+through the evaluator before it is written.
 
-`--ops` says which upstream built the postcard. `patched` (the default) is the
-current pipeline; `original` is needed for graphs predating the bitwise patch,
-including PIX aggregation and withdrawal. Choosing wrong is SILENT - it remaps
-every operation from index 14 up. Always follow an export with `validate`.";
+`--ops` says which upstream built the postcard. `patched` is the default;
+`original` is for graphs built before the bitwise patch. Choosing wrong is SILENT
+- it remaps every operation from index 14 up. Always follow an export with
+`validate`.";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -199,9 +201,9 @@ fn inspect(arguments: &[String]) -> Result<(), String> {
 
 /// Load through the shipped evaluator, under the batch-prover budget.
 ///
-/// The tool has to handle pending(50), which a client deliberately cannot. Structural
-/// validation is identical either way - only the ceilings differ - so this still
-/// rejects everything a client would reject for any reason other than size.
+/// Only the ceilings differ from a client load; structural validation is
+/// identical, so this still rejects everything a client would reject for any
+/// reason other than size.
 fn load(artifact: &str, expected_sha: &str) -> Result<WitnessGraph, String> {
     let bytes = std::fs::read(artifact).map_err(|e| format!("{artifact}: {e}"))?;
     WitnessGraph::from_bytes_with_limits(

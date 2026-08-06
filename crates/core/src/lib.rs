@@ -2,11 +2,9 @@
 //!
 //! ## Implementation notes
 //!
-//! One Rust implementation of Curvy's cryptography, replacing the old split across
-//! a Go-WASM core and TypeScript re-implementations. Every function here is a
-//! faithful port of an existing implementation and is pinned to it by **golden
-//! vectors** (see "Verification" below) - so behaviour must stay byte-for-byte
-//! identical, even where that means code that looks unusual.
+//! Every function here is pinned to a reference implementation by **golden
+//! vectors** (see "Verification" below), so behaviour must stay byte-for-byte
+//! identical - even where that means code that looks unusual.
 //!
 //! ## New here? Read this first
 //!

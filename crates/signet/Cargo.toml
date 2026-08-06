@@ -20,7 +20,7 @@ path = "src/main.rs"
 # The wire contract, and the evaluator `validate`/`inspect` check against. Both
 # optional consumer features are on: this tool has to be able to produce and read
 # every encoding, including the ones a stock client refuses.
-curvy-witness = { path = "../witness", features = ["signet"] }
+curvy-witness = { path = "../witness", features = ["signet-v2"] }
 ark-bn254 = { workspace = true, default-features = false, features = ["curve"] }
 ark-ff = { workspace = true, default-features = false }
 ark-serialize = { version = "=0.6.0", default-features = false, features = ["derive"] }

@@ -193,7 +193,7 @@ pub fn sha256_bigint(inputs: Vec<String>) -> String {
 
 // ── Stateful sharded notes tree ──────────────────────────────────────────────
 
-/// Rust-owned replacement for the SDK's generic `@zk-kit/imt` wrapper.
+/// Generic incremental Merkle tree with a reverse leaf index.
 #[wasm_bindgen(js_name = MerkleTree)]
 pub struct WasmMerkleTree {
     inner: IndexedMerkleTree,
@@ -366,7 +366,7 @@ pub fn verify_merkle_proof(
     }))
 }
 
-/// Rust-owned constant-space frontier for the production indexer. It retains no
+/// Constant-space append frontier. It retains no
 /// leaves or witnesses and emits a shard descriptor only at an exact boundary.
 #[wasm_bindgen(js_name = NotesFrontier)]
 pub struct WasmNotesFrontier {
@@ -803,14 +803,11 @@ fn js_tree_error(error: TreeError) -> JsError {
 }
 
 // ── Domain A: the stealth core. Typed params in, plain decimal/hex string values
-// out - NO JSON envelope. (The Go-WASM core could only marshal strings, so the SDK
-// inherited a JSON-stringify/parse dance on both sides; wasm-bindgen passes
-// structured values directly, so that dance is gone.) Multi-value results use
-// `Vec<String>` - the same positional convention Domain B already uses for points
-// and signatures - except `scan`, which returns its two PAIRED arrays via a small
-// typed result. The inner value formats (points as "x.y", hex view tags / priv
-// keys) are UNCHANGED, so the SDK's Note construction + scanner post-processing are
-// untouched: only the envelope changed.
+// out - NO JSON envelope; wasm-bindgen passes structured values directly.
+// Multi-value results use `Vec<String>` - the same positional convention Domain B
+// uses for points and signatures - except `scan`, which returns its two PAIRED
+// arrays via a small typed result. Points are "x.y"; view tags and private keys
+// are hex.
 
 #[wasm_bindgen]
 pub fn version() -> String {

@@ -35,15 +35,13 @@ use crate::SignetError;
 /// Choosing wrong does not fail: it silently remaps operations. `Neg` becomes
 /// `Bor`, `Inv` becomes `Bxor`, and so on, producing a graph that parses, loads,
 /// and computes the wrong witness. `signet validate` against a reference witness is
-/// the only thing that catches it, which is why exporting without validating is not
-/// a supported workflow.
+/// the only thing that catches it. Always validate before pinning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OperationSchema {
-    /// Upstream at the pinned revision, unpatched: 21 operations, `Neg` at 14.
-    /// The PIX aggregation and withdrawal graphs were built with this.
+    /// Unpatched upstream: 21 operations, `Neg` at 14.
     Original,
-    /// The Curvy fork: 23 operations, `Bor` and
-    /// `Bxor` at 14 and 15. What the current pipeline produces.
+    /// Patched: 23 operations, `Bor` and `Bxor` at 14 and 15. What the current
+    /// pipeline produces.
     #[default]
     Patched,
 }

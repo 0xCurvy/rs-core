@@ -9,7 +9,7 @@
 use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use curvy_signet::postcard::{Graph, InputMapping, Node, Operation};
-use curvy_signet::{Envelope, FormatVersion, encode, hex};
+use curvy_signet::{Compression, Envelope, FormatVersion, encode, hex};
 use curvy_witness::WitnessGraph;
 use ruint::aliases::U256;
 use sha2::{Digest, Sha256};
@@ -99,8 +99,9 @@ fn the_two_encodings_agree_and_v2_is_smaller() {
 /// accepts, so an artifact built with no flags has to be publishable as-is.
 #[test]
 fn the_default_encoding_is_the_publishable_one() {
-    assert_eq!(Envelope::default(), Envelope::Cvywit);
+    assert_eq!(Envelope::default(), Envelope::Signet);
     assert_eq!(FormatVersion::default(), FormatVersion::V1);
+    assert_eq!(Compression::default(), Compression::Zstd);
     let bytes = encode(
         &graph(),
         [0; 32],
@@ -108,7 +109,7 @@ fn the_default_encoding_is_the_publishable_one() {
         FormatVersion::default(),
     )
     .expect("encode");
-    assert_eq!(&bytes[..8], b"CVYWIT01");
+    assert_eq!(&bytes[..8], b"SIGNET01");
 }
 
 /// The placeholder mapping must not reach the artifact: the evaluator rejects a

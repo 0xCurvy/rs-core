@@ -10,43 +10,23 @@ the published crate.
 ```text
  .circom  ──┬─ circom --r1cs --O2 ─────────► original R1CS  ─┐
             └─ + circomlib IsZero patch ───► patched R1CS  ──┴─► cmp, must be identical
-            ── upstream build_graph (C++) ─► graph.bin (postcard)
+            ── build_graph (C++) ──────────► graph.bin (postcard)
                                                   │
                             signet export ────────┴─────────► artifact + SHA-256
                             signet validate ────────────────► parity vs reference witness
 ```
 
-The two halves split at `graph.bin`, and they split for a reason.
+The circuit half needs `circom`, a C++ toolchain, a circuits tree and
+`node_modules/circomlib`. `scripts/build-graph.sh` drives it and takes
+`CIRCUITS_DIR`. It runs the generator, [`curvy-signet-builder`], pinned with a
+checksum in [`generator/Cargo.lock`](generator) and printed on every run - record
+it with the artifact, because the generator version determines the operation
+schema that `signet export --ops` must match.
 
-**The circuit half** needs `circom`, a C++ toolchain, a circuits tree and
-`node_modules/circomlib`. It is circuit tooling; `scripts/build-graph.sh` drives
-it and takes `CIRCUITS_DIR` so it is not bound to one repository layout.
+Everything after `graph.bin` is this crate: pure Rust, reading its tag table from
+`curvy_witness::wire`.
 
-The generator itself is [`curvy-signet-builder`](https://crates.io/crates/curvy-signet-builder),
-a normal cargo dependency of [`generator/`](generator), a small crate kept out of the
-rs-core workspace because building it needs `circom`, a C++ toolchain and
-`WITNESS_CPP`. Nothing clones a repository or executes code from a URL.
-
-The pin lives in that crate's `Cargo.lock`:
-
-```
-curvy-signet-builder 0.1.0
-sha256 b59d588a8daf232b8b1ebeab195b17c52dec79add33e15f6ca3ed4609dc1584e
-```
-
-`build-graph.sh` prints both with every run, and they belong in the artifact record
-next to the graph and R1CS digests: the crate version determines the operation
-schema, which is what `signet export --ops` has to match.
-
-`curvy-signet-builder` is [Curvy's fork of `circom-witness-rs`](https://github.com/0xCurvy/circom-witness-rs),
-republished under our own name so the pin is immutable - a crates.io version and its
-checksum cannot move or disappear, which no git revision can promise. `patches/` now
-holds only the circomlib change, which is circuit-side and cannot live in that fork.
-
-**This crate** is everything after that: pure Rust, no C, and it reads its tag
-table straight out of [`curvy_witness::wire`]. That shared table is why the crate
-lives beside the evaluator - a renumbered tag breaks this crate's own tests
-instead of silently producing artifacts that decode to different operations.
+[`curvy-signet-builder`]: https://crates.io/crates/curvy-signet-builder
 
 ## Building an artifact
 
@@ -59,12 +39,22 @@ cargo run -p curvy-signet --release -- export \
   /tmp/pending.bin artifacts/pending-5-30.bin 150cc21f…
 # -> graph_bytes=11978841
 #    graph_sha256=cdbaa907…
+#    artifact_bytes=…
+#    artifact_sha256=…
+#    pin=artifact_sha256
+#    compressor=zstd -9
 ```
 
-`graph_sha256` is the value to pin in protocol metadata. Nothing else
-authenticates the artifact - the R1CS digest in the header is provenance only.
+Pin whichever digest `export` labels `pin=`. With the default zstd output that is
+`artifact_sha256`, the digest of the file on disk - the evaluator authenticates
+the bytes it is handed, which for a compressed artifact is the frame. `--compress
+none` makes `graph_sha256` the pinned value instead. The R1CS digest in the header
+is provenance only and authenticates nothing.
 
-Then prove it computes what the circuit computes:
+`export` loads the bytes back through `WitnessGraph` before writing and prints
+`round_trip=ok`. A failure writes nothing.
+
+Then confirm it computes what the circuit computes:
 
 ```bash
 cargo run -p curvy-signet --release -- validate \
@@ -72,17 +62,14 @@ cargo run -p curvy-signet --release -- validate \
 # -> parity=exact
 ```
 
-`validate` compares every signal against the reference witness, not a checksum: a
-single wrong signal is a proof the deployed verifier rejects, and a checksum that
-happened to collide would hide it. It loads through `WitnessGraph`, so it accepts
-exactly what a client accepts and rejects everything a client rejects.
+`validate` compares every signal against the reference witness and loads through
+`WitnessGraph`, so it accepts exactly what a client accepts.
 
-## Envelope and version
+## Envelope, version and compression
 
-Defaults are `--envelope cvywit --version 1`, the only combination a stock
-`curvy-witness` accepts. `SIGNET01` and version 2 both require the consumer's
-`signet` feature, so emitting either by default would produce artifacts a normal
-client refuses.
+Defaults are `--envelope signet --version 1 --compress zstd`, which a stock
+`curvy-witness` accepts. `--envelope cvywit` remains available for older
+consumers. Only `--version 2` requires the consumer's `signet-v2` feature.
 
 | flag | effect |
 |---|---|
@@ -94,11 +81,10 @@ client refuses.
 | `--compress zstd` | a zstd frame around them, level 9 by default |
 | `--level N` | zstd level; only meaningful with `--compress zstd` |
 
-Compression changes which digest authenticates the artifact: the evaluator hashes
-whatever bytes it is handed, so a compressed artifact pins its **compressed**
-digest. `export` prints both and labels which one to pin.
+A compressed artifact pins its **compressed** digest - the evaluator hashes
+whatever bytes it is handed. `export` prints both and labels which one to pin.
 
-Measured on PIX withdrawal `(10,30)`, 628,124 nodes:
+Sizes on PIX withdrawal `(10,30)`, 628,124 nodes:
 
 | encoding | bytes |
 |---:|---:|
@@ -106,53 +92,22 @@ Measured on PIX withdrawal `(10,30)`, 628,124 nodes:
 | v2, raw | 2,782,671 |
 | v2, zstd -9 | 871,833 |
 
-Compression shells out to the system `zstd`. ruzstd only implements level 1, and its
-level 1 is itself ~39% weaker than libzstd's - the same graph comes out at 1,339,142
-bytes. That is fine as a fallback but not what should be published, so the tool says
-which compressor ran and warns when it had to fall back.
+Compression requires the system `zstd`. Without it the tool falls back to ruzstd,
+which only implements level 1 and produces 1,339,142 bytes for the same graph; it
+reports which compressor ran and warns on fallback.
 
-Requiring `zstd` costs nothing: compression is a build step in a pipeline that
-already needs `circom`, `git` and a C++ toolchain. The pure-Rust constraint applies
-to the *decoder*, which ships to wasm - not to the compressor.
+The zstd level sets the frame's window, and the consumer rejects windows above
+8 MiB. Level 9 gives a 4 MiB window with 2× headroom; level 19 produces a 7.3 MB
+artifact but lands exactly on the cap. Raising the level requires raising the
+consumer's cap in the same change.
 
-### Why level 9 and not 19
+## Editing `src/postcard.rs`
 
-Level 19 is another ~26% smaller, but the level sets the frame's window and the
-consumer caps that at 8 MiB:
-
-| level | pending-50 v2 | window |
-|---|---:|---|
-| 1 | 12,006,898 | 512 KiB |
-| **9** | **9,886,524** | **4 MiB** |
-| 19 | 7,349,911 | 8 MiB - exactly the cap |
-
-Level 19 lands on the boundary with no margin, so a slightly larger graph or a zstd
-release that chose a wider window would produce artifacts our own evaluator refuses.
-The cap is real and reachable - `--ultra -22 --zstd=wlog=24` yields a 16 MiB window
-and is rejected outright. Level 9 keeps 2× headroom. Going to 19 is a reasonable
-trade, but it should come with raising the consumer's cap in the same change, and
-that is a consumer-side decision rather than something a generator flag forces.
-
-### Every export is verified
-
-`export` loads the bytes it is about to write back through `WitnessGraph` and checks
-the signal count before writing anything. That is what catches a frame whose window
-exceeds the cap, or a header field at the wrong offset, at generation time instead of
-at a client. It prints `round_trip=ok`; a failure writes nothing.
-
-## What is vendored, and why
-
-`src/postcard.rs` reproduces upstream's `Node`, `Operation` and `HashSignalInfo`
-declarations from [`circom-witness-rs`](https://github.com/philsippl/circom-witness-rs)
-(MIT), as carried by [Curvy's fork](https://github.com/0xCurvy/circom-witness-rs).
-They are the input format, not a second
-implementation of anything - the upstream evaluator is deliberately *not* carried
-over, because validation runs through `curvy-witness` instead.
-
-One thing to know before touching that file: postcard encodes an enum variant as
-its **declaration index**. Reordering `Operation` silently remaps every operation
-in every graph rather than failing, so `Bor`/`Bxor` sit between `Band` and `Neg`
-because that is where the patch inserts them. Two tests pin it.
+It reproduces the `Node`, `Operation` and `HashSignalInfo` declarations that
+define the input format. postcard encodes an enum variant as its **declaration
+index**, so reordering `Operation` silently remaps every operation in every graph
+instead of failing. `Bor`/`Bxor` sit between `Band` and `Neg` because that is
+where the patch inserts them. Two tests pin the order.
 
 ## Tests
 
@@ -160,15 +115,14 @@ because that is where the patch inserts them. Two tests pin it.
 cargo test -p curvy-signet
 ```
 
-Twelve tests. The ones that matter are the round-trips in `tests/roundtrip.rs`:
-they encode a graph exercising every node kind, hand it to the shipped evaluator,
-and check it computes the right assignment - across both envelopes, both versions,
-and both compressed and raw. A header field at the wrong offset or a varint with
-the wrong sign passes every unit test and fails only when a real artifact ships;
-this catches it here.
+The round-trips in `tests/roundtrip.rs` encode a graph exercising every node kind
+and check the shipped evaluator computes the right assignment, across both
+envelopes, both versions, and compressed and raw. The compression tests load
+every artifact back through `WitnessGraph`, which is what catches a frame the
+consumer would reject for window size, frame count, dictionaries or checksum.
 
-The compression tests exist for a specific failure: the consumer caps the zstd
-window, requires a single frame, refuses dictionaries and checks the frame
-checksum. An encoder that produced frames failing any of that would be quietly
-useless, so the tests load every compressed artifact back through `WitnessGraph`
-rather than just checking it shrank.
+An end-to-end check of the whole pipeline on a throwaway circuit:
+
+```bash
+scripts/smoke-generator.sh
+```

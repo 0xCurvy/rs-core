@@ -1,6 +1,5 @@
 //! Incremental Merkle Tree (arity 2, Poseidon hash) - a faithful port of
-//! `@zk-kit/imt`'s `IMT`, plus indexed and stateful sharded engines replacing the
-//! SDK's `MerkleTree` / `ShardedNotesTree` implementations.
+//! `@zk-kit/imt`'s `IMT`, plus indexed and stateful sharded engines.
 //!
 //! The sharded tree cuts the depth-30 tree at `shard_height`: leaves below the cut
 //! live in fixed `2^shard_height`-leaf shards; the "cap" above is a small tree over
@@ -367,7 +366,7 @@ pub struct FrontierAppend {
     pub completed_shard: Option<CompletedShard>,
 }
 
-/// Constant-space append frontier for the production indexer.
+/// Constant-space append frontier.
 ///
 /// Unlike [`ShardedNotesTree`], this type retains no leaves, cap, reverse index,
 /// or owned-note witnesses. `frontier[level]` is the completed subtree covering
@@ -524,9 +523,8 @@ impl NotesFrontier {
     /// [`NotesFrontier::append`] over a canonical big-endian 32-byte leaf.
     ///
     /// Every consumer reaching this type across a byte boundary - the wasm/TS
-    /// adapter and the blokli indexer both - otherwise repeats the same
-    /// `fr_from_be_32_checked` marshalling. Rejects non-canonical encodings
-    /// rather than reducing them into the field.
+    /// boundary otherwise repeats the same `fr_from_be_32_checked` marshalling.
+    /// Rejects non-canonical encodings rather than reducing them into the field.
     pub fn append_be_32(&mut self, leaf: &[u8; 32]) -> Result<FrontierAppend, TreeError> {
         let leaf = fr_from_be_32_checked(leaf).ok_or(TreeError::NonCanonicalField)?;
         self.append(leaf)
@@ -664,10 +662,9 @@ fn build_parent_level(level: &[Fr], zero: Fr) -> Vec<Fr> {
 
 /// Incremental Merkle tree with a reverse leaf index.
 ///
-/// This is the Rust replacement for the SDK's `@zk-kit/imt` wrapper. The
-/// sharded wallet path normally uses [`ShardedNotesTree`], while this indexed
-/// form remains useful for cold-shard recovery, pending-note witness generation
-/// and the optional full-tree profile.
+/// The sharded wallet path normally uses [`ShardedNotesTree`]; this indexed form
+/// is for cold-shard recovery, pending-note witness generation and the full-tree
+/// profile.
 #[derive(Clone)]
 pub struct IndexedMerkleTree {
     tree: Imt,
@@ -902,8 +899,8 @@ impl ShardedTreeSnapshot {
     /// Encode a deterministic, versioned binary snapshot.
     ///
     /// Field elements use canonical 32-byte big-endian encoding. Chain identity,
-    /// block hash and sync cursor intentionally remain storage-layer metadata so
-    /// this tree blob can be embedded in browser, native and indexer checkpoints.
+    /// block hash and sync cursor intentionally remain storage-layer metadata, so
+    /// this blob can be embedded in any caller's checkpoint format.
     pub fn encode(&self) -> Result<Vec<u8>, TreeError> {
         if self.shard_height == 0 || self.shard_height >= self.depth {
             return Err(TreeError::InvalidGeometry {

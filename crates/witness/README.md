@@ -30,10 +30,21 @@ assert_eq!(assignment.len(), graph.assignment_size());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The expected SHA-256 is mandatory and is checked before graph parsing. Parsing
-also enforces graph/input size limits, canonical BN254 field values, valid node
-references, and strict input names and shapes. The crate uses Curvy's production
-`CVYWIT01` format and does not depend on another Circom witness runtime.
+The expected SHA-256 is mandatory and is checked before graph parsing. For a
+compressed artifact it authenticates the zstd frame bytes, before decoding.
+Parsing also enforces graph/input size limits, canonical BN254 field values, valid
+node references, and strict input names and shapes. The crate does not depend on
+another Circom witness runtime.
+
+## Accepted artifacts
+
+A default build reads the `SIGNET01` and `CVYWIT01` envelopes at body version 1,
+raw or zstd-compressed.
+
+| feature | adds |
+|---|---|
+| `signet-v2` | the version-2 body encoding: varint distances and ZigZag output deltas. Not stable; no published artifact uses it. |
+| `sage` | `sage::SageGraph`, a second evaluator over the same artifacts. |
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for artifact
 and build-target guidance.

@@ -1,8 +1,7 @@
 //! Upstream graph → SIGNET artifact.
 //!
 //! The tag values come from [`curvy_witness::wire`], so producer and consumer read
-//! one table. That is the reason this crate lives beside the evaluator rather than
-//! in the circuit repository.
+//! one table.
 
 use ark_ff::{BigInteger, PrimeField};
 use curvy_witness::wire;

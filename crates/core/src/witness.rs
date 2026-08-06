@@ -32,8 +32,8 @@ pub struct Note {
 }
 
 /// Explicit note-owner construction for profiles that already know the checked
-/// BabyJubJub owner point and shared secret (for example a PIX allocation).
-/// Neither value is derived from the other.
+/// BabyJubJub owner point and shared secret. Neither value is derived from the
+/// other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KnownOwner {
     pub owner: crate::babyjubjub::BabyJubPoint,
