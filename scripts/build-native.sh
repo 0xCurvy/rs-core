@@ -8,6 +8,6 @@ native_target_dir="${CARGO_TARGET_DIR:-target}"
 
 cargo build --locked --release \
   -p curvy-core -p curvy-witness -p curvy-prover \
-  --features curvy-core/parallel
+  --features curvy-core/parallel,curvy-prover/parallel
 
 echo "built native core libraries and ${native_target_dir}/release/curvy-native-prover"

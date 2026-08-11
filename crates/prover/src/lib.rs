@@ -1,20 +1,32 @@
 #![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 //!
 //! ## Security model
 //!
 //! The proving key parser is the committed `rs-core` implementation vendored
 //! from `ark-circom` without its Wasmer witness calculator. Bulk query points are
 //! constructed unchecked for fast startup, so every caller must provide a pinned
-//! SHA-256 digest for the zkey before parsing is allowed.
+//! SHA-256 digest for the zkey. Whole-key native loads authenticate before parsing,
+//! and one-pass manifest loads authenticate each chunk before parsing. The browser
+//! two-response fallback authenticates its first response up front and hashes the
+//! second response while parsing; its final digest check and self-verification gate
+//! the result, but the second response still crosses the parser before that check.
 //!
-//! Native builds enable `std` and Rayon-backed `parallel` support by default.
-//! Portable WASM uses the `wasm` feature; threaded browser builds use
-//! `wasm-threads` and export `initThreadPool(n)` so the host selects the worker
-//! count explicitly.
+//! Native builds enable `std` and use stock serial ark-groth16 by default.
+//! The opt-in `parallel` feature uses Curvy's global-pool proof path. Portable
+//! WASM uses the `wasm` feature; threaded browser builds use `wasm-threads` and
+//! export `initThreadPool(n)` so the host selects the worker count explicitly.
 
 pub mod qap;
+#[cfg(feature = "sparrow")]
+pub mod sparrow;
 pub mod wtns;
 pub mod zkey;
+
+#[cfg(feature = "parallel")]
+mod groth16_prover;
+#[cfg(any(feature = "parallel", feature = "sparrow"))]
+mod msm;
 
 use std::io::Cursor;
 
@@ -28,7 +40,6 @@ use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use qap::CircomReduction;
 use wtns::WtnsError;
 use zkey::ZkeyMatrices;
 
@@ -92,7 +103,8 @@ impl Prover {
         let mut rng = ark_std::rand::rngs::OsRng;
         let r = Fr::rand(&mut rng);
         let s = Fr::rand(&mut rng);
-        Groth16::<Bn254, CircomReduction>::create_proof_with_reduction_and_matrices(
+        #[cfg(feature = "parallel")]
+        let proof = groth16_prover::create_proof_with_matrices(
             &self.pk,
             r,
             s,
@@ -100,8 +112,21 @@ impl Prover {
             self.matrices.num_instance_variables,
             self.matrices.num_constraints,
             full_assignment,
-        )
-        .map_err(ProverError::ProofGeneration)
+        );
+
+        #[cfg(not(feature = "parallel"))]
+        let proof =
+            Groth16::<Bn254, qap::CircomReduction>::create_proof_with_reduction_and_matrices(
+                &self.pk,
+                r,
+                s,
+                &self.matrices.matrices,
+                self.matrices.num_instance_variables,
+                self.matrices.num_constraints,
+                full_assignment,
+            );
+
+        proof.map_err(ProverError::ProofGeneration)
     }
 
     pub fn public_inputs<'a>(&self, full_assignment: &'a [Fr]) -> Result<&'a [Fr], ProverError> {
@@ -260,7 +285,97 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[cfg(feature = "wasm")]
 mod wasm_api {
+    #[cfg(feature = "sparrow")]
+    use ark_bn254::Fr;
     use wasm_bindgen::prelude::*;
+
+    #[cfg(feature = "sparrow")]
+    use crate::sparrow::{
+        SparrowAuthenticator, SparrowConfig, SparrowProofBuilder, SparrowProver,
+        manifest::{ManifestProofStream, ZkeyChunkManifest},
+    };
+
+    /// Invalidate origin-local SAGE caches when compiler semantics change.
+    #[cfg(feature = "sparrow")]
+    #[wasm_bindgen(js_name = sageCacheVersion)]
+    pub fn sage_cache_version() -> u32 {
+        curvy_witness::sage::CACHE_VERSION
+    }
+
+    /// Identical kernels used by the native and browser phase benchmarks.
+    #[cfg(feature = "bench")]
+    #[wasm_bindgen(js_name = benchSha256)]
+    pub fn bench_sha256(bytes: u32, rounds: u32) -> Result<u32, JsError> {
+        crate::sparrow::phase_bench::sha256(bytes as usize, rounds as usize).map_err(js_error)
+    }
+
+    #[cfg(feature = "bench")]
+    #[wasm_bindgen(js_name = benchFieldArithmetic)]
+    pub fn bench_field_arithmetic(iterations: u32) -> Result<u32, JsError> {
+        crate::sparrow::phase_bench::field_multiplication(iterations as usize).map_err(js_error)
+    }
+
+    #[cfg(feature = "bench")]
+    #[wasm_bindgen(js_name = benchFft)]
+    pub fn bench_fft(log_size: u32, rounds: u32) -> Result<u32, JsError> {
+        crate::sparrow::phase_bench::fft(log_size, rounds as usize).map_err(js_error)
+    }
+
+    #[cfg(feature = "bench")]
+    #[wasm_bindgen(js_name = benchG1Msm)]
+    pub fn bench_g1_msm(log_size: u32, window_bits: u32) -> Result<u32, JsError> {
+        crate::sparrow::phase_bench::g1_msm(log_size, window_bits as usize).map_err(js_error)
+    }
+
+    #[cfg(feature = "bench")]
+    #[wasm_bindgen(js_name = benchG2Msm)]
+    pub fn bench_g2_msm(log_size: u32, window_bits: u32) -> Result<u32, JsError> {
+        crate::sparrow::phase_bench::g2_msm(log_size, window_bits as usize).map_err(js_error)
+    }
+
+    #[wasm_bindgen]
+    pub struct WasmWitnessGraph(curvy_witness::WitnessGraph);
+
+    #[wasm_bindgen]
+    impl WasmWitnessGraph {
+        /// Authenticate and decode a witness graph without loading a proving key.
+        ///
+        /// This is also the cross-target conformance surface for SIGNET: the
+        /// native and WebAssembly tests feed identical v1/v2 artifacts and inputs
+        /// through the same `curvy-witness` implementation.
+        #[wasm_bindgen(constructor)]
+        pub fn new(
+            witness_graph: &[u8],
+            expected_graph_sha256: &str,
+            batch_profile: bool,
+        ) -> Result<WasmWitnessGraph, JsError> {
+            let limits = if batch_profile {
+                curvy_witness::Limits::batch_prover()
+            } else {
+                curvy_witness::Limits::client()
+            };
+            curvy_witness::WitnessGraph::from_bytes_with_limits(
+                witness_graph,
+                expected_graph_sha256,
+                limits,
+            )
+            .map(WasmWitnessGraph)
+            .map_err(|error| JsError::new(&error.to_string()))
+        }
+
+        #[wasm_bindgen(getter, js_name = assignmentSize)]
+        pub fn assignment_size(&self) -> usize {
+            self.0.assignment_size()
+        }
+
+        /// Return the complete assignment as decimal strings.
+        pub fn calculate(&self, input_json: &str) -> Result<String, JsError> {
+            self.0
+                .calculate_json(input_json)
+                .map(|assignment| crate::publics_to_json(&assignment))
+                .map_err(|error| JsError::new(&error.to_string()))
+        }
+    }
 
     #[wasm_bindgen]
     pub struct WasmCircuitProver(crate::CircuitProver);
@@ -300,6 +415,380 @@ mod wasm_api {
                 .prove_json(input_json)
                 .map(bundle_json)
                 .map_err(|error| JsError::new(&error.to_string()))
+        }
+    }
+
+    /// SPARROW's SAGE witness evaluation and bounded-memory zkey processing.
+    ///
+    /// Browser flow: feed the first cached `Response.body` to
+    /// `authenticateZkeyChunk`, call `finishZkeyAuthentication`, reopen the
+    /// response, then frame its 12-byte file/section headers and feed each
+    /// section body to the matching proof methods.
+    #[cfg(feature = "sparrow")]
+    #[wasm_bindgen]
+    pub struct WasmSparrowProver {
+        prover: Option<SparrowProver>,
+        assignment_size: usize,
+        sage_slots: usize,
+        expected_zkey_sha256: String,
+        config: SparrowConfig,
+        authenticator: Option<SparrowAuthenticator>,
+        authenticated: bool,
+        proof: Option<SparrowProofBuilder>,
+        manifest_proof: Option<ManifestProofStream>,
+    }
+
+    #[cfg(feature = "sparrow")]
+    #[wasm_bindgen]
+    impl WasmSparrowProver {
+        #[wasm_bindgen(constructor)]
+        pub fn new(
+            witness_graph: &[u8],
+            expected_graph_sha256: &str,
+            expected_zkey_sha256: &str,
+            batch_profile: bool,
+        ) -> Result<WasmSparrowProver, JsError> {
+            let config = SparrowConfig::default();
+            Self::from_signet_with_config(
+                witness_graph,
+                expected_graph_sha256,
+                expected_zkey_sha256,
+                batch_profile,
+                config.window_bits as u32,
+                config.msm_chunk_points as u32,
+            )
+        }
+
+        /// Compile an authenticated SIGNET graph with explicit MSM tuning.
+        #[wasm_bindgen(js_name = fromSignetWithConfig)]
+        pub fn from_signet_with_config(
+            witness_graph: &[u8],
+            expected_graph_sha256: &str,
+            expected_zkey_sha256: &str,
+            batch_profile: bool,
+            window_bits: u32,
+            msm_chunk_points: u32,
+        ) -> Result<WasmSparrowProver, JsError> {
+            let config = SparrowConfig {
+                window_bits: window_bits as usize,
+                msm_chunk_points: msm_chunk_points as usize,
+                ..SparrowConfig::default()
+            };
+            let limits = if batch_profile {
+                curvy_witness::Limits::batch_prover()
+            } else {
+                curvy_witness::Limits::client()
+            };
+            let prover = SparrowProver::from_signet_bytes(
+                witness_graph,
+                expected_graph_sha256,
+                expected_zkey_sha256,
+                limits,
+                config,
+            )
+            .map_err(js_error)?;
+            let authenticator = SparrowAuthenticator::new(expected_zkey_sha256)
+                .map(Some)
+                .map_err(js_error)?;
+            let assignment_size = prover.assignment_size();
+            let sage_slots = prover.sage_slot_count();
+            Ok(Self {
+                prover: Some(prover),
+                assignment_size,
+                sage_slots,
+                expected_zkey_sha256: expected_zkey_sha256.to_ascii_lowercase(),
+                config,
+                authenticator,
+                authenticated: false,
+                proof: None,
+                manifest_proof: None,
+            })
+        }
+
+        #[wasm_bindgen(js_name = fromCompiledSage)]
+        pub fn from_compiled_sage(
+            sage_program: &[u8],
+            expected_program_sha256: &str,
+            expected_source_graph_sha256: &str,
+            expected_zkey_sha256: &str,
+            batch_profile: bool,
+        ) -> Result<WasmSparrowProver, JsError> {
+            let config = SparrowConfig::default();
+            Self::from_compiled_sage_with_config(
+                sage_program,
+                expected_program_sha256,
+                expected_source_graph_sha256,
+                expected_zkey_sha256,
+                batch_profile,
+                config.window_bits as u32,
+                config.msm_chunk_points as u32,
+            )
+        }
+
+        /// Benchmark/advanced constructor for target-specific MSM tuning.
+        ///
+        /// `window_bits` accepts 0 for the query-size adaptive policy or an
+        /// explicit width in `4..=16`. Browser deployments should prefer a
+        /// fixed value measured on their target devices.
+        #[wasm_bindgen(js_name = fromCompiledSageWithConfig)]
+        pub fn from_compiled_sage_with_config(
+            sage_program: &[u8],
+            expected_program_sha256: &str,
+            expected_source_graph_sha256: &str,
+            expected_zkey_sha256: &str,
+            batch_profile: bool,
+            window_bits: u32,
+            msm_chunk_points: u32,
+        ) -> Result<WasmSparrowProver, JsError> {
+            let config = SparrowConfig {
+                window_bits: window_bits as usize,
+                msm_chunk_points: msm_chunk_points as usize,
+                ..SparrowConfig::default()
+            };
+            let limits = if batch_profile {
+                curvy_witness::Limits::batch_prover()
+            } else {
+                curvy_witness::Limits::client()
+            };
+            let prover = SparrowProver::from_compiled_sage_bytes(
+                sage_program,
+                expected_program_sha256,
+                expected_source_graph_sha256,
+                expected_zkey_sha256,
+                limits,
+                config,
+            )
+            .map_err(js_error)?;
+            let assignment_size = prover.assignment_size();
+            let sage_slots = prover.sage_slot_count();
+            Ok(Self {
+                prover: Some(prover),
+                assignment_size,
+                sage_slots,
+                expected_zkey_sha256: expected_zkey_sha256.to_ascii_lowercase(),
+                config,
+                authenticator: Some(
+                    SparrowAuthenticator::new(expected_zkey_sha256).map_err(js_error)?,
+                ),
+                authenticated: false,
+                proof: None,
+                manifest_proof: None,
+            })
+        }
+
+        #[wasm_bindgen(getter, js_name = assignmentSize)]
+        pub fn assignment_size(&self) -> usize {
+            self.assignment_size
+        }
+
+        #[wasm_bindgen(getter, js_name = sageSlots)]
+        pub fn sage_slots(&self) -> usize {
+            self.sage_slots
+        }
+
+        /// Serialize the program produced from an authenticated source graph.
+        /// JavaScript should cache it under `sageCacheVersion()` plus that source
+        /// digest, then load it through `fromCompiledSageWithConfig`.
+        #[wasm_bindgen(js_name = compiledSageProgram)]
+        pub fn compiled_sage_program(&self) -> Result<Vec<u8>, JsError> {
+            self.prover
+                .as_ref()
+                .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+                .compiled_sage_bytes()
+                .map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = authenticateZkeyChunk)]
+        pub fn authenticate_zkey_chunk(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+            self.authenticator
+                .as_mut()
+                .ok_or_else(|| JsError::new("zkey authentication pass is already complete"))?
+                .update(bytes)
+                .map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = finishZkeyAuthentication)]
+        pub fn finish_zkey_authentication(&mut self) -> Result<u64, JsError> {
+            let bytes = self
+                .authenticator
+                .take()
+                .ok_or_else(|| JsError::new("zkey authentication pass is already complete"))?
+                .finish()
+                .map_err(js_error)?;
+            self.authenticated = true;
+            Ok(bytes)
+        }
+
+        #[wasm_bindgen(js_name = beginProof)]
+        pub fn begin_proof(&mut self, input_json: &str) -> Result<(), JsError> {
+            if !self.authenticated {
+                return Err(JsError::new(
+                    "authenticate the zkey before beginning a proof",
+                ));
+            }
+            if self.proof.is_some() || self.manifest_proof.is_some() {
+                return Err(JsError::new("a SPARROW proof is already active"));
+            }
+            let assignment = self
+                .prover
+                .as_ref()
+                .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+                .calculate_witness_json(input_json)
+                .map_err(js_error)?;
+            self.install_proof(assignment)
+        }
+
+        /// Evaluate once and release the compiled SAGE program before the QAP
+        /// and MSM phases. Mobile callers that do not reuse a circuit should
+        /// prefer this so the graph's instruction storage can be recycled.
+        #[wasm_bindgen(js_name = beginOneShotProof)]
+        pub fn begin_one_shot_proof(&mut self, input_json: &str) -> Result<(), JsError> {
+            if !self.authenticated {
+                return Err(JsError::new(
+                    "authenticate the zkey before beginning a proof",
+                ));
+            }
+            if self.proof.is_some() || self.manifest_proof.is_some() {
+                return Err(JsError::new("a SPARROW proof is already active"));
+            }
+            let proof = build_then_release(&mut self.prover, |prover| {
+                let assignment = prover.calculate_witness_json(input_json)?;
+                SparrowProofBuilder::new(assignment, &self.expected_zkey_sha256, self.config)
+            })
+            .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+            .map_err(js_error)?;
+            self.proof = Some(proof);
+            Ok(())
+        }
+
+        fn install_proof(&mut self, assignment: Vec<Fr>) -> Result<(), JsError> {
+            self.proof = Some(
+                SparrowProofBuilder::new(assignment, &self.expected_zkey_sha256, self.config)
+                    .map_err(js_error)?,
+            );
+            Ok(())
+        }
+
+        /// Begin a one-pass proof. The small chunk manifest is authenticated
+        /// up front; each zkey chunk is then checked before parsing.
+        #[wasm_bindgen(js_name = beginOneShotManifestProof)]
+        pub fn begin_one_shot_manifest_proof(
+            &mut self,
+            input_json: &str,
+            manifest_bytes: &[u8],
+            expected_manifest_sha256: &str,
+        ) -> Result<(), JsError> {
+            if self.proof.is_some() || self.manifest_proof.is_some() {
+                return Err(JsError::new("a SPARROW proof is already active"));
+            }
+            let manifest = ZkeyChunkManifest::from_bytes(
+                manifest_bytes,
+                expected_manifest_sha256,
+                &self.expected_zkey_sha256,
+            )
+            .map_err(js_error)?;
+            let manifest_proof = build_then_release(&mut self.prover, |prover| {
+                let assignment = prover.calculate_witness_json(input_json)?;
+                ManifestProofStream::new(assignment, manifest, self.config)
+            })
+            .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+            .map_err(js_error)?;
+            self.manifest_proof = Some(manifest_proof);
+            Ok(())
+        }
+
+        #[wasm_bindgen(js_name = pushManifestZkeyChunk)]
+        pub fn push_manifest_zkey_chunk(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+            self.manifest_proof
+                .as_mut()
+                .ok_or_else(|| JsError::new("no manifest-authenticated proof is active"))?
+                .push_complete_chunk(bytes)
+                .map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = finishManifestProof)]
+        pub fn finish_manifest_proof(&mut self) -> Result<String, JsError> {
+            self.manifest_proof
+                .take()
+                .ok_or_else(|| JsError::new("no manifest-authenticated proof is active"))?
+                .finish()
+                .map(bundle_json)
+                .map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = beginZkey)]
+        pub fn begin_zkey(&mut self, header: &[u8]) -> Result<(), JsError> {
+            proof_mut(self)?.begin_zkey(header).map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = beginZkeySection)]
+        pub fn begin_zkey_section(&mut self, header: &[u8]) -> Result<(), JsError> {
+            proof_mut(self)?.begin_section(header).map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = pushZkeySectionChunk)]
+        pub fn push_zkey_section_chunk(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+            proof_mut(self)?.push_section_chunk(bytes).map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = endZkeySection)]
+        pub fn end_zkey_section(&mut self) -> Result<(), JsError> {
+            proof_mut(self)?.end_section().map_err(js_error)
+        }
+
+        #[wasm_bindgen(js_name = finishProof)]
+        pub fn finish_proof(&mut self) -> Result<String, JsError> {
+            self.proof
+                .take()
+                .ok_or_else(|| JsError::new("no SPARROW proof is active"))?
+                .finish()
+                .map(bundle_json)
+                .map_err(js_error)
+        }
+    }
+
+    #[cfg(feature = "sparrow")]
+    fn proof_mut(prover: &mut WasmSparrowProver) -> Result<&mut SparrowProofBuilder, JsError> {
+        prover
+            .proof
+            .as_mut()
+            .ok_or_else(|| JsError::new("no SPARROW proof is active"))
+    }
+
+    #[cfg(feature = "sparrow")]
+    fn js_error(error: impl std::fmt::Display) -> JsError {
+        JsError::new(&error.to_string())
+    }
+
+    /// Run every fallible one-shot preparation step before releasing a large
+    /// reusable value. This keeps invalid user input retryable without cloning
+    /// the compiled SAGE evaluator.
+    #[cfg(feature = "sparrow")]
+    fn build_then_release<T, U, E>(
+        source: &mut Option<T>,
+        build: impl FnOnce(&T) -> Result<U, E>,
+    ) -> Option<Result<U, E>> {
+        let result = build(source.as_ref()?);
+        if result.is_ok() {
+            drop(source.take());
+        }
+        Some(result)
+    }
+
+    #[cfg(all(test, feature = "sparrow"))]
+    mod tests {
+        use super::build_then_release;
+
+        #[test]
+        fn one_shot_state_is_released_only_after_successful_preparation() {
+            let mut source = Some(7_u32);
+            let failed = build_then_release(&mut source, |_| Err::<(), _>("invalid input"));
+            assert_eq!(failed, Some(Err("invalid input")));
+            assert_eq!(source, Some(7));
+
+            let built = build_then_release(&mut source, |value| Ok::<_, &str>(value + 1));
+            assert_eq!(built, Some(Ok(8)));
+            assert_eq!(source, None);
         }
     }
 

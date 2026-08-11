@@ -26,6 +26,6 @@ crate-type = ["cdylib", "rlib"]
 wasm-threads = ["curvy-core/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.3", path = "../core" }
+curvy-core = { version = "=0.1.0-rc.4", path = "../core" }
 wasm-bindgen.workspace = true
 wasm-bindgen-rayon = { workspace = true, optional = true }

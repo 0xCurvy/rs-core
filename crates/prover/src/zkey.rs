@@ -75,6 +75,48 @@ pub fn read_zkey<R: Read + Seek>(
     Ok((proving_key, matrices))
 }
 
+/// Validate every curve point in a parsed proving key.
+///
+/// Normal proving loads deliberately check only anchors and query endpoints after
+/// authenticating a pinned artifact. Release tooling should call this once before
+/// publishing that pin so the complete static key, including every G2 subgroup,
+/// has been validated without charging every client for the work.
+pub fn validate_proving_key(pk: &ProvingKey<Bn254>) -> IoResult<()> {
+    use ark_ec::AffineRepr;
+
+    let valid_g1_anchor = |point: &G1Affine| {
+        !point.is_zero() && point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve()
+    };
+    let valid_g2_anchor = |point: &G2Affine| {
+        !point.is_zero() && point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve()
+    };
+    let valid_g1 = |point: &G1Affine| {
+        point.is_zero() || (point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve())
+    };
+    let valid_g2 = |point: &G2Affine| {
+        point.is_zero() || (point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve())
+    };
+    let anchors_valid = valid_g1_anchor(&pk.vk.alpha_g1)
+        && valid_g1_anchor(&pk.beta_g1)
+        && valid_g1_anchor(&pk.delta_g1)
+        && valid_g2_anchor(&pk.vk.beta_g2)
+        && valid_g2_anchor(&pk.vk.gamma_g2)
+        && valid_g2_anchor(&pk.vk.delta_g2);
+    let g1 = [
+        &pk.vk.gamma_abc_g1,
+        &pk.a_query,
+        &pk.b_g1_query,
+        &pk.l_query,
+        &pk.h_query,
+    ];
+    if anchors_valid && g1.into_iter().flatten().all(valid_g1) && pk.b_g2_query.iter().all(valid_g2)
+    {
+        Ok(())
+    } else {
+        Err(SerializationError::InvalidData)
+    }
+}
+
 // Cheap sanity net for the unchecked bulk deserialization: validate the vk
 // anchor points plus the first/last element of every query vector. Catches
 // endianness/offset misparses and gross corruption at ~a dozen curve checks;
@@ -87,15 +129,21 @@ fn spot_check(pk: &ProvingKey<Bn254>) -> IoResult<()> {
     fn ok_g2(p: &G2Affine) -> bool {
         p.is_zero() || (p.is_on_curve() && p.is_in_correct_subgroup_assuming_on_curve())
     }
+    fn anchor_g1(p: &G1Affine) -> bool {
+        !p.is_zero() && ok_g1(p)
+    }
+    fn anchor_g2(p: &G2Affine) -> bool {
+        !p.is_zero() && ok_g2(p)
+    }
     let ends_g1 = |v: &Vec<G1Affine>| {
         v.first().map(ok_g1).unwrap_or(true) && v.last().map(ok_g1).unwrap_or(true)
     };
-    let valid = ok_g1(&pk.vk.alpha_g1)
-        && ok_g1(&pk.beta_g1)
-        && ok_g2(&pk.vk.beta_g2)
-        && ok_g2(&pk.vk.gamma_g2)
-        && ok_g1(&pk.delta_g1)
-        && ok_g2(&pk.vk.delta_g2)
+    let valid = anchor_g1(&pk.vk.alpha_g1)
+        && anchor_g1(&pk.beta_g1)
+        && anchor_g2(&pk.vk.beta_g2)
+        && anchor_g2(&pk.vk.gamma_g2)
+        && anchor_g1(&pk.delta_g1)
+        && anchor_g2(&pk.vk.delta_g2)
         && ends_g1(&pk.vk.gamma_abc_g1)
         && ends_g1(&pk.a_query)
         && ends_g1(&pk.b_g1_query)

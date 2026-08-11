@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111827">
+    <title>SPARROW mobile benchmark</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0b1020; color: #e5e7eb; }
+      main { width: min(920px, 100%); margin: auto; padding: max(18px, env(safe-area-inset-top)) 16px 48px; }
+      h1 { margin: 0 0 6px; font-size: clamp(1.45rem, 6vw, 2.2rem); }
+      h2 { font-size: 1rem; margin: 0 0 14px; }
+      p { line-height: 1.5; }
+      .muted { color: #9ca3af; }
+      .card { background: #141b2d; border: 1px solid #2a344b; border-radius: 14px; padding: 16px; margin-top: 14px; }
+      .warning { color: #fde68a; border-color: #92400e; background: #2a1c16; }
+      .ok { color: #86efac; }
+      .bad { color: #fca5a5; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+      label { display: grid; gap: 6px; color: #cbd5e1; font-size: .85rem; }
+      input, select, button { font: inherit; }
+      input, select { width: 100%; color: #f9fafb; background: #0b1020; border: 1px solid #475569; border-radius: 9px; padding: 11px; }
+      label.check { display: flex; align-items: center; gap: 9px; padding-top: 25px; }
+      label.check input { width: 20px; height: 20px; }
+      .buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+      button { min-height: 44px; border: 0; border-radius: 10px; padding: 10px 14px; background: #2563eb; color: white; font-weight: 650; }
+      button.secondary { background: #334155; }
+      button.danger { background: #991b1b; }
+      button:disabled { opacity: .45; }
+      progress { width: 100%; height: 18px; margin-top: 10px; accent-color: #3b82f6; }
+      dl { display: grid; grid-template-columns: minmax(130px, 1fr) 2fr; gap: 7px 12px; margin: 0; font-size: .86rem; }
+      dt { color: #94a3b8; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      pre { margin: 0; padding: 12px; max-height: 360px; overflow: auto; background: #080c17; border-radius: 9px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .76rem; }
+      #status { min-height: 1.5em; font-weight: 650; }
+      .metric { background: #0b1020; border-radius: 9px; padding: 10px; }
+      .metric span { display: block; color: #94a3b8; font-size: .75rem; }
+      .metric strong { display: block; margin-top: 4px; font-size: 1.08rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">SPARROW mobile benchmark</h1>
+      <p class="muted">Physical-device benchmark for SPARROW, SAGE, authenticated proving-key streaming, signed Pippenger, and WASM threads.</p>
+
+      <section id="security-warning" class="card warning" hidden></section>
+
+      <section class="card">
+        <h2>Device and browser</h2>
+        <dl id="diagnostics"><dt>Status</dt><dd>Loading…</dd></dl>
+      </section>
+
+      <section class="card">
+        <h2>Benchmark settings</h2>
+        <div class="grid">
+          <label>Profile<select id="profile"></select></label>
+          <label class="check"><input id="threaded" type="checkbox"> WASM threads</label>
+          <label>Rayon workers<input id="threads" type="number" min="1" max="64" inputmode="numeric"></label>
+          <label>Pippenger window<input id="window-bits" type="number" min="4" max="16" inputmode="numeric"></label>
+          <label>MSM points / batch<input id="chunk-points" type="number" min="1" max="1048576" step="65536" inputmode="numeric"></label>
+          <label>Consecutive runs<input id="runs" type="number" min="1" max="10" inputmode="numeric"></label>
+        </div>
+        <div class="buttons">
+          <button id="cache">Cache source artifacts</button>
+          <button id="cache-all">Cache all profiles</button>
+          <button id="run">Run proof</button>
+          <button id="run-all">Run all circuits</button>
+          <button id="stop" class="danger" disabled>Stop</button>
+          <button id="refresh" class="secondary">Refresh diagnostics</button>
+          <button id="clear" class="secondary">Clear profile cache</button>
+          <button id="download" class="secondary" disabled>Download results</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Live status</h2>
+        <div id="status">Initializing harness…</div>
+        <progress id="progress"></progress>
+        <p id="progress-detail" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <h2>Latest result</h2>
+        <div id="summary" class="grid"></div>
+        <pre id="result">No proof run yet.</pre>
+      </section>
+
+      <section class="card">
+        <h2>Event log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="./mobile-harness.mjs"></script>
+  </body>
+</html>

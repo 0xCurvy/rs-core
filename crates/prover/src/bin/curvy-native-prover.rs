@@ -1,14 +1,19 @@
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use curvy_prover::CircuitProver;
 
 const DEFAULT_THREADS: usize = 1;
 const MAX_THREADS: usize = 64;
+// Published keys are currently below 1 GiB. Keep enough headroom for larger
+// circuits without allowing an accidentally substituted device/file to grow the
+// process until the allocator aborts before SHA-256 can reject it.
+const MAX_ZKEY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 struct Arguments {
     zkey_path: PathBuf,
@@ -25,9 +30,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rayon_threads = configure_rayon()?;
 
     let load_started = Instant::now();
-    let zkey = fs::read(&arguments.zkey_path)?;
-    let graph = fs::read(&arguments.graph_path)?;
-    let input_json = fs::read_to_string(&arguments.input_path)?;
+    let limits = curvy_witness::Limits::batch_prover();
+    let zkey = read_limited(&arguments.zkey_path, MAX_ZKEY_BYTES, "zkey")?;
+    let graph = read_limited(
+        &arguments.graph_path,
+        limits.graph_bytes as u64,
+        "witness graph",
+    )?;
+    let input_json = String::from_utf8(read_limited(
+        &arguments.input_path,
+        limits.input_json_bytes as u64,
+        "input JSON",
+    )?)
+    .map_err(|_| "input JSON must be valid UTF-8")?;
     let artifact_load = load_started.elapsed();
 
     let initialization_started = Instant::now();
@@ -149,4 +164,35 @@ fn configure_rayon() -> Result<usize, Box<dyn Error>> {
 
 fn elapsed_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
+}
+
+fn read_limited(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut file = File::open(path)?;
+    let expected = file.metadata()?.len();
+    if expected > maximum {
+        return Err(format!(
+            "{label} is {expected} bytes; maximum accepted size is {maximum} bytes"
+        )
+        .into());
+    }
+
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let next = (bytes.len() as u64)
+            .checked_add(count as u64)
+            .filter(|length| *length <= maximum)
+            .ok_or_else(|| format!("{label} grew beyond its {maximum}-byte limit while reading"))?;
+        bytes.try_reserve_exact(count)?;
+        bytes.extend_from_slice(&buffer[..count]);
+        debug_assert_eq!(bytes.len() as u64, next);
+    }
+    if bytes.len() as u64 != expected {
+        return Err(format!("{label} changed size while it was being read").into());
+    }
+    Ok(bytes)
 }

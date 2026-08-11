@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Workflow actions are pinned to immutable commits. Dependabot preserves that
+  # property while proposing reviewed updates when their release tags move.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Cargo.toml uses exact versions and Cargo.lock is committed; updates therefore
+  # remain explicit reviewable changes and still pass through cargo-deny.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly

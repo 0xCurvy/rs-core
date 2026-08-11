@@ -84,7 +84,6 @@ dependencies = [
  "fnv",
  "merlin",
  "num-bigint 0.4.8",
- "rayon",
  "sha2 0.10.9",
 ]
 
@@ -117,7 +116,6 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
- "rayon",
  "zeroize",
 ]
 
@@ -302,7 +300,6 @@ dependencies = [
  "ark-serialize 0.6.0",
  "ark-snark",
  "ark-std 0.6.0",
- "rayon",
 ]
 
 [[package]]
@@ -351,7 +348,6 @@ dependencies = [
  "ark-std 0.6.0",
  "foldhash",
  "indexmap 2.14.0",
- "rayon",
  "tracing",
  "tracing-subscriber",
 ]
@@ -800,8 +796,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "curvy-benchmarks"
+version = "0.1.0-rc.4"
+dependencies = [
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff 0.6.0",
+ "curvy-prover",
+ "curvy-witness",
+ "rayon",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "curvy-core"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "aes",
  "ark-bn254",
@@ -823,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -838,6 +847,7 @@ dependencies = [
  "getrandom 0.2.17",
  "num-bigint 0.5.1",
  "rayon",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror",
  "wasm-bindgen",
@@ -846,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-signet"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",
@@ -857,13 +867,14 @@ dependencies = [
  "ruint",
  "ruzstd",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror",
 ]
 
 [[package]]
 name = "curvy-wasm"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "curvy-core",
  "wasm-bindgen",
@@ -872,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.0-rc.3"
+version = "0.1.0-rc.4"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",

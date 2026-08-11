@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 //!
 //! ## Security model
 //!
@@ -25,8 +26,8 @@
 //! A default build accepts the `CVYWIT01` and `SIGNET01` envelopes at version 1,
 //! raw or zstd-compressed.
 //!
-//! - `signet-v2` - additionally accept the version-2 body encoding. Off by
-//!   default: the encoding is not stable and no published artifact uses it.
+//! - `signet-v2` - additionally accept the production-tested version-2 body
+//!   encoding. It remains opt-in so deployments roll out v2 artifacts explicitly.
 //! - `sage` - add [`sage::SageGraph`], a second evaluator over the same artifacts.
 
 #[cfg(feature = "sage")]
@@ -61,6 +62,8 @@ pub struct Limits {
     pub compressed_graph_bytes: usize,
     /// Decoder window a zstd frame may request.
     pub zstd_window_bytes: u64,
+    /// Authenticated precompiled SAGE program bytes.
+    pub sage_program_bytes: usize,
     /// Circuit-input JSON.
     pub input_json_bytes: usize,
     pub nodes: usize,
@@ -82,6 +85,7 @@ impl Limits {
             graph_bytes: 64 * 1024 * 1024,
             compressed_graph_bytes: 32 * 1024 * 1024,
             zstd_window_bytes: 8 * 1024 * 1024,
+            sage_program_bytes: 64 * 1024 * 1024,
             input_json_bytes: 16 * 1024 * 1024,
             nodes: 2_000_000,
             signals: 2_000_000,
@@ -101,6 +105,7 @@ impl Limits {
     pub const fn batch_prover() -> Self {
         Self {
             graph_bytes: 96 * 1024 * 1024,
+            sage_program_bytes: 256 * 1024 * 1024,
             nodes: 8_000_000,
             ..Self::client()
         }
@@ -186,6 +191,7 @@ use wire::{FIELD_BN254_FR, FORMAT_VERSION_V1, HEADER_SIZE};
 use wire::{FORMAT_VERSION_V2, V2_CONSTANT_TAG, V2_INPUT_TAG, V2_INVERSE_TAG};
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WitnessError {
     #[error("expected graph SHA-256 must be exactly 64 hexadecimal characters")]
     InvalidExpectedHash,
@@ -285,6 +291,12 @@ pub enum WitnessError {
     InvalidAssignmentOne,
     #[error("compiled graph needs more value slots than a u32 can address")]
     SlotOverflow,
+    #[error("precompiled SAGE program exceeds the {maximum}-byte limit")]
+    SageProgramTooLarge { maximum: usize },
+    #[error("invalid precompiled SAGE program: {0}")]
+    InvalidSageProgram(&'static str),
+    #[error("precompiled SAGE program source hash mismatch: expected {expected}, got {actual}")]
+    SageSourceHashMismatch { expected: String, actual: String },
     #[error("compiled {what} index is out of bounds")]
     CompiledIndex { what: &'static str },
     /// A self-check inside SAGE's compiler failed. Reaching this means the
@@ -764,10 +776,9 @@ fn parse_graph(bytes: &[u8], limits: Limits) -> Result<WitnessGraph, WitnessErro
 /// at the first node record.
 fn read_header<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Header, Reader<'a>), WitnessError> {
     let mut reader = Reader::new(bytes);
-    // Both envelopes are accepted at version 1: `CVYWIT01` is what earlier
-    // artifacts carry, `SIGNET01` is what the pipeline emits now. Version 2 is the
-    // denser body encoding and is not stable, so an unflagged build refuses it
-    // rather than compiling a decoder path nothing exercises.
+    // Version 1 accepts the standard `SIGNET01` envelope and the supported
+    // `CVYWIT01` compatibility envelope. Version 2 remains feature-gated so a
+    // deployment must opt into the denser body decoder explicitly.
     let magic = reader.array::<8>()?;
     let recognised = magic == *LEGACY_MAGIC || magic == *MAGIC;
     if !recognised {
