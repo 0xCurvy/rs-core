@@ -5,16 +5,6 @@ on desktop and physical mobile devices. It exercises artifact download and
 storage, SIGNET authentication, the origin-local SAGE cache, one-pass zkey
 authentication, portable or threaded WASM, and Groth16 self-verification.
 
-The harness is development tooling. It is excluded from the published
-`curvy-prover` crate. The appropriate product-level host is the `curvy-os`
-package inside `curvy-monorepo`, where SDK and Rust/WASM versions, circuit
-metadata, storage providers, thread policies, and device profiles can be
-selected through one playground.
-
-Low-level parser, state-machine, and cross-target conformance tests remain in
-`rs-core` CI. The playground owns interactive UI, device access, browser storage,
-and end-to-end SDK integration.
-
 ## What the harness verifies
 
 A successful run establishes that the selected browser and device can:
