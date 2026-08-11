@@ -1,0 +1,32 @@
+{
+  "title": "SPARROW mobile benchmark",
+  "cacheName": "curvy-sparrow-mobile-v1",
+  "profiles": [
+    {
+      "id": "representative-large",
+      "label": "Representative large circuit",
+      "batchProfile": true,
+      "zkey": {
+        "file": "/absolute/path/to/circuit.zkey",
+        "sha256": "ZKEY_SHA256"
+      },
+      "manifest": {
+        "file": "/absolute/path/to/zkey-manifest.bin",
+        "sha256": "MANIFEST_SHA256"
+      },
+      "graph": {
+        "file": "/absolute/path/to/circuit.signet.zst",
+        "sha256": "SOURCE_SIGNET_SHA256"
+      },
+      "input": {
+        "file": "/absolute/path/to/input.json",
+        "sha256": "INPUT_SHA256"
+      },
+      "defaults": {
+        "windowBits": 13,
+        "msmChunkPoints": 262144,
+        "runs": 1
+      }
+    }
+  ]
+}

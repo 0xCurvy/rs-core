@@ -66,6 +66,19 @@ Copyright (c) 2021 Georgios Konstantopoulos
 - `crates/prover/src/qap.rs` - the snarkjs-compatible R1CS-to-QAP reduction
 - `crates/prover/testdata/multiplier.zkey` - unmodified `test-vectors/test.zkey` fixture, used only by the prover integration test
 
+## ark-groth16 0.6.0 and ark-ec 0.6.0 - MIT OR Apache-2.0, used here under MIT
+
+Copyright (c) arkworks contributors
+
+<https://github.com/arkworks-rs/groth16>
+<https://github.com/arkworks-rs/algebra>
+
+- `crates/prover/src/groth16_prover.rs` - parallel proof assembly adapted from
+  `ark-groth16` 0.6.0's `src/prover.rs`; it retains the upstream proof equations
+  while routing large MSMs through the host-initialized Rayon pool
+- `crates/prover/src/msm.rs` - uses the public `VariableBaseMSM` and bucket types
+  plus BN254 group arithmetic from `ark-ec` 0.6.0, with Curvy-owned scheduling
+
 ---
 
 ## Note on circomlib, circomlibjs, and snarkjs (GPL-3.0)

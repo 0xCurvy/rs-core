@@ -19,9 +19,9 @@ all-features = true
 rustdoc-args = ["-D", "warnings"]
 
 [features]
-# Experimental. Adds the version-2 body encoding: varint distances and ZigZag
-# output deltas. Off by default - the encoding is not stable and no published
-# artifact uses it. The default build accepts the `CVYWIT01` and `SIGNET01`
+# Adds the production-tested version-2 body encoding: varint distances and
+# ZigZag output deltas. It remains opt-in so a deployment must explicitly roll
+# out v2 artifacts. The default build accepts the `CVYWIT01` and `SIGNET01`
 # envelopes at version 1, raw or zstd-compressed.
 signet-v2 = []
 # Back-compatible alias for the flag that used to gate the whole SIGNET surface.

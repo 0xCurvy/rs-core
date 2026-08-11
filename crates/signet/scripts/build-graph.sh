@@ -56,10 +56,18 @@ cmp "$WORK_DIR/original-r1cs/$CIRCUIT_NAME.r1cs" "$WORK_DIR/patched-r1cs/$CIRCUI
 
 # The generator writes graph.bin into its working directory, so run it in the
 # scratch dir rather than in the crate.
+# `curvy-signet-builder`'s build script also writes generated C++ next to its
+# own source. Cargo registry sources may be read-only and must never be mutated,
+# so give this invocation a checksum-verified, writable vendor copy.
+VENDOR_CONFIG="$WORK_DIR/vendor-config.toml"
+cargo vendor --locked --manifest-path "$GENERATOR_MANIFEST" \
+  "$WORK_DIR/vendor" > "$VENDOR_CONFIG"
 (
   cd "$WORK_DIR"
   WITNESS_CPP="$PATCHED_CIRCUIT" \
-    cargo run --quiet --release --manifest-path "$GENERATOR_MANIFEST"
+    CARGO_TARGET_DIR="$WORK_DIR/generator-target" \
+    cargo run --quiet --release --offline --config "$VENDOR_CONFIG" \
+      --manifest-path "$GENERATOR_MANIFEST"
 )
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
@@ -68,11 +76,17 @@ cp "$WORK_DIR/graph.bin" "$OUTPUT_PATH"
 # Report what actually produced this graph. The checksum is the durable half: a
 # crates.io version cannot be republished with different bytes.
 awk '/name = "curvy-signet-builder"/{f=1} f&&/^version/{v=$3} f&&/^checksum/{print "generator=curvy-signet-builder " v; print "generator_checksum=" $3; exit}' \
-  "$CRATE_DIR/generator/Cargo.lock" | tr -d '"' 
+  "$CRATE_DIR/generator/Cargo.lock" | tr -d '"'
 echo "postcard_graph=$OUTPUT_PATH"
 echo -n "r1cs_sha256="
 shasum -a 256 "$WORK_DIR/original-r1cs/$CIRCUIT_NAME.r1cs" | cut -d' ' -f1
 
+# The upstream build dependency does not emit
+# `cargo:rerun-if-env-changed=WITNESS_CPP`. A shared Cargo target can therefore
+# reuse a circuit compiled by an earlier invocation even when `WITNESS_CPP`
+# changes. Keeping the generator target under this run's scratch directory is
+# part of the correctness boundary, not merely build hygiene.
+#
 # Build one graph at a time. Each run writes hundreds of MB of C++ objects, and
 # two concurrent generations have exhausted a disk here - surfacing as a
 # misleading `ar: internal ranlib command failed`.

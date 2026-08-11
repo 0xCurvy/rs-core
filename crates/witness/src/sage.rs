@@ -17,6 +17,13 @@
 //! has run. Outputs are copied into the assignment the moment they are produced,
 //! so an output does not pin a slot to the end.
 //!
+//! Hosts that reuse a circuit may serialize those instructions as `SAGEPC01`
+//! after the authenticated source graph compiles. This is derived cache state:
+//! loading it authenticates the program digest, validates every dimension and
+//! index, and requires the embedded source-graph digest to match. Bump
+//! [`CACHE_VERSION`] when compiler semantics change without changing that wire
+//! layout, so hosts cannot reuse stale derived output.
+//!
 //! # What it does not change
 //!
 //! The wire format, the authentication, and the arithmetic are shared with the
@@ -48,16 +55,32 @@
 //! | pending(5,30) | 1,106,576 | 4,916 | ~96 MB | ~50 MB |
 //! | pending(50,30) | 7,442,816 | 16,436 | ~638 MB | ~332 MB |
 
-use ark_bn254::Fr;
-use ark_ff::{Field, Zero};
+use std::io::{BufReader, Cursor, Read};
 
-#[cfg(feature = "signet")]
-use crate::decompress_graph;
+use ark_bn254::Fr;
+use ark_ff::{BigInteger, Field, PrimeField, Zero};
+
 use crate::{
     Artifact, InputMapping, Limits, NodeRecord, Operation, WitnessError, authenticate,
     build_input_buffer, constant_from_bytes, preflight_body_size, read_header, read_input_mappings,
-    read_node_record, read_output_references, reserved_vec,
+    read_node_record, read_output_references, reserved_vec, verify_sha256,
 };
+use crate::{ZSTD_MAGIC, decompress_graph};
+
+// SAGE PreCompiled program, wire revision 1. Cache invalidation for compiler
+// semantic changes is deliberately separate in `CACHE_VERSION` below.
+const PROGRAM_MAGIC: &[u8; 8] = b"SAGEPC01";
+const PROGRAM_VERSION: u32 = 1;
+/// Version of the deterministic SAGE compiler output cached by hosts.
+///
+/// Increment this when a compiler change should invalidate locally derived
+/// programs even if `PROGRAM_VERSION` can still decode their wire layout.
+pub const CACHE_VERSION: u32 = 1;
+const PROGRAM_HEADER_BYTES: usize = 108;
+const PROGRAM_INSTRUCTION_BYTES: usize = 16;
+const PROGRAM_CONSTANT_BYTES: usize = 32;
+const PROGRAM_OUTPUT_BYTES: usize = 8;
+const PROGRAM_INPUT_MAPPING_BYTES: usize = 16;
 
 /// One compiled instruction: three `u32` operand slots plus an opcode.
 ///
@@ -102,6 +125,7 @@ pub struct SageGraph {
     signal_count: usize,
     slots: usize,
     r1cs_sha256: [u8; 32],
+    source_graph_sha256: [u8; 32],
 }
 
 impl SageGraph {
@@ -121,11 +145,72 @@ impl SageGraph {
     ) -> Result<Self, WitnessError> {
         // Same authentication, same size caps, same compression support as the
         // default evaluator - sharing the helper is what stops the two drifting.
+        let source_graph_sha256 = decode_sha256(expected_sha256)?;
         match authenticate(bytes, expected_sha256, &limits)? {
-            Artifact::Raw => compile(bytes, limits),
-            #[cfg(feature = "signet")]
-            Artifact::Zstd => compile(&decompress_graph(bytes, &limits)?, limits),
+            Artifact::Raw => compile(bytes, limits, source_graph_sha256),
+            Artifact::Zstd => compile(
+                &decompress_graph(bytes, &limits)?,
+                limits,
+                source_graph_sha256,
+            ),
         }
+    }
+
+    /// Load the liveness-allocated instruction program produced by
+    /// [`Self::to_compiled_bytes`].
+    ///
+    /// A locally derived cache records the digest produced immediately after
+    /// compiling an authenticated SIGNET graph. The program header must also
+    /// bind the expected source-graph digest. Callers that move these bytes to a
+    /// different trust domain are responsible for publishing an independent
+    /// program digest there.
+    pub fn from_compiled_bytes(
+        bytes: &[u8],
+        expected_program_sha256: &str,
+        expected_source_graph_sha256: &str,
+    ) -> Result<Self, WitnessError> {
+        Self::from_compiled_bytes_with_limits(
+            bytes,
+            expected_program_sha256,
+            expected_source_graph_sha256,
+            Limits::default(),
+        )
+    }
+
+    pub fn from_compiled_bytes_with_limits(
+        bytes: &[u8],
+        expected_program_sha256: &str,
+        expected_source_graph_sha256: &str,
+        limits: Limits,
+    ) -> Result<Self, WitnessError> {
+        if bytes.len() > limits.sage_program_bytes {
+            return Err(WitnessError::SageProgramTooLarge {
+                maximum: limits.sage_program_bytes,
+            });
+        }
+        verify_sha256(bytes, expected_program_sha256)?;
+        if bytes.starts_with(&ZSTD_MAGIC) {
+            decode_compressed_program(bytes, expected_source_graph_sha256, limits)
+        } else {
+            decode_program(
+                Cursor::new(bytes),
+                Some(bytes.len()),
+                expected_source_graph_sha256,
+                limits,
+            )
+        }
+    }
+
+    /// Serialize the immutable, already validated SAGE instruction program.
+    /// Locally cached bytes use a digest recorded at derivation time and remain
+    /// inside the authenticated source graph's trust boundary. Moving the bytes
+    /// to a different trust domain requires an independent digest pin.
+    pub fn to_compiled_bytes(&self) -> Result<Vec<u8>, WitnessError> {
+        encode_program(self)
+    }
+
+    pub fn source_graph_sha256(&self) -> [u8; 32] {
+        self.source_graph_sha256
     }
 
     /// Evaluate JSON circuit signals into the arkworks assignment.
@@ -202,7 +287,11 @@ impl SageGraph {
     }
 }
 
-fn compile(bytes: &[u8], limits: Limits) -> Result<SageGraph, WitnessError> {
+fn compile(
+    bytes: &[u8],
+    limits: Limits,
+    source_graph_sha256: [u8; 32],
+) -> Result<SageGraph, WitnessError> {
     let (header, mut reader) = read_header(bytes, &limits)?;
 
     // Pass one: the last instruction that reads each node. A node nobody reads
@@ -348,7 +437,446 @@ fn compile(bytes: &[u8], limits: Limits) -> Result<SageGraph, WitnessError> {
         signal_count: header.signal_count,
         slots: slot_owner.len(),
         r1cs_sha256: header.r1cs_sha256,
+        source_graph_sha256,
     })
+}
+
+fn encode_program(graph: &SageGraph) -> Result<Vec<u8>, WitnessError> {
+    let instruction_count = index_u32(graph.instructions.len(), "instruction count")?;
+    let constant_count = index_u32(graph.constants.len(), "constant count")?;
+    let output_count = index_u32(graph.outputs.len(), "output count")?;
+    let mapping_count = index_u32(graph.input_mapping.len(), "input mapping count")?;
+    let input_buffer_len = index_u32(graph.input_buffer_len, "input buffer length")?;
+    let signal_count = index_u32(graph.signal_count, "signal count")?;
+    let slots = index_u32(graph.slots, "slot count")?;
+    let size = program_size(
+        graph.instructions.len(),
+        graph.constants.len(),
+        graph.outputs.len(),
+        graph.input_mapping.len(),
+    )?;
+    if size > graph.limits.sage_program_bytes {
+        return Err(WitnessError::SageProgramTooLarge {
+            maximum: graph.limits.sage_program_bytes,
+        });
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| WitnessError::AllocationFailed {
+            section: "compiled SAGE program",
+        })?;
+    bytes.extend_from_slice(PROGRAM_MAGIC);
+    bytes.extend_from_slice(&PROGRAM_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(PROGRAM_HEADER_BYTES as u32).to_le_bytes());
+    bytes.extend_from_slice(&graph.source_graph_sha256);
+    bytes.extend_from_slice(&graph.r1cs_sha256);
+    for value in [
+        instruction_count,
+        constant_count,
+        output_count,
+        mapping_count,
+        input_buffer_len,
+        signal_count,
+        slots,
+    ] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for instruction in &graph.instructions {
+        bytes.extend_from_slice(&instruction.left.to_le_bytes());
+        bytes.extend_from_slice(&instruction.right.to_le_bytes());
+        bytes.extend_from_slice(&instruction.destination.to_le_bytes());
+        let (kind, operation) = match instruction.kind {
+            Kind::Input => (0, 0),
+            Kind::Constant => (1, 0),
+            Kind::Inverse => (2, 0),
+            Kind::Operation(operation) => (3, operation_tag(operation)),
+        };
+        bytes.push(kind);
+        bytes.push(operation);
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+    }
+    for constant in &graph.constants {
+        let encoded = constant.into_bigint().to_bytes_le();
+        if encoded.len() != PROGRAM_CONSTANT_BYTES {
+            return Err(WitnessError::Invariant(
+                "BN254 scalar serialization changed width",
+            ));
+        }
+        bytes.extend_from_slice(&encoded);
+    }
+    for output in &graph.outputs {
+        bytes.extend_from_slice(&output.node.to_le_bytes());
+        bytes.extend_from_slice(&output.signal.to_le_bytes());
+    }
+    for mapping in &graph.input_mapping {
+        bytes.extend_from_slice(&mapping.hash.to_le_bytes());
+        bytes.extend_from_slice(&index_u32(mapping.signal_id, "input signal id")?.to_le_bytes());
+        bytes
+            .extend_from_slice(&index_u32(mapping.signal_size, "input signal size")?.to_le_bytes());
+    }
+    if bytes.len() != size {
+        return Err(WitnessError::Invariant(
+            "compiled SAGE size calculation disagreed with encoder",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_program<R: Read>(
+    source: R,
+    declared_size: Option<usize>,
+    expected_source_graph_sha256: &str,
+    limits: Limits,
+) -> Result<SageGraph, WitnessError> {
+    let mut reader = ProgramReader::new(source);
+    if reader.array::<8>()? != *PROGRAM_MAGIC {
+        return Err(WitnessError::InvalidSageProgram("invalid header"));
+    }
+    if reader.u32()? != PROGRAM_VERSION || reader.u32()? as usize != PROGRAM_HEADER_BYTES {
+        return Err(WitnessError::InvalidSageProgram("unsupported version"));
+    }
+    let source_graph_sha256 = reader.array::<32>()?;
+    let expected_source = decode_sha256(expected_source_graph_sha256)?;
+    if source_graph_sha256 != expected_source {
+        return Err(WitnessError::SageSourceHashMismatch {
+            expected: hex(&expected_source),
+            actual: hex(&source_graph_sha256),
+        });
+    }
+    let r1cs_sha256 = reader.array::<32>()?;
+    let instruction_count = reader.u32()? as usize;
+    let constant_count = reader.u32()? as usize;
+    let output_count = reader.u32()? as usize;
+    let input_mapping_count = reader.u32()? as usize;
+    let input_buffer_len = reader.u32()? as usize;
+    let signal_count = reader.u32()? as usize;
+    let slots = reader.u32()? as usize;
+
+    check_count("instructions", instruction_count, limits.nodes)?;
+    check_count("constants", constant_count, limits.nodes)?;
+    check_count("outputs", output_count, limits.signals)?;
+    check_count("input mappings", input_mapping_count, limits.input_mappings)?;
+    check_count("input buffer", input_buffer_len, limits.input_values)?;
+    check_count("signals", signal_count, limits.signals)?;
+    if instruction_count == 0
+        || input_buffer_len == 0
+        || signal_count == 0
+        || slots == 0
+        || slots > instruction_count
+        || constant_count > instruction_count
+        || output_count != signal_count
+    {
+        return Err(WitnessError::InvalidSageProgram("invalid dimensions"));
+    }
+    let expected_size = program_size(
+        instruction_count,
+        constant_count,
+        output_count,
+        input_mapping_count,
+    )?;
+    if expected_size > limits.sage_program_bytes {
+        return Err(WitnessError::SageProgramTooLarge {
+            maximum: limits.sage_program_bytes,
+        });
+    }
+    if declared_size.is_some_and(|declared| expected_size != declared) {
+        return Err(WitnessError::InvalidSageProgram("size mismatch"));
+    }
+
+    let mut instructions = reserved_vec("instructions", instruction_count)?;
+    let mut defined_slots = reserved_vec("slot definition validation", slots)?;
+    defined_slots.resize(slots, false);
+    for index in 0..instruction_count {
+        let left = reader.u32()?;
+        let right = reader.u32()?;
+        let destination = reader.u32()?;
+        let kind_tag = reader.u8()?;
+        let operation_tag = reader.u8()?;
+        if reader.u16()? != 0 || destination as usize >= slots {
+            return Err(WitnessError::InvalidSageProgram(
+                "invalid instruction encoding",
+            ));
+        }
+        let kind = match kind_tag {
+            0 if operation_tag == 0 && (left as usize) < input_buffer_len && right == 0 => {
+                Kind::Input
+            }
+            1 if operation_tag == 0 && (left as usize) < constant_count && right == 0 => {
+                Kind::Constant
+            }
+            2 if operation_tag == 0 && (left as usize) < slots && right == 0 => Kind::Inverse,
+            3 if (left as usize) < slots && (right as usize) < slots => {
+                Kind::Operation(Operation::from_tag(operation_tag, index)?)
+            }
+            _ => {
+                return Err(WitnessError::InvalidSageProgram(
+                    "instruction operand is out of bounds",
+                ));
+            }
+        };
+        let reads_undefined_slot = match kind {
+            Kind::Inverse => !defined_slots[left as usize],
+            Kind::Operation(_) => !defined_slots[left as usize] || !defined_slots[right as usize],
+            Kind::Input | Kind::Constant => false,
+        };
+        if reads_undefined_slot {
+            return Err(WitnessError::InvalidSageProgram(
+                "instruction reads a slot before it is written",
+            ));
+        }
+        // Evaluation reads both operands before writing the destination, so an
+        // instruction may legitimately reuse one of its source slots.
+        defined_slots[destination as usize] = true;
+        instructions.push(Instruction {
+            left,
+            right,
+            destination,
+            kind,
+        });
+    }
+
+    let mut constants = reserved_vec("constants", constant_count)?;
+    for index in 0..constant_count {
+        constants.push(constant_from_bytes(reader.array::<32>()?, index)?);
+    }
+
+    let mut outputs = reserved_vec("outputs", output_count)?;
+    let mut seen_signals = reserved_vec("output signal validation", signal_count)?;
+    seen_signals.resize(signal_count, false);
+    let mut previous = None;
+    for _ in 0..output_count {
+        let output = OutputWrite {
+            node: reader.u32()?,
+            signal: reader.u32()?,
+        };
+        if output.node as usize >= instruction_count
+            || output.signal as usize >= signal_count
+            || seen_signals[output.signal as usize]
+            || previous.is_some_and(|previous| previous > (output.node, output.signal))
+        {
+            return Err(WitnessError::InvalidSageProgram("invalid output table"));
+        }
+        seen_signals[output.signal as usize] = true;
+        previous = Some((output.node, output.signal));
+        outputs.push(output);
+    }
+    if seen_signals.iter().any(|seen| !seen) {
+        return Err(WitnessError::InvalidSageProgram(
+            "output table omits a signal",
+        ));
+    }
+
+    let mut input_mapping = reserved_vec("input mappings", input_mapping_count)?;
+    let mut hashes = std::collections::HashSet::new();
+    hashes
+        .try_reserve(input_mapping_count)
+        .map_err(|_| WitnessError::AllocationFailed {
+            section: "input mapping hashes",
+        })?;
+    for index in 0..input_mapping_count {
+        let mapping = InputMapping {
+            hash: reader.u64()?,
+            signal_id: reader.u32()? as usize,
+            signal_size: reader.u32()? as usize,
+        };
+        if !hashes.insert(mapping.hash) {
+            return Err(WitnessError::DuplicateInputHash(mapping.hash));
+        }
+        if mapping.signal_id == 0
+            || mapping.signal_size == 0
+            || mapping
+                .signal_id
+                .checked_add(mapping.signal_size)
+                .is_none_or(|end| end > input_buffer_len)
+        {
+            return Err(WitnessError::InputMappingRange { index });
+        }
+        input_mapping.push(mapping);
+    }
+    if !reader.is_empty()? {
+        return Err(WitnessError::InvalidSageProgram("trailing bytes"));
+    }
+
+    Ok(SageGraph {
+        limits,
+        instructions,
+        constants,
+        outputs,
+        input_mapping,
+        input_buffer_len,
+        signal_count,
+        slots,
+        r1cs_sha256,
+        source_graph_sha256,
+    })
+}
+
+fn decode_compressed_program(
+    bytes: &[u8],
+    expected_source_graph_sha256: &str,
+    limits: Limits,
+) -> Result<SageGraph, WitnessError> {
+    use ruzstd::decoding::StreamingDecoder;
+    use ruzstd::decoding::errors::FrameDecoderError;
+
+    let source = Cursor::new(bytes);
+    let mut decoder = StreamingDecoder::new_with_max_window_size(source, limits.zstd_window_bytes)
+        .map_err(|error| match error {
+            FrameDecoderError::WindowSizeTooBig { requested, .. } => {
+                WitnessError::ZstdWindowTooLarge {
+                    requested,
+                    maximum: limits.zstd_window_bytes,
+                }
+            }
+            FrameDecoderError::DictNotProvided { .. } => WitnessError::ZstdDictionaryUnsupported,
+            _ => WitnessError::InvalidZstd,
+        })?;
+    let content_size = usize::try_from(decoder.decoder.content_size()).map_err(|_| {
+        WitnessError::ZstdOutputTooLarge {
+            maximum: limits.sage_program_bytes,
+        }
+    })?;
+    if content_size > limits.sage_program_bytes {
+        return Err(WitnessError::ZstdOutputTooLarge {
+            maximum: limits.sage_program_bytes,
+        });
+    }
+    let declared_size = (content_size != 0).then_some(content_size);
+    let graph = {
+        let buffered = BufReader::with_capacity(1024 * 1024, &mut decoder);
+        decode_program(
+            buffered,
+            declared_size,
+            expected_source_graph_sha256,
+            limits,
+        )?
+    };
+    if let Some(expected) = decoder.decoder.get_checksum_from_data()
+        && decoder.decoder.get_calculated_checksum() != Some(expected)
+    {
+        return Err(WitnessError::ZstdChecksumMismatch);
+    }
+    let (source, _) = decoder.into_parts();
+    if source.position() != bytes.len() as u64 {
+        return Err(WitnessError::ZstdTrailingData);
+    }
+    Ok(graph)
+}
+
+fn program_size(
+    instructions: usize,
+    constants: usize,
+    outputs: usize,
+    mappings: usize,
+) -> Result<usize, WitnessError> {
+    PROGRAM_HEADER_BYTES
+        .checked_add(
+            instructions
+                .checked_mul(PROGRAM_INSTRUCTION_BYTES)
+                .ok_or(WitnessError::InvalidSageProgram("size overflow"))?,
+        )
+        .and_then(|size| size.checked_add(constants.checked_mul(PROGRAM_CONSTANT_BYTES)?))
+        .and_then(|size| size.checked_add(outputs.checked_mul(PROGRAM_OUTPUT_BYTES)?))
+        .and_then(|size| size.checked_add(mappings.checked_mul(PROGRAM_INPUT_MAPPING_BYTES)?))
+        .ok_or(WitnessError::InvalidSageProgram("size overflow"))
+}
+
+fn check_count(section: &'static str, actual: usize, maximum: usize) -> Result<(), WitnessError> {
+    if actual > maximum {
+        return Err(WitnessError::CountLimit {
+            section,
+            actual,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
+fn operation_tag(operation: Operation) -> u8 {
+    match operation {
+        Operation::Mul => crate::wire::MUL,
+        Operation::MontgomeryMul => crate::wire::MONTGOMERY_MUL,
+        Operation::Add => crate::wire::ADD,
+        Operation::Sub => crate::wire::SUB,
+        Operation::Eq => crate::wire::EQ,
+        Operation::Neq => crate::wire::NEQ,
+        Operation::Lt => crate::wire::LT,
+        Operation::Gt => crate::wire::GT,
+        Operation::Leq => crate::wire::LEQ,
+        Operation::Geq => crate::wire::GEQ,
+        Operation::LogicalOr => crate::wire::LOGICAL_OR,
+        Operation::Shl => crate::wire::SHL,
+        Operation::Shr => crate::wire::SHR,
+        Operation::BitAnd => crate::wire::BIT_AND,
+        Operation::Neg => crate::wire::NEG,
+        Operation::Inv => crate::wire::INV,
+        Operation::Div => crate::wire::DIV,
+        Operation::Mod => crate::wire::MOD,
+        Operation::Pow => crate::wire::POW,
+        Operation::LogicalAnd => crate::wire::LOGICAL_AND,
+        Operation::IntegerDiv => crate::wire::INTEGER_DIV,
+        Operation::BitXor => crate::wire::BIT_XOR,
+        Operation::BitOr => crate::wire::BIT_OR,
+    }
+}
+
+fn decode_sha256(value: &str) -> Result<[u8; 32], WitnessError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WitnessError::InvalidExpectedHash);
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, byte) in decoded.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| WitnessError::InvalidExpectedHash)?;
+    }
+    Ok(decoded)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+struct ProgramReader<R> {
+    source: R,
+}
+
+impl<R: Read> ProgramReader<R> {
+    fn new(source: R) -> Self {
+        Self { source }
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], WitnessError> {
+        let mut bytes = [0_u8; N];
+        self.source
+            .read_exact(&mut bytes)
+            .map_err(|_| WitnessError::InvalidSageProgram("truncated"))?;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, WitnessError> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, WitnessError> {
+        Ok(u16::from_le_bytes(self.array()?))
+    }
+
+    fn u32(&mut self) -> Result<u32, WitnessError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, WitnessError> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn is_empty(&mut self) -> Result<bool, WitnessError> {
+        let mut byte = [0_u8; 1];
+        self.source
+            .read(&mut byte)
+            .map(|count| count == 0)
+            .map_err(|_| WitnessError::InvalidSageProgram("could not finish decoding"))
+    }
 }
 
 fn index_u32(value: usize, what: &'static str) -> Result<u32, WitnessError> {
@@ -397,9 +925,10 @@ mod differential;
 
 #[cfg(test)]
 mod tests {
-    use super::SageGraph;
+    use super::{CACHE_VERSION, SageGraph};
     use crate::WitnessGraph;
     use ark_ff::PrimeField;
+    use ruzstd::encoding::{CompressionLevel, compress_to_vec};
     use sha2::{Digest, Sha256};
 
     /// `a * a + 1`, written so nodes die at different points and slots get recycled.
@@ -491,5 +1020,101 @@ mod tests {
             .err()
             .expect("hash must mismatch");
         assert!(matches!(error, crate::WitnessError::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn authenticated_precompiled_program_skips_graph_compilation() {
+        let bytes = graph_bytes();
+        let graph_sha = digest(&bytes);
+        let graph = SageGraph::from_bytes(&bytes, &graph_sha).expect("compile graph");
+        let program = graph.to_compiled_bytes().expect("serialize program");
+        assert_eq!(&program[..8], b"SAGEPC01");
+        assert_eq!(CACHE_VERSION, 1);
+        let program_sha = digest(&program);
+        let loaded = SageGraph::from_compiled_bytes(&program, &program_sha, &graph_sha)
+            .expect("load precompiled program");
+
+        assert_eq!(loaded.source_graph_sha256(), graph.source_graph_sha256());
+        assert_eq!(loaded.r1cs_sha256(), graph.r1cs_sha256());
+        assert_eq!(loaded.slot_count(), graph.slot_count());
+        assert_eq!(
+            loaded.calculate_json(r#"{"a":"5"}"#).expect("evaluate"),
+            graph.calculate_json(r#"{"a":"5"}"#).expect("evaluate")
+        );
+
+        let error = SageGraph::from_compiled_bytes(&program, &program_sha, &"00".repeat(32))
+            .err()
+            .expect("source pin must be checked");
+        assert!(matches!(
+            error,
+            crate::WitnessError::SageSourceHashMismatch { .. }
+        ));
+
+        let compressed = compress_to_vec(program.as_slice(), CompressionLevel::Fastest);
+        let compressed_sha = digest(&compressed);
+        let compressed_loaded =
+            SageGraph::from_compiled_bytes(&compressed, &compressed_sha, &graph_sha)
+                .expect("load compressed precompiled program");
+        assert_eq!(
+            compressed_loaded
+                .calculate_json(r#"{"a":"5"}"#)
+                .expect("evaluate compressed program"),
+            graph.calculate_json(r#"{"a":"5"}"#).expect("evaluate")
+        );
+
+        let mut corrupted = compressed;
+        *corrupted
+            .last_mut()
+            .expect("compressed program is non-empty") ^= 1;
+        let error = SageGraph::from_compiled_bytes(&corrupted, &compressed_sha, &graph_sha)
+            .err()
+            .expect("compressed program must authenticate before decoding");
+        assert!(matches!(error, crate::WitnessError::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn compiled_program_rejects_an_empty_input_buffer() {
+        let bytes = graph_bytes();
+        let graph_sha = digest(&bytes);
+        let graph = SageGraph::from_bytes(&bytes, &graph_sha).expect("compile graph");
+        let mut program = graph.to_compiled_bytes().expect("serialize program");
+        // Header layout: magic (8), version (4), header size (4), source hash
+        // (32), R1CS hash (32), four preceding counts (16), then input buffer.
+        program[96..100].copy_from_slice(&0_u32.to_le_bytes());
+        let program_sha = digest(&program);
+
+        let error = SageGraph::from_compiled_bytes(&program, &program_sha, &graph_sha)
+            .err()
+            .expect("an empty input buffer must fail during decode");
+        assert!(matches!(
+            error,
+            crate::WitnessError::InvalidSageProgram("invalid dimensions")
+        ));
+    }
+
+    #[test]
+    fn compiled_program_rejects_a_slot_read_before_its_first_write() {
+        let bytes = graph_bytes();
+        let graph_sha = digest(&bytes);
+        let graph = SageGraph::from_bytes(&bytes, &graph_sha).expect("compile graph");
+        let mut program = graph.to_compiled_bytes().expect("serialize program");
+        // Turn the first instruction into `inverse(slot 0)`. The operand is in
+        // bounds but slot 0 has not been initialized by any earlier instruction.
+        let first_instruction = super::PROGRAM_HEADER_BYTES;
+        program[first_instruction..first_instruction + 4].copy_from_slice(&0_u32.to_le_bytes());
+        program[first_instruction + 4..first_instruction + 8].copy_from_slice(&0_u32.to_le_bytes());
+        program[first_instruction + 12] = 2;
+        program[first_instruction + 13] = 0;
+        let program_sha = digest(&program);
+
+        let error = SageGraph::from_compiled_bytes(&program, &program_sha, &graph_sha)
+            .err()
+            .expect("read-before-write must fail during decode");
+        assert!(matches!(
+            error,
+            crate::WitnessError::InvalidSageProgram(
+                "instruction reads a slot before it is written"
+            )
+        ));
     }
 }

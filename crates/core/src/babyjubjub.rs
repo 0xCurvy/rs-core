@@ -24,9 +24,9 @@ pub struct BabyJubScalar(BigUint);
 /// A canonical non-zero scalar in `[1, l)`, stored as fixed-width little-endian
 /// bytes so the owned key material can be cleared on drop.
 ///
-/// The current prototype point multiplication still converts this value to a
-/// `BigUint` and is not constant-time. See the module-level security note in the
-/// scalar-signature proposal before using it in a hostile co-resident setting.
+/// Point multiplication converts this value to `BigUint` and is not
+/// constant-time. Do not use this implementation where hostile co-resident code
+/// can observe timing or shared hardware state.
 pub struct BabyJubSecretScalar([u8; 32]);
 
 /// A checked affine point in the prime-order BabyJubJub subgroup.

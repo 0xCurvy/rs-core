@@ -12,6 +12,7 @@ homepage.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/curvy-prover"
+exclude = ["js/**", "MOBILE_HARNESS.md"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -31,7 +32,7 @@ ark-relations = { workspace = true, default-features = false }
 ark-serialize = { workspace = true, default-features = false }
 ark-std = { workspace = true, default-features = false }
 byteorder.workspace = true
-curvy-witness = { version = "=0.1.0-rc.3", path = "../witness" }
+curvy-witness = { version = "=0.1.0-rc.4", path = "../witness" }
 getrandom.workspace = true
 num-bigint.workspace = true
 rayon = { workspace = true, optional = true }
@@ -40,8 +41,12 @@ thiserror.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-rayon = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
-default = ["std", "parallel"]
+default = ["std"]
+bench = ["sparrow"]
 std = [
   "ark-bn254/std",
   "ark-ec/std",
@@ -53,14 +58,20 @@ std = [
   "ark-std/getrandom",
   "ark-std/std",
 ]
+# Opt into Curvy's ark-groth16 0.6-compatible proof assembly and MSM scheduler.
+# Do not enable ark-ec/parallel or ark-groth16/parallel: ark-ec 0.6 constructs
+# private Rayon pools inside large MSMs, which wasm-bindgen-rayon cannot spawn.
+# Curvy schedules those MSMs on the host's existing pool; FFT and field work
+# stay parallel. Without this feature, the ordinary prover calls stock serial
+# ark-groth16 directly.
 parallel = [
   "dep:rayon",
-  "ark-ec/parallel",
   "ark-ff/parallel",
-  "ark-groth16/parallel",
   "ark-poly/parallel",
   "ark-std/parallel",
 ]
+signet-v2 = ["curvy-witness/signet-v2"]
+sparrow = ["signet-v2", "curvy-witness/sage"]
 wasm = ["dep:wasm-bindgen"]
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 
@@ -68,3 +79,11 @@ wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 name = "curvy-native-prover"
 path = "src/bin/curvy-native-prover.rs"
 required-features = ["std"]
+
+[[example]]
+name = "derive_sage_cache"
+required-features = ["sparrow"]
+
+[[example]]
+name = "zkey_chunk_manifest"
+required-features = ["sparrow"]

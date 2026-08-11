@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Builds SIGNET witness-graph artifacts from `curvy-signet-builder` output.
 //!
 //! This is the second half of the graph pipeline. The first half - running
@@ -36,6 +38,7 @@
 
 pub mod encode;
 pub mod postcard;
+pub mod reseal;
 pub mod wtns;
 
 use curvy_witness::wire;
@@ -43,11 +46,12 @@ use thiserror::Error;
 
 pub use encode::encode;
 pub use postcard::{Graph, OperationSchema};
+pub use reseal::{reseal, to_raw};
 
 /// Which magic the artifact carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Envelope {
-    /// `CVYWIT01` - what earlier artifacts carry. Still accepted by every build.
+    /// `CVYWIT01`, retained as a supported compatibility envelope.
     Cvywit,
     /// `SIGNET01` - what the pipeline emits. Accepted by a default build.
     #[default]
@@ -200,6 +204,10 @@ pub enum SignetError {
     InvalidR1csDigest,
     #[error("invalid reference witness: {0}")]
     InvalidWtns(&'static str),
+    #[error("not a SIGNET or CVYWIT artifact, or not a body version this tool understands")]
+    NotAnArtifact,
+    #[error("could not decompress the artifact: {0}")]
+    Decompress(String),
 }
 
 /// Decode a 64-character hex digest.

@@ -1,0 +1,182 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SPARROW browser benchmark</title>
+<pre id="output">running</pre>
+<script type="module">
+  import {
+    cachedArtifactBytes,
+    loadOrCompileSageProver,
+    proveCachedZkey,
+    proveCachedZkeyOnePass,
+  } from "./sparrow-cache-api.mjs";
+
+  const params = new URLSearchParams(location.search);
+  if (params.has("token")) {
+    const scrubbed = new URL(location.href);
+    scrubbed.searchParams.delete("token");
+    history.replaceState(null, "", `${scrubbed.pathname}${scrubbed.search}`);
+  }
+  const required = (name) => {
+    const value = params.get(name);
+    if (!value) throw new Error(`missing query parameter: ${name}`);
+    return value;
+  };
+  const sample = { peakJsHeapBytes: 0, samples: 0 };
+  const observe = () => {
+    sample.samples += 1;
+    sample.peakJsHeapBytes = Math.max(
+      sample.peakJsHeapBytes,
+      performance.memory?.usedJSHeapSize ?? 0,
+    );
+  };
+
+  try {
+    const threaded = params.get("threaded") === "1";
+    const wasm = await import(threaded
+      ? "../pkg-web-threads/curvy_prover.js"
+      : "../pkg-web/curvy_prover.js");
+    await wasm.default();
+    const requestedThreads = Number(params.get("threads") || navigator.hardwareConcurrency || 1);
+    const threadCount = threaded ? Math.max(1, Math.floor(requestedThreads)) : 1;
+    if (threaded) {
+      if (!crossOriginIsolated) throw new Error("threaded wasm requires cross-origin isolation");
+      await wasm.initThreadPool(threadCount);
+    }
+    const zkeyUrl = required("zkey");
+    const inputUrl = required("input");
+    const inputJson = await (await fetch(inputUrl)).text();
+    const cache = await caches.open("curvy-sparrow-bench-v1");
+    const compileStarted = performance.now();
+    const appliedWindowBits = Number(params.get("windowBits") || 13);
+    const appliedMsmChunkPoints = Number(params.get("msmChunkPoints") || 65536);
+    const sage = await loadOrCompileSageProver({
+      wasm,
+      cache,
+      graphUrl: required("graph"),
+      expectedSourceGraphSha256: required("graphHash"),
+      expectedZkeySha256: required("zkeyHash"),
+      batchProfile: params.get("profile") === "batch",
+      windowBits: appliedWindowBits,
+      msmChunkPoints: appliedMsmChunkPoints,
+    });
+    const { prover } = sage;
+    observe();
+    const sageLoadOrCompileMs = performance.now() - compileStarted;
+
+    const request = new Request(zkeyUrl);
+    let cachePopulateMs = 0;
+    if (!(await cache.match(request))) {
+      const populateStarted = performance.now();
+      const response = await fetch(request);
+      if (!response.ok) throw new Error(`zkey fetch failed: ${response.status}`);
+      await cache.put(request, response);
+      cachePopulateMs = performance.now() - populateStarted;
+    }
+    observe();
+
+    let storageComparison = null;
+    if (params.get("storageCompare") === "1") {
+      const directory = await navigator.storage.getDirectory();
+      const comparisonFile = `sparrow-bench-${required("zkeyHash")}.zkey`;
+      let writable = null;
+      try {
+        const handle = await directory.getFileHandle(comparisonFile, { create: true });
+        const source = await cache.match(request);
+        const writeStarted = performance.now();
+        writable = await handle.createWritable();
+        const sourceReader = source.body.getReader();
+        for (;;) {
+          const { done, value } = await sourceReader.read();
+          if (done) break;
+          await writable.write(value);
+          observe();
+        }
+        await writable.close();
+        writable = null;
+        const opfsWriteMs = performance.now() - writeStarted;
+
+        const drain = async (stream) => {
+          const reader = stream.getReader();
+          let bytes = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            bytes += value.byteLength;
+            observe();
+          }
+          return bytes;
+        };
+        const cacheReadStarted = performance.now();
+        const cacheBytes = await drain((await cache.match(request)).body);
+        const cacheReadMs = performance.now() - cacheReadStarted;
+        const file = await handle.getFile();
+        const opfsReadStarted = performance.now();
+        const opfsBytes = await drain(file.stream());
+        const opfsReadMs = performance.now() - opfsReadStarted;
+        storageComparison = { opfsWriteMs, cacheReadMs, opfsReadMs, cacheBytes, opfsBytes };
+      } finally {
+        if (writable) await writable.abort().catch(() => {});
+        await directory.removeEntry(comparisonFile).catch(() => {});
+      }
+    }
+
+    const proofStarted = performance.now();
+    let result;
+    if (params.has("manifest")) {
+      const manifestBytes = await cachedArtifactBytes(cache, required("manifest"));
+      result = await proveCachedZkeyOnePass({
+        prover,
+        inputJson,
+        manifestBytes,
+        expectedManifestSha256: required("manifestHash"),
+        cache,
+        request,
+        observe,
+      });
+    } else {
+      result = await proveCachedZkey({
+        prover,
+        inputJson,
+        cache,
+        request,
+        observe,
+        oneShot: true,
+      });
+    }
+    const proofMs = performance.now() - proofStarted;
+    observe();
+    window.__curvyResult = {
+      runtime: threaded
+        ? "rust-wasm-browser-shared-memory-cache-api"
+        : "rust-wasm-browser-single-thread-cache-api",
+      threaded,
+      threadCount,
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      crossOriginIsolated,
+      storageComparison,
+      onePassManifest: params.has("manifest"),
+      sageCacheHit: sage.cacheHit,
+      sageCacheStored: sage.cacheStored,
+      sageCompilerVersion: sage.compilerVersion,
+      sageProgramBytes: sage.programBytes,
+      sageProgramSha256: sage.programSha256,
+      windowBits: appliedWindowBits,
+      msmChunkPoints: appliedMsmChunkPoints,
+      sageLoadOrCompileMs,
+      cachePopulateMs,
+      sparrowProofAndVerifyMs: proofMs,
+      assignmentSize: prover.assignmentSize,
+      sageSlots: prover.sageSlots,
+      peakJsHeapBytes: sample.peakJsHeapBytes,
+      samples: sample.samples,
+      protocol: result.proof.protocol,
+      userAgent: navigator.userAgent,
+    };
+    document.querySelector("#output").textContent = JSON.stringify(window.__curvyResult, null, 2);
+    console.log(`CURVY_RESULT ${JSON.stringify(window.__curvyResult)}`);
+  } catch (error) {
+    window.__curvyError = error?.stack ?? String(error);
+    document.querySelector("#output").textContent = window.__curvyError;
+    console.error(`CURVY_ERROR ${window.__curvyError}`);
+  }
+</script>

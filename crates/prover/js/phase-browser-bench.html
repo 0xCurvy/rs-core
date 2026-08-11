@@ -1,0 +1,84 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Curvy native/WASM phase benchmark</title>
+<pre id="output">running</pre>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const threaded = params.get("threaded") === "1";
+  const wasm = await import(threaded
+    ? "../pkg-web-threads/curvy_prover.js"
+    : "../pkg-web/curvy_prover.js");
+
+  const time = (operation) => {
+    const started = performance.now();
+    const fingerprint = operation();
+    return { ms: performance.now() - started, fingerprint };
+  };
+  const measured = (name, operation) => {
+    const samples = [time(operation), time(operation), time(operation)];
+    const fingerprint = samples[0].fingerprint;
+    if (samples.some((sample) => sample.fingerprint !== fingerprint)) {
+      throw new Error(`${name} fingerprint changed between samples`);
+    }
+    const samplesMs = samples.map((sample) => sample.ms).sort((a, b) => a - b);
+    const result = { ms: samplesMs[1], samplesMs, fingerprint };
+    console.log(`CURVY_PHASE ${name} ${JSON.stringify(result)}`);
+    return result;
+  };
+
+  try {
+    await wasm.default();
+    const requestedThreads = Number(params.get("threads") || navigator.hardwareConcurrency || 1);
+    const threadCount = threaded ? Math.max(1, Math.floor(requestedThreads)) : 1;
+    if (threaded) {
+      if (!crossOriginIsolated) throw new Error("threaded wasm requires cross-origin isolation");
+      await wasm.initThreadPool(threadCount);
+    }
+
+    const phases = {
+      sha256_64m: {
+        warmup: () => wasm.benchSha256(1024, 1),
+        // Eight passes over one allocated buffer minimize memory-growth and
+        // initialization noise while retaining 64 MiB of total SHA input.
+        run: () => wasm.benchSha256(8 << 20, 8),
+      },
+      fr_arithmetic_500k: {
+        warmup: () => wasm.benchFieldArithmetic(32),
+        run: () => wasm.benchFieldArithmetic(500_000),
+      },
+      fft_2p18_roundtrip: {
+        warmup: () => wasm.benchFft(10, 1),
+        run: () => wasm.benchFft(18, 1),
+      },
+      g1_msm_2p17: {
+        warmup: () => wasm.benchG1Msm(10, 4),
+        run: () => wasm.benchG1Msm(17, 13),
+      },
+      g2_msm_2p16: {
+        warmup: () => wasm.benchG2Msm(10, 4),
+        run: () => wasm.benchG2Msm(16, 13),
+      },
+    };
+    const selected = params.get("phase") || "sha256_64m";
+    const benchmark = phases[selected];
+    if (!benchmark) throw new Error(`unknown phase: ${selected}`);
+    benchmark.warmup();
+
+    const result = {
+      runtime: threaded ? "rust-wasm-browser-shared-memory" : "rust-wasm-browser-single-thread",
+      threaded,
+      threadCount,
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      phase: selected,
+      measurement: measured(selected, benchmark.run),
+      userAgent: navigator.userAgent,
+    };
+    window.__curvyResult = result;
+    document.querySelector("#output").textContent = JSON.stringify(result, null, 2);
+    console.log(`CURVY_RESULT ${JSON.stringify(result)}`);
+  } catch (error) {
+    window.__curvyError = error?.stack ?? String(error);
+    document.querySelector("#output").textContent = window.__curvyError;
+    console.error(`CURVY_ERROR ${window.__curvyError}`);
+  }
+</script>

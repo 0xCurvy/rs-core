@@ -11,7 +11,7 @@ local Groth16 proving should be one operation.
 
 ```toml
 [dependencies]
-curvy-witness = "=0.1.0-rc.3"
+curvy-witness = "=0.1.0-rc.4"
 ```
 
 ## Evaluate a graph
@@ -43,8 +43,14 @@ raw or zstd-compressed.
 
 | feature | adds |
 |---|---|
-| `signet-v2` | the version-2 body encoding: varint distances and ZigZag output deltas. Not stable; no published artifact uses it. |
+| `signet-v2` | version-2 body encoding with varint distances and ZigZag output deltas; opt-in for explicit deployment rollout |
 | `sage` | `sage::SageGraph`, a second evaluator over the same artifacts. |
+
+SIGNET v2 is covered by exact v1/v2 assignment parity, exhaustive raw and zstd
+truncation boundaries, structural corruption cases, and native and portable-WASM
+conformance. It remains off by default so accepting a new artifact body format
+is an explicit deployment decision. A release pipeline should run the SIGNET
+parity matrix over every graph it publishes.
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for artifact
 and build-target guidance.

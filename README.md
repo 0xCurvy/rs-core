@@ -29,16 +29,16 @@ Most native applications only need `curvy-core`:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.3"
+curvy-core = "=0.1.0-rc.4"
 ```
 
 Add witness evaluation or local proving only when your application needs it:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.3"
-curvy-witness = "=0.1.0-rc.3"
-curvy-prover = "=0.1.0-rc.3"
+curvy-core = "=0.1.0-rc.4"
+curvy-witness = "=0.1.0-rc.4"
+curvy-prover = "=0.1.0-rc.4"
 ```
 
 Rust 1.94 or newer is required.
@@ -176,13 +176,13 @@ scripts/build-native.sh
 ```
 
 This builds `curvy-core`, `curvy-witness`, and `curvy-prover` as optimized native
-Rust libraries, enables native core parallelism, and produces
+Rust libraries, enables core and prover parallelism, and produces
 `target/release/curvy-native-prover`. The equivalent Cargo command is:
 
 ```bash
 cargo build --locked --release \
   -p curvy-core -p curvy-witness -p curvy-prover \
-  --features curvy-core/parallel
+  --features curvy-core/parallel,curvy-prover/parallel
 ```
 
 Applications that depend on these crates normally do not need this command;
@@ -196,22 +196,25 @@ Merkle parent construction, proving-key point conversion, and parallel-enabled
 arkworks proving operations. Witness-graph evaluation itself remains
 deterministic and single-threaded.
 
-For Cargo consumers, `curvy-prover` enables its `parallel` feature by default.
-`curvy-core` keeps parallelism opt-in, so enable it explicitly when using the
-core crate without this build script:
+For Cargo consumers, both crates keep parallelism opt-in. The ordinary prover
+uses stock serial `ark-groth16` by default. Enable `parallel` for Curvy's
+ark-groth16-compatible proof path scheduled on the host's existing Rayon pool:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.3", features = ["parallel"] }
-curvy-prover = "=0.1.0-rc.3"
+curvy-core = { version = "=0.1.0-rc.4", features = ["parallel"] }
+curvy-prover = { version = "=0.1.0-rc.4", features = ["parallel"] }
 ```
 
 After publication, the executable can instead be installed from crates.io:
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.0-rc.3 \
+cargo install --locked curvy-prover --version 0.1.0-rc.4 \
   --bin curvy-native-prover
 ```
+
+That command installs the stock serial prover. Add `--features parallel` to
+install the global-pool multithreaded build used by `scripts/build-native.sh`.
 
 `cargo install` places the executable at
 `$CARGO_HOME/bin/curvy-native-prover` (normally
@@ -224,8 +227,9 @@ curvy-native-prover <zkey> <zkey-sha256> <graph.bin> <graph-sha256> \
   <input.json> <proof.json> <public.json>
 ```
 
-Set `CURVY_PROVER_NUM_THREADS` to an integer from 1 through 64. It defaults to
-one so container CPU quotas do not accidentally create an oversized Rayon pool.
+On a build with `parallel`, set `CURVY_PROVER_NUM_THREADS` to an integer from 1
+through 64. It defaults to one so container CPU quotas do not accidentally
+create an oversized Rayon pool. A serial build rejects values greater than one.
 The executable authenticates and parses artifacts through `CircuitProver`; it
 does not introduce a second witness runtime or graph format.
 
@@ -255,6 +259,14 @@ cargo +1.94.0 install wasm-bindgen-cli --version 0.2.126 --locked
 
 The build invokes wasm-bindgen for both modules. Outputs are written to matching
 directories under `crates/wasm/pkg-*` and `crates/prover/pkg-*`.
+
+Normal WASM builds and published npm artifacts intentionally exclude SPARROW
+and SAGE. `scripts/build-wasm.sh <target> --signet-v2` enables only the compact
+SIGNET decoder. For explicit development or constrained-memory SPARROW builds,
+use `--sparrow` (which implies SIGNET v2); combine either flag with `--threads`
+for the threaded web target. `--bench` implies SPARROW and adds only the
+development arithmetic kernels used by the browser benchmark; do not use it for
+application builds.
 
 #### Node.js target
 
@@ -386,8 +398,10 @@ cross-origin isolation.
 - `curvy-core/parallel` enables Rayon for independent stealth scans and bulk
   Merkle-tree construction. It is disabled by default for direct Cargo users;
   `scripts/build-native.sh` enables it.
-- `curvy-prover` enables native `std` and `parallel` features by default. The
-  `wasm` and `wasm-threads` features expose its browser integration.
+- `curvy-prover` enables only native `std` by default and therefore uses stock
+  serial `ark-groth16`. Its `parallel`, `signet-v2`, `sparrow`, `bench`, `wasm`,
+  and `wasm-threads` features are explicit opt-ins; `sparrow` and the
+  development-only `bench` feature enable SAGE.
 - `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a
   cross-origin-isolated page.
 

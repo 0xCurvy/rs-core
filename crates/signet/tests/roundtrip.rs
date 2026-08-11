@@ -167,6 +167,99 @@ fn zstd_artifacts_round_trip_through_the_evaluator() {
     }
 }
 
+/// Every strict prefix of a valid v2 artifact is malformed. Testing every byte
+/// boundary catches truncation inside fixed-width constants, varints, signal
+/// deltas, and the final mapping table without coupling the test to decoder
+/// implementation details.
+#[test]
+fn every_raw_v2_truncation_is_rejected() {
+    let bytes = encode(&graph(), [0x22; 32], Envelope::Signet, FormatVersion::V2).expect("encode");
+    for length in 0..bytes.len() {
+        let truncated = &bytes[..length];
+        let digest = hex(&Sha256::digest(truncated));
+        assert!(
+            WitnessGraph::from_bytes(truncated, &digest).is_err(),
+            "accepted v2 prefix of {length}/{} bytes",
+            bytes.len()
+        );
+    }
+}
+
+/// Truncation must also be rejected when it occurs in the shipping zstd
+/// envelope, including cuts in the frame header and checksum.
+#[test]
+fn every_compressed_v2_truncation_is_rejected() {
+    let raw = encode(&graph(), [0x33; 32], Envelope::Signet, FormatVersion::V2).expect("encode");
+    let (bytes, _) = curvy_signet::compress(&raw, curvy_signet::DEFAULT_COMPRESSION_LEVEL);
+    for length in 0..bytes.len() {
+        let truncated = &bytes[..length];
+        let digest = hex(&Sha256::digest(truncated));
+        assert!(
+            WitnessGraph::from_bytes(truncated, &digest).is_err(),
+            "accepted compressed v2 prefix of {length}/{} bytes",
+            bytes.len()
+        );
+    }
+}
+
+/// Authentication detects ordinary storage/transit corruption before any v2
+/// body field is interpreted.
+#[test]
+fn v2_corruption_fails_the_pinned_digest() {
+    let mut bytes =
+        encode(&graph(), [0x44; 32], Envelope::Signet, FormatVersion::V2).expect("encode");
+    let pinned = hex(&Sha256::digest(&bytes));
+    bytes[100] ^= 1;
+    let error = WitnessGraph::from_bytes(&bytes, &pinned)
+        .err()
+        .expect("changed bytes must not match the pin");
+    assert!(error.to_string().contains("mismatch"), "{error}");
+}
+
+/// Even a corrupt artifact paired with a newly computed digest must still pass
+/// the v2 structural checks. These mutations cover its compact-only fields:
+/// node tags, backward distances, signal deltas, canonical varints, mappings,
+/// and exact body consumption.
+#[test]
+fn malformed_v2_structures_are_rejected_after_authentication() {
+    let original =
+        encode(&graph(), [0x55; 32], Envelope::Signet, FormatVersion::V2).expect("encode");
+    let mut malformed = Vec::new();
+
+    let mut invalid_tag = original.clone();
+    invalid_tag[99] = 0xff;
+    malformed.push(("invalid node tag", invalid_tag));
+
+    let mut zero_distance = original.clone();
+    zero_distance[100] = 0;
+    malformed.push(("zero backward distance", zero_distance));
+
+    let mut non_canonical = original.clone();
+    non_canonical.splice(98..=98, [0x81, 0x00]);
+    malformed.push(("non-canonical input varint", non_canonical));
+
+    let mut bad_signal = original.clone();
+    bad_signal[141] = 0x7e;
+    malformed.push(("out-of-range signal delta", bad_signal));
+
+    let mut bad_mapping = original.clone();
+    let signal_id = bad_mapping.len() - 8;
+    bad_mapping[signal_id..signal_id + 4].copy_from_slice(&0_u32.to_le_bytes());
+    malformed.push(("zero mapping signal id", bad_mapping));
+
+    let mut trailing = original;
+    trailing.push(0);
+    malformed.push(("trailing byte", trailing));
+
+    for (case, bytes) in malformed {
+        let digest = hex(&Sha256::digest(&bytes));
+        assert!(
+            WitnessGraph::from_bytes(&bytes, &digest).is_err(),
+            "accepted {case}"
+        );
+    }
+}
+
 /// Compressing changes which digest authenticates the artifact. Pinning the
 /// uncompressed one against a compressed file must fail, not silently pass.
 #[test]
@@ -239,4 +332,90 @@ fn the_default_level_stays_within_the_consumer_window_cap() {
     let loaded = WitnessGraph::from_bytes(&artifact, &digest)
         .unwrap_or_else(|e| panic!("{compressor:?} produced an artifact we cannot load: {e}"));
     assert_eq!(loaded.assignment_size(), 2);
+}
+
+/// The invariant `reseal` rests on. If a future header field ever varied with the
+/// envelope, resealing would silently produce a mislabelled artifact, and this is
+/// the test that would stop it being written.
+#[test]
+fn the_envelope_only_changes_the_magic() {
+    for version in [FormatVersion::V1, FormatVersion::V2] {
+        let cvywit = encode(&graph(), [0x5A; 32], Envelope::Cvywit, version).expect("encode");
+        let signet = encode(&graph(), [0x5A; 32], Envelope::Signet, version).expect("encode");
+
+        assert_ne!(cvywit[..8], signet[..8], "{version:?}: magic must differ");
+        assert_eq!(
+            cvywit[8..],
+            signet[8..],
+            "{version:?}: the body must not depend on the envelope"
+        );
+    }
+}
+
+/// Resealing has to land on exactly the bytes a native export would have produced,
+/// because the three profiles it is used for have no postcard source left to check
+/// against. The two that do have one are checked this way for real in `rs-sdk`.
+#[test]
+fn resealing_reproduces_a_native_export() {
+    for version in [FormatVersion::V1, FormatVersion::V2] {
+        let cvywit = encode(&graph(), [0x33; 32], Envelope::Cvywit, version).expect("encode");
+        let native = encode(&graph(), [0x33; 32], Envelope::Signet, version).expect("encode");
+
+        let resealed = curvy_signet::reseal(&cvywit, Envelope::Signet).expect("reseal");
+        assert_eq!(resealed, native, "{version:?}");
+
+        // And back again, so the operation is not one-way.
+        let restored = curvy_signet::reseal(&resealed, Envelope::Cvywit).expect("reseal");
+        assert_eq!(restored, cvywit, "{version:?}");
+    }
+}
+
+/// The shipped artifacts are compressed, so resealing one starts by unwrapping a
+/// zstd frame. What comes out the far end still has to evaluate identically.
+#[test]
+fn a_compressed_artifact_reseals_through_its_frame() {
+    let cvywit = encode(&graph(), [0x77; 32], Envelope::Cvywit, FormatVersion::V1).expect("encode");
+    let (compressed, _) = curvy_signet::compress(&cvywit, curvy_signet::DEFAULT_COMPRESSION_LEVEL);
+
+    let raw = curvy_signet::to_raw(&compressed).expect("decompress");
+    assert_eq!(raw, cvywit);
+
+    let resealed = curvy_signet::reseal(&raw, Envelope::Signet).expect("reseal");
+    let (artifact, _) = curvy_signet::compress(&resealed, curvy_signet::DEFAULT_COMPRESSION_LEVEL);
+    let digest = hex(&Sha256::digest(&artifact));
+
+    let assignment = WitnessGraph::from_bytes(&artifact, &digest)
+        .expect("a resealed compressed artifact must load")
+        .calculate_json(r#"{"a":"6"}"#)
+        .expect("evaluate");
+    assert_eq!(assignment[1].into_bigint().0[0], 43);
+}
+
+/// Resealing arbitrary bytes would turn this into a tool for minting artifacts out
+/// of nothing. It has to refuse anything it cannot identify as one already.
+#[test]
+fn reseal_refuses_bytes_that_are_not_an_artifact() {
+    let valid = encode(&graph(), [0; 32], Envelope::Signet, FormatVersion::V1).expect("encode");
+
+    let mut wrong_magic = valid.clone();
+    wrong_magic[..8].copy_from_slice(b"NOTAGRPH");
+
+    let mut wrong_version = valid.clone();
+    wrong_version[8..10].copy_from_slice(&99_u16.to_le_bytes());
+
+    let mut wrong_field = valid.clone();
+    wrong_field[10..12].copy_from_slice(&7_u16.to_le_bytes());
+
+    for (label, bytes) in [
+        ("empty", Vec::new()),
+        ("truncated header", valid[..32].to_vec()),
+        ("wrong magic", wrong_magic),
+        ("unknown version", wrong_version),
+        ("unknown field", wrong_field),
+    ] {
+        assert!(
+            curvy_signet::reseal(&bytes, Envelope::Signet).is_err(),
+            "{label} must be refused"
+        );
+    }
 }
