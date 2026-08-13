@@ -1,0 +1,14 @@
+.git
+.github
+target
+**/target
+node_modules
+**/node_modules
+dist
+bindings/node/*.node
+bindings/node/artifacts
+bindings/node/npm
+bindings/node/release
+bindings/node/LICENSE
+bindings/node/THIRD-PARTY-NOTICES.md
+*.tgz

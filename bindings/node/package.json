@@ -1,0 +1,60 @@
+{
+  "name": "@0xcurvy/rs-core-node",
+  "version": "0.1.0-rc.4",
+  "description": "Native Node-API bindings for the Curvy Rust core and Groth16 prover",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xCurvy/rs-core.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://github.com/0xCurvy/rs-core",
+  "bugs": {
+    "url": "https://github.com/0xCurvy/rs-core/issues"
+  },
+  "keywords": [
+    "curvy",
+    "node-api",
+    "napi-rs",
+    "groth16",
+    "zero-knowledge",
+    "bn254"
+  ],
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "provenance": true
+  },
+  "napi": {
+    "binaryName": "curvy_rs_core_node",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "build:release": "node ../../scripts/build-node-release.mjs",
+    "package:metadata": "node ../../scripts/prepare-node-package.mjs",
+    "package:preview": "npm run package:metadata && npm pack --dry-run --ignore-scripts",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.8.5"
+  }
+}

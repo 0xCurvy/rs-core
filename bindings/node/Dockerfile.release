@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:22-bookworm AS build
+
+ARG RUST_VERSION=1.94.0
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      clang \
+      curl \
+      file \
+      lld \
+      llvm \
+      pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
+      https://sh.rustup.rs \
+      | sh -s -- --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path -y
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /src
+COPY . .
+
+RUN cd bindings/node && npm ci
+
+ARG NODE_RELEASE_TARGET
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    case "${NODE_RELEASE_TARGET}" in \
+      linux-x64) \
+        rust_target=x86_64-unknown-linux-gnu; \
+        output=curvy_rs_core_node.linux-x64-gnu.node; \
+        cross_flag=; \
+        ;; \
+      linux-arm64) \
+        rust_target=aarch64-unknown-linux-gnu; \
+        output=curvy_rs_core_node.linux-arm64-gnu.node; \
+        cross_flag=; \
+        ;; \
+      windows-x64) \
+        rust_target=x86_64-pc-windows-msvc; \
+        output=curvy_rs_core_node.win32-x64-msvc.node; \
+        cross_flag=--cross-compile; \
+        ;; \
+      *) \
+        echo "unsupported NODE_RELEASE_TARGET=${NODE_RELEASE_TARGET}" >&2; \
+        exit 2; \
+        ;; \
+    esac; \
+    rustup target add "${rust_target}"; \
+    cd bindings/node; \
+    npm run build -- --target "${rust_target}" ${cross_flag} -- --locked; \
+    if [ "${NODE_RELEASE_TARGET}" != windows-x64 ]; then npm test; fi; \
+    test -s "${output}"; \
+    file "${output}"; \
+    mkdir -p /out; \
+    cp "${output}" /out/
+
+FROM scratch AS artifact
+COPY --from=build /out/ /

@@ -26,6 +26,15 @@ crates/prover/pkg-bundler
 /dist
 *.tgz
 
+# Generated Node-API build and release output. The loader and declarations are
+# tracked; native binaries and per-platform packages are assembled locally.
+bindings/node/*.node
+bindings/node/artifacts
+bindings/node/npm
+bindings/node/release
+bindings/node/LICENSE
+bindings/node/THIRD-PARTY-NOTICES.md
+
 # Local JavaScript tooling.
 node_modules
 

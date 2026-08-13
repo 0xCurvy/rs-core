@@ -1,0 +1,24 @@
+[package]
+name = "curvy-node"
+description = "Native Node-API bindings for the Curvy Rust core and Groth16 prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+curvy-core = { version = "=0.1.0-rc.4", path = "../../crates/core" }
+curvy-prover = { version = "=0.1.0-rc.4", path = "../../crates/prover", features = ["parallel"] }
+napi.workspace = true
+napi-derive.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build.workspace = true
