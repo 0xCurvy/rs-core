@@ -1,14 +1,9 @@
-//! EdDSA-Poseidon over BabyJubjub - a faithful port of `@zk-kit/eddsa-poseidon`'s
-//! default (BLAKE-1 / original BLAKE-512) entry, exposed here as
-//! `pub_from_private_key_hex`, `ephemeral_pub_key` and `sign_hex`.
+//! EdDSA-Poseidon over BabyJubJub, compatible with `@zk-kit/eddsa-poseidon`.
 //!
-//! Parity hazards baked in here (each diverges from circomlibjs):
-//! - the private key is hashed with **original BLAKE-512** (see [`crate::blake512`]);
-//! - `signMessage` computes `S = r + hm·s mod l` with the **un-shifted** pruned
-//!   scalar `s` (not `s >> 3`). Because `pruneBuffer` zeroes the low 3 bits,
-//!   `s = 8·(s>>3)`, so it still verifies - but the `S` *value* differs from
-//!   circomlibjs by a factor of 8. We must match `@zk-kit`, which the on-chain
-//!   `EdDSAPoseidonVerifier` checks.
+//! Compatibility notes:
+//! - Private keys use original BLAKE-512.
+//! - `signMessage` uses the unshifted pruned scalar in `S`. This matches zk-kit
+//!   and the deployed verifier, but differs from circomlibjs.
 
 use std::{fmt, sync::LazyLock};
 
@@ -21,7 +16,7 @@ use crate::babyjubjub::{
     add_point, mul_point_escalar, public_key_from_scalar,
 };
 use crate::blake512::blake512;
-use crate::encoding::{biguint_to_le_bytes, from_hex, le_bytes_to_biguint};
+use crate::encoding::{HexDecodeError, biguint_to_le_bytes, from_hex_exact, le_bytes_to_biguint};
 use crate::field::{Bn254Fr, fr_from_biguint, fr_to_biguint};
 use crate::poseidon::poseidon;
 
@@ -69,6 +64,8 @@ pub struct ScalarSigningKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScalarSignatureError {
     InvalidKey(BabyJubError),
+    /// Seed-backed key material that is not exactly 32 bytes of unprefixed hex.
+    InvalidSeedKey(HexDecodeError),
     NonceCounterExhausted,
     InternalVerificationFailed,
 }
@@ -77,6 +74,7 @@ impl fmt::Display for ScalarSignatureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidKey(e) => write!(f, "invalid scalar signing key: {e}"),
+            Self::InvalidSeedKey(e) => write!(f, "invalid seed-backed signing key: {e}"),
             Self::NonceCounterExhausted => f.write_str("deterministic nonce counter exhausted"),
             Self::InternalVerificationFailed => {
                 f.write_str("scalar signature failed internal verification")
@@ -90,6 +88,12 @@ impl std::error::Error for ScalarSignatureError {}
 impl From<BabyJubError> for ScalarSignatureError {
     fn from(value: BabyJubError) -> Self {
         Self::InvalidKey(value)
+    }
+}
+
+impl From<HexDecodeError> for ScalarSignatureError {
+    fn from(value: HexDecodeError) -> Self {
+        Self::InvalidSeedKey(value)
     }
 }
 
@@ -136,44 +140,40 @@ fn pruned_scalar_buffer(private_key: &[u8]) -> [u8; 32] {
     prune_buffer(h32)
 }
 
-/// `deriveSecretScalar` - `(LE(pruned) >> 3) mod l`.
+/// `deriveSecretScalar`: `(LE(pruned) >> 3) mod l`.
 pub fn derive_secret_scalar(private_key: &[u8]) -> BigUint {
     let pruned = pruned_scalar_buffer(private_key);
     (le_bytes_to_biguint(&pruned) >> 3u32) % &*SUB_ORDER
 }
 
-/// `derivePublicKey` - `deriveSecretScalar(pk) · Base8`.
+/// `derivePublicKey`: `deriveSecretScalar(pk) * Base8`.
 pub fn derive_public_key(private_key: &[u8]) -> Point {
     mul_point_escalar(*BASE8, &derive_secret_scalar(private_key))
 }
 
-/// `pubFromPrivateKey(hex)` - public key from a hex private key
-/// (`Buffer.from(hex, "hex")` semantics: the hex is decoded to raw bytes first).
-pub fn pub_from_private_key_hex(hex: &str) -> Point {
-    derive_public_key(&from_hex(hex))
+/// `pubFromPrivateKey`: public key from exactly 32 bytes of unprefixed hex.
+pub fn pub_from_private_key_hex(hex: &str) -> Result<Point, HexDecodeError> {
+    Ok(derive_public_key(&from_hex_exact::<32>(hex)?))
 }
 
-/// `ephemeralPubKey(scalar)` - `R = scalar · Base8`.
+/// `ephemeralPubKey`: `R = scalar * Base8`.
 pub fn ephemeral_pub_key(scalar: &BigUint) -> Point {
     mul_point_escalar(*BASE8, scalar)
 }
 
-/// `signMessage(private_key, message)` - EdDSA-Poseidon over BabyJubjub.
+/// Signs a raw 256-bit integer with zk-kit EdDSA-Poseidon semantics.
 ///
-/// `message` is a **raw integer**, not a field element: the TS does not reduce it
-/// before packing its little-endian bytes into the `r` derivation, so a message in
-/// `[modulus, 2^256)` produces a different `R8`/`S` than its reduced value would.
-/// The Poseidon input `hm`, by contrast, reduces `message` (Poseidon reduces all
-/// inputs internally). Panics on a message `>= 2^256` (matches the TS 32-byte guard).
+/// Non-reduced messages affect nonce derivation; Poseidon reduces the challenge
+/// input. Panics when `message >= 2^256`.
 pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     let hash = blake512(private_key);
 
     let mut h32 = [0u8; 32];
     h32.copy_from_slice(&hash[0..32]);
-    let s = le_bytes_to_biguint(&prune_buffer(h32)); // un-shifted pruned scalar
+    let s = le_bytes_to_biguint(&prune_buffer(h32)); // zk-kit uses the unshifted scalar.
     let a = mul_point_escalar(*BASE8, &(&s >> 3u32));
 
-    // r = LE(BLAKE-512(hash[32..64] || LE32(message))) mod l  - message un-reduced.
+    // Derive r from the unreduced message bytes.
     let msg_buff = biguint_to_le_bytes(message, 32);
     let mut compose = Vec::with_capacity(64);
     compose.extend_from_slice(&hash[32..64]);
@@ -183,15 +183,15 @@ pub fn sign(message: &BigUint, private_key: &[u8]) -> Signature {
     let r8 = mul_point_escalar(*BASE8, &r);
     let hm = poseidon(&[r8.0, r8.1, a.0, a.1, fr_from_biguint(message)]);
 
-    // S = (r + hm·s) mod l  - s un-shifted (see module note).
+    // Use the unshifted scalar to match zk-kit.
     let s_sig = (r + fr_to_biguint(&hm) * s) % &*SUB_ORDER;
 
     Signature { r8, s: s_sig }
 }
 
-/// `sign(message, privateKeyHex)` - the hex-keyed signing entry point.
-pub fn sign_hex(message: &BigUint, hex: &str) -> Signature {
-    sign(message, &from_hex(hex))
+/// Signs with exactly 32 bytes of unprefixed private-key hex.
+pub fn sign_hex(message: &BigUint, hex: &str) -> Result<Signature, HexDecodeError> {
+    Ok(sign(message, &from_hex_exact::<32>(hex)?))
 }
 
 fn deterministic_scalar_nonce(
@@ -280,4 +280,31 @@ pub fn verify_scalar_compat(
         mul_point_escalar(public.as_tuple(), &e),
     );
     left == right
+}
+
+#[cfg(test)]
+mod hex_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn prefixed_private_keys_fail_loudly() {
+        let message = BigUint::from(1u8);
+        let error = sign_hex(&message, "0xab").unwrap_err();
+        assert!(error.to_string().contains("remove the leading 0x"));
+
+        let error = pub_from_private_key_hex("0xab").unwrap_err();
+        assert!(error.to_string().contains("remove the leading 0x"));
+    }
+
+    #[test]
+    fn short_private_keys_are_rejected() {
+        let error = sign_hex(&BigUint::from(1u8), "ab").unwrap_err();
+        assert_eq!(
+            error,
+            HexDecodeError::WrongLength {
+                expected: 32,
+                actual: 1,
+            }
+        );
+    }
 }

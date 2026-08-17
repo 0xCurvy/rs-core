@@ -82,7 +82,8 @@ fn withdrawal_matches_ts() {
         fr(&s(w, "notesRoot")),
         fr(&s(w, "destinationAddress")),
         fr(&s(w, "tokenId")),
-    );
+    )
+    .expect("fixture key is well-formed seed hex");
     assert_eq!(serde_json::to_value(&rust).unwrap(), w["flat"]);
 }
 
@@ -103,7 +104,8 @@ fn aggregation_matches_ts() {
         fr(&s(a, "protocolFeePerThousand")),
         fr(&s(a, "gasFee")),
         pub_of(&a["feeNotePublicKey"]),
-    );
+    )
+    .expect("fixture key is well-formed seed hex");
     assert_eq!(serde_json::to_value(&rust).unwrap(), a["flat"]);
 }
 

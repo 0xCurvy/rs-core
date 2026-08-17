@@ -1,6 +1,6 @@
 {
   "name": "@0xcurvy/rs-core-node",
-  "version": "0.1.0-rc.4",
+  "version": "0.1.0-rc.5",
   "description": "Native Node-API bindings for the Curvy Rust core and Groth16 prover",
   "license": "MIT",
   "repository": {

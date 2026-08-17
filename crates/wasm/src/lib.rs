@@ -3,15 +3,8 @@
 //!
 //! ## Boundary conventions
 //!
-//! Seed-backed and direct-scalar signing are both supported. Scalar crypto
-//! operations cross the boundary as **decimal strings** (and `Vec<String>` for
-//! points / signatures), matching every existing TS wire shape.
-//! Bulk Merkle operations instead use concatenated canonical 32-byte field
-//! elements so thousands of nodes stay inside wasm.
-//!
-//! Field-element inputs reduce mod the field (`fr_from_dec`); raw 256-bit inputs
-//! (cipher key material, EdDSA message, `sha256BigInt`) are parsed without
-//! reduction (`dec_to_biguint`) - see the core crate for why.
+//! Scalars use decimal strings; bulk Merkle values use packed canonical 32-byte
+//! fields. Field inputs reduce modulo BN254, while raw 256-bit inputs do not.
 
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
@@ -72,11 +65,12 @@ pub fn nullifier(shared_secret: String, pub_x: String, pub_y: String) -> String 
     ))
 }
 
-/// BabyJubjub public key `[x, y]` from a hex private key (`pubFromPrivateKey`).
+/// Returns a BabyJubJub public key or throws for malformed private-key hex.
 #[wasm_bindgen(js_name = pubFromPrivateKey)]
-pub fn pub_from_private_key(private_key_hex: String) -> Vec<String> {
-    let (x, y) = pub_from_private_key_hex(&private_key_hex);
-    vec![fr_to_dec(&x), fr_to_dec(&y)]
+pub fn pub_from_private_key(private_key_hex: String) -> Result<Vec<String>, JsError> {
+    let (x, y) = pub_from_private_key_hex(&private_key_hex)
+        .map_err(|e| JsError::new(&format!("invalid EdDSA private key: {e}")))?;
+    Ok(vec![fr_to_dec(&x), fr_to_dec(&y)])
 }
 
 /// Ephemeral public key `R = scalar · Base8` as `[x, y]` (`ephemeralPubKey`).
@@ -86,15 +80,16 @@ pub fn ephemeral_pub_key_wasm(scalar: String) -> Vec<String> {
     vec![fr_to_dec(&x), fr_to_dec(&y)]
 }
 
-/// EdDSA-Poseidon signature `[R8.x, R8.y, S]` (`sign`).
+/// Returns an EdDSA-Poseidon signature or throws for malformed private-key hex.
 #[wasm_bindgen]
-pub fn sign(message: String, private_key_hex: String) -> Vec<String> {
-    let sig = sign_hex(&dec_to_biguint(&message), &private_key_hex);
-    vec![
+pub fn sign(message: String, private_key_hex: String) -> Result<Vec<String>, JsError> {
+    let sig = sign_hex(&dec_to_biguint(&message), &private_key_hex)
+        .map_err(|e| JsError::new(&format!("invalid EdDSA private key: {e}")))?;
+    Ok(vec![
         fr_to_dec(&sig.r8.0),
         fr_to_dec(&sig.r8.1),
         sig.s.to_string(),
-    ]
+    ])
 }
 
 /// BabyJubJub public key `[x, y] = scalar * Base8` from a canonical subgroup
@@ -192,7 +187,7 @@ pub fn sha256_bigint(inputs: Vec<String>) -> String {
     core_sha256_bigint(&ints).to_string()
 }
 
-// ── Stateful sharded notes tree ──────────────────────────────────────────────
+// Stateful notes trees
 
 /// Generic incremental Merkle tree with a reverse leaf index.
 #[wasm_bindgen(js_name = MerkleTree)]
@@ -803,12 +798,7 @@ fn js_tree_error(error: TreeError) -> JsError {
     JsError::new(&error.to_string())
 }
 
-// ── Domain A: the stealth core. Typed params in, plain decimal/hex string values
-// out - NO JSON envelope; wasm-bindgen passes structured values directly.
-// Multi-value results use `Vec<String>` - the same positional convention Domain B
-// uses for points and signatures - except `scan`, which returns its two PAIRED
-// arrays via a small typed result. Points are "x.y"; view tags and private keys
-// are hex.
+// Stealth API. Points use "x.y"; view tags and private keys use hex.
 
 #[wasm_bindgen]
 pub fn version() -> String {
@@ -830,21 +820,18 @@ pub fn get_meta(k: String, v: String) -> Result<Vec<String>, JsError> {
     Ok(vec![k, v, big_k, big_v])
 }
 
-/// Announce a payment to recipient `(K, V)` → `[r, R, viewTag, spendingPubKey]`.
-/// Throws on malformed / off-curve recipient keys (an unspendable announcement
-/// must never be produced).
+/// Announces a payment as `[r, R, viewTag, spendingPubKey]`.
+/// Throws for malformed or off-curve recipient keys.
 #[wasm_bindgen]
 pub fn send(big_k: String, big_v: String) -> Result<Vec<String>, JsError> {
     let (r, out) = stealth::send(&big_k, &big_v)?;
     Ok(vec![r, out.big_r, out.view_tag, out.spending_pub_key])
 }
 
-/// Recipient scan → the SPARSE list of tag-matching announcements, in input
-/// order: each match carries its `index` into the input arrays plus the derived
-/// one-time keys. Matches are CANDIDATES (1-byte viewTag ⇒ ~1/256 false
-/// positives) - the caller's note-commitment recompute confirms ownership.
-/// Malformed / off-curve announcements are non-matches (skipped), never fatal;
-/// throws only on the caller's own inputs (keys, mismatched array lengths).
+/// Returns tag-matching announcements in input order.
+///
+/// Matches are candidates because one-byte view tags admit false positives.
+/// Malformed announcements are skipped; invalid caller inputs throw.
 #[wasm_bindgen]
 pub fn scan(
     k: String,

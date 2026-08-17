@@ -27,7 +27,7 @@ use num_bigint::BigUint;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::encoding::from_hex;
+use crate::encoding::from_hex_lossy;
 
 // Map announcements → the SPARSE list of matches (the closure returns
 // `Option<Match>`), in input order. With the `parallel` feature the work fans
@@ -120,14 +120,14 @@ fn parse_secp(s: &str, what: &str) -> Result<SecpG1, StealthError> {
 /// Private scalar from big-endian hex, rejecting a zero reduction (a zero spend or
 /// view key would put every derived point at the identity).
 fn parse_secp_scalar(hex: &str, what: &str) -> Result<SecpFr, StealthError> {
-    let s = SecpFr::from_be_bytes_mod_order(&from_hex(hex));
+    let s = SecpFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
     if s.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }
     Ok(s)
 }
 fn parse_bn_scalar(hex: &str, what: &str) -> Result<BnFr, StealthError> {
-    let v = BnFr::from_be_bytes_mod_order(&from_hex(hex));
+    let v = BnFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
     if v.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }

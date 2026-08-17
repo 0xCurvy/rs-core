@@ -1,14 +1,11 @@
-//! Golden-vector parity for the Domain-B primitives against the exact libraries the
-//! SDK uses (@zk-kit/eddsa-poseidon, @zk-kit/baby-jubjub, poseidon-lite, WebCrypto).
+//! Cross-checks Rust crypto primitives against the SDK's reference libraries.
 
 use std::str::FromStr;
 
 use curvy_core::blake512::blake512;
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
-use curvy_core::eddsa::{
-    derive_secret_scalar, ephemeral_pub_key, pub_from_private_key_hex, sign_hex,
-};
-use curvy_core::encoding::from_hex;
+use curvy_core::eddsa::{derive_public_key, derive_secret_scalar, ephemeral_pub_key, sign_hex};
+use curvy_core::encoding::from_hex_lossy;
 use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
 use curvy_core::hash_utils::sha256_bigint;
 use curvy_core::note::{note_id, nullifier, owner_hash};
@@ -159,7 +156,7 @@ fn blake512_matches_zk_kit() {
     let v = load();
     assert!(!v.blake512.is_empty());
     for (i, b) in v.blake512.iter().enumerate() {
-        let digest = blake512(&from_hex(&b.input));
+        let digest = blake512(&from_hex_lossy(&b.input));
         assert_eq!(
             to_hex(&digest),
             b.digest,
@@ -174,7 +171,7 @@ fn derive_secret_scalar_matches() {
     let v = load();
     assert!(!v.derive_secret_scalar.is_empty());
     for (i, d) in v.derive_secret_scalar.iter().enumerate() {
-        let got = derive_secret_scalar(&from_hex(&d.private_key_hex));
+        let got = derive_secret_scalar(&from_hex_lossy(&d.private_key_hex));
         assert_eq!(got, big(&d.scalar), "deriveSecretScalar {i}");
     }
 }
@@ -184,7 +181,8 @@ fn pub_from_private_key_matches() {
     let v = load();
     assert!(!v.pub_from_private_key.is_empty());
     for (i, p) in v.pub_from_private_key.iter().enumerate() {
-        let (x, y) = pub_from_private_key_hex(&p.private_key_hex);
+        // Replay the reference's lossy decoding; strict APIs have separate tests.
+        let (x, y) = derive_public_key(&from_hex_lossy(&p.private_key_hex));
         assert_eq!(fr_to_dec(&x), p.x, "pubFromPrivateKey {i} x");
         assert_eq!(fr_to_dec(&y), p.y, "pubFromPrivateKey {i} y");
     }
@@ -206,7 +204,7 @@ fn sign_matches_zk_kit() {
     let v = load();
     assert!(!v.sign.is_empty());
     for (i, s) in v.sign.iter().enumerate() {
-        let sig = sign_hex(&big(&s.message), &s.private_key_hex);
+        let sig = sign_hex(&big(&s.message), &s.private_key_hex).unwrap();
         assert_eq!(fr_to_dec(&sig.r8.0), s.r8x, "sign {i} R8x");
         assert_eq!(fr_to_dec(&sig.r8.1), s.r8y, "sign {i} R8y");
         assert_eq!(sig.s.to_string(), s.s, "sign {i} S");

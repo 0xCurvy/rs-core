@@ -1,0 +1,20 @@
+[package]
+name = "curvy-debug-cli"
+description = "Non-published interactive debug REPL for the Curvy Rust core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+rust-version.workspace = true
+
+[[bin]]
+name = "curvy-debug"
+path = "src/main.rs"
+
+[dependencies]
+curvy-core = { path = "../../crates/core" }
+curvy-prover = { path = "../../crates/prover" }
+num-bigint.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

@@ -29,7 +29,18 @@ for (const n of p2.noteCommitments) {
 }
 
 // pubFromPrivateKey
+// Reject malformed corpus keys instead of reproducing lossy Buffer decoding.
+const isStrictKey = (hex) => /^[0-9a-fA-F]{64}$/.test(hex);
 for (const p of p2.pubFromPrivateKey) {
+  if (!isStrictKey(p.privateKeyHex)) {
+    assert.throws(
+      () => wasm.pubFromPrivateKey(p.privateKeyHex),
+      /invalid EdDSA private key/,
+      `pubFromPrivateKey must reject ${JSON.stringify(p.privateKeyHex)}`,
+    );
+    checks++;
+    continue;
+  }
   const [x, y] = wasm.pubFromPrivateKey(p.privateKeyHex);
   eq(x, p.x, "pubFromPrivateKey.x");
   eq(y, p.y, "pubFromPrivateKey.y");
