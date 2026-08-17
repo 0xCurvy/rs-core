@@ -157,7 +157,7 @@ writeFileSync(
 for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
   cpSync(join(repoRoot, file), join(outDir, file));
 }
-cpSync(join(repoRoot, "npm/README.md"), join(outDir, "README.md"));
+cpSync(join(repoRoot, "bindings/wasm/README.md"), join(outDir, "README.md"));
 
 if (shouldPack) {
   execFileSync("npm", ["pack", "--pack-destination", repoRoot], { cwd: outDir, stdio: "inherit" });
