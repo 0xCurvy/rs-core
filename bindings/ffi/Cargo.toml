@@ -1,0 +1,25 @@
+[package]
+name = "curvy-ffi"
+description = "C ABI bindings for the Curvy Rust core, witness evaluator, and Groth16 prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "curvy_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+curvy-core = { version = "=0.1.0-rc.5", path = "../../crates/core" }
+curvy-witness = { version = "=0.1.0-rc.5", path = "../../crates/witness" }
+curvy-prover = { version = "=0.1.0-rc.5", path = "../../crates/prover", default-features = false, features = ["std"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# Boundary tests author witness-graph headers, which are self-authenticating.
+sha2.workspace = true
+

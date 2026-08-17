@@ -22,9 +22,18 @@ allow-wildcard-paths = true # ...but allow internal workspace path deps (curvy-c
 [licenses]
 version = 2
 # Permissive licenses only - exactly those present in the dependency tree (arkworks
-# + RustCrypto are MIT/Apache-2.0; a few BSD-3-Clause / Unicode-3.0 / Zlib). Add to this
+# + RustCrypto are MIT/Apache-2.0; a few BSD-3-Clause / Unicode-3.0 / Zlib, and ISC
+# via libloading, which napi-sys uses for the Node-API binding). Add to this
 # list (never remove the gate) if a new vetted dependency introduces another.
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "Unicode-3.0", "Zlib"]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
 confidence-threshold = 0.9
 
 [sources]

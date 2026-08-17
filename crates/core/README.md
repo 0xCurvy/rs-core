@@ -9,7 +9,7 @@ evaluate compiled Circom graphs or generate Groth16 proofs.
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.4"
+curvy-core = "=0.1.0-rc.5"
 ```
 
 Rust 1.94 or newer is required.
@@ -32,7 +32,9 @@ Both signer types implement `NoteSigner` and can be passed to
 use curvy_core::eddsa::ScalarSigningKey;
 use curvy_core::witness::{NoteSigner, SeedNoteSigner};
 
-let seed_signer = SeedNoteSigner::new("000102030405060708090a0b0c0d0e0f");
+let seed_signer = SeedNoteSigner::new(
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+)?;
 let scalar_signer = ScalarSigningKey::from_decimal("1")?;
 
 let _seed_public_key = seed_signer.public_key();
@@ -50,7 +52,7 @@ bulk Merkle-tree construction:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.4", features = ["parallel"] }
+curvy-core = { version = "=0.1.0-rc.5", features = ["parallel"] }
 ```
 
 Native applications can select the global Rayon pool size with

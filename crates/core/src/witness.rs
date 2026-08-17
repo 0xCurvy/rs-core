@@ -1,17 +1,15 @@
-//! Witness builders - native Rust port of `witnessFromNotes.ts` /
-//! `pendingNotesCommitmentInputs.ts`. They produce the **flat snarkjs input
-//! objects** (circom field-declaration order) by composing the ported Domain-B
-//! primitives + the [`crate::imt`] tree. Pure assembly: no randomness, no IO.
+//! Circuit witness builders for withdrawal, aggregation, and pending commitments.
 //!
-//! Inclusion proofs are **supplied** (Mode A, the lean/stateless path): each is
-//! `(leaf_index, siblings)`, matching `SuppliedInclusionProofs`.
+//! Outputs follow flat snarkjs field order and accept supplied inclusion proofs.
 
 use ark_ff::AdditiveGroup;
 use num_bigint::BigUint;
 use serde::Serialize;
+use zeroize::Zeroize;
 
 use crate::cipher::encrypt_amount_token;
-use crate::eddsa::{ScalarSignatureError, ScalarSigningKey, Signature, sign_hex};
+use crate::eddsa::{ScalarSignatureError, ScalarSigningKey, Signature, derive_public_key};
+use crate::encoding::{HexDecodeError, from_hex_exact};
 use crate::field::{Bn254Fr, Fr, fr_to_biguint, fr_to_dec};
 use crate::hash_utils::sha256_bigint;
 use crate::imt::Imt;
@@ -133,38 +131,49 @@ pub trait NoteSigner {
     fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError>;
 }
 
-/// Seed-backed signer for Curvy accounts that use BLAKE/prune key derivation.
-pub struct SeedNoteSigner<'a> {
-    private_key_hex: &'a str,
+/// Seed-backed signer using BLAKE/prune key derivation.
+///
+/// Validates and decodes the seed at construction, so later signing is infallible.
+pub struct SeedNoteSigner {
+    private_key: [u8; 32],
     public_key: (Fr, Fr),
 }
 
-impl<'a> SeedNoteSigner<'a> {
-    /// Derive the public point using the seed-backed BLAKE/prune profile.
-    pub fn new(private_key_hex: &'a str) -> Self {
-        Self {
-            private_key_hex,
-            public_key: crate::eddsa::pub_from_private_key_hex(private_key_hex),
-        }
+impl SeedNoteSigner {
+    /// Derives the public point from a validated seed.
+    pub fn new(private_key_hex: &str) -> Result<Self, HexDecodeError> {
+        let private_key = from_hex_exact::<32>(private_key_hex)?;
+        Ok(Self {
+            public_key: derive_public_key(&private_key),
+            private_key,
+        })
     }
 
-    /// Constructor for established callers that serialize a public point
-    /// separately. New integrations should prefer [`Self::new`], which derives it.
-    fn from_parts(private_key_hex: &'a str, public_key: (Fr, Fr)) -> Self {
-        Self {
-            private_key_hex,
+    /// Restores callers that store the public point separately. Prefer [`Self::new`].
+    fn from_parts(private_key_hex: &str, public_key: (Fr, Fr)) -> Result<Self, HexDecodeError> {
+        Ok(Self {
+            private_key: from_hex_exact::<32>(private_key_hex)?,
             public_key,
-        }
+        })
     }
 }
 
-impl NoteSigner for SeedNoteSigner<'_> {
+impl Drop for SeedNoteSigner {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
+impl NoteSigner for SeedNoteSigner {
     fn public_key(&self) -> (Fr, Fr) {
         self.public_key
     }
 
     fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError> {
-        Ok(sign_hex(&fr_to_biguint(&message), self.private_key_hex))
+        Ok(crate::eddsa::sign(
+            &fr_to_biguint(&message),
+            &self.private_key,
+        ))
     }
 }
 
@@ -180,7 +189,7 @@ impl NoteSigner for ScalarSigningKey {
     }
 }
 
-// ── Withdrawal ──────────────────────────────────────────────────────────────
+// Withdrawal
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
 pub struct WithdrawalWitness {
@@ -209,8 +218,8 @@ pub fn build_withdrawal(
     notes_root: Fr,
     destination_address: Fr,
     token_id: Fr,
-) -> WithdrawalWitness {
-    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key);
+) -> Result<WithdrawalWitness, ScalarSignatureError> {
+    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key)?;
     build_withdrawal_with_signer(
         notes,
         &signer,
@@ -219,7 +228,6 @@ pub fn build_withdrawal(
         destination_address,
         token_id,
     )
-    .expect("seed-backed signing is infallible")
 }
 
 /// Build a withdrawal witness using either a seed-backed or scalar-backed signer.
@@ -251,7 +259,7 @@ pub fn build_withdrawal_with_signer(
     })
 }
 
-// ── Aggregation ─────────────────────────────────────────────────────────────
+// Aggregation
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
 pub struct AggregationWitness {
@@ -293,8 +301,8 @@ pub fn build_aggregation(
     protocol_fee_per_thousand: Fr,
     gas_fee: Fr,
     fee_note_public_key: (Fr, Fr),
-) -> AggregationWitness {
-    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key);
+) -> Result<AggregationWitness, ScalarSignatureError> {
+    let signer = SeedNoteSigner::from_parts(owner_key_hex, public_key)?;
     build_aggregation_with_signer(
         input_notes,
         input_proofs,
@@ -306,7 +314,6 @@ pub fn build_aggregation(
         gas_fee,
         fee_note_public_key,
     )
-    .expect("seed-backed signing is infallible")
 }
 
 /// Build an aggregation witness using either a seed-backed or scalar-backed
@@ -359,7 +366,7 @@ pub fn build_aggregation_with_signer(
     })
 }
 
-// ── Pending-notes commitment ────────────────────────────────────────────────
+// Pending-notes commitment
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
 pub struct PendingCommitmentWitness {
@@ -427,5 +434,68 @@ pub fn build_pending_commitment(
             .map(|row| row.iter().map(fr_to_dec).collect())
             .collect(),
         new_notes_root: fr_to_dec(&new_notes_root),
+    }
+}
+
+#[cfg(test)]
+mod seed_signer_tests {
+    use super::*;
+    use crate::encoding::HexDecodeError;
+
+    const GOOD_SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    /// Malformed seeds return errors without exposing key material in Debug output.
+    // Use `.err()` because `SeedNoteSigner` intentionally omits `Debug`.
+    #[test]
+    fn malformed_seeds_are_rejected_not_panicked_on() {
+        let error = SeedNoteSigner::new("0xab")
+            .err()
+            .expect("prefix is rejected");
+        assert!(error.to_string().contains("remove the leading 0x"));
+
+        assert_eq!(
+            SeedNoteSigner::new("ab")
+                .err()
+                .expect("short hex is rejected"),
+            HexDecodeError::WrongLength {
+                expected: 32,
+                actual: 1,
+            }
+        );
+    }
+
+    /// A constructed signer can sign without parsing again.
+    #[test]
+    fn a_constructed_signer_signs_infallibly() {
+        let signer = SeedNoteSigner::new(GOOD_SEED).expect("well-formed seed");
+        assert!(signer.sign(Fr::from(42_u8)).is_ok());
+        assert_eq!(
+            signer.public_key(),
+            crate::eddsa::pub_from_private_key_hex(GOOD_SEED).expect("well-formed seed")
+        );
+    }
+
+    /// Seed-keyed builders return parsing errors instead of panicking.
+    #[test]
+    fn builders_surface_malformed_seed_keys() {
+        let error = build_withdrawal(
+            &[],
+            "0xab",
+            (Fr::ZERO, Fr::ZERO),
+            &[],
+            Fr::ZERO,
+            Fr::ZERO,
+            Fr::ZERO,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ScalarSignatureError::InvalidSeedKey(_)),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("invalid seed-backed signing key")
+        );
     }
 }
