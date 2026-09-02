@@ -18,7 +18,7 @@ default-members = ["crates/core", "crates/witness"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.1.0-rc.5"
+version = "0.1.0-rc.6"
 publish = true
 repository = "https://github.com/0xCurvy/rs-core"
 homepage = "https://github.com/0xCurvy/rs-core"

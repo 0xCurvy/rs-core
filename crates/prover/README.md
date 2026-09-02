@@ -12,7 +12,7 @@ as the standalone prover WASM module.
 
 ```toml
 [dependencies]
-curvy-prover = "=0.1.0-rc.5"
+curvy-prover = "=0.1.0-rc.6"
 ```
 
 ## Prove from circuit input JSON

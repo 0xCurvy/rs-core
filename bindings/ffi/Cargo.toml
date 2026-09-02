@@ -14,9 +14,9 @@ name = "curvy_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.5", path = "../../crates/core" }
-curvy-witness = { version = "=0.1.0-rc.5", path = "../../crates/witness" }
-curvy-prover = { version = "=0.1.0-rc.5", path = "../../crates/prover", default-features = false, features = ["std"] }
+curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
+curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness" }
+curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", default-features = false, features = ["std"] }
 serde_json.workspace = true
 
 [dev-dependencies]

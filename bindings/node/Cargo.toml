@@ -13,8 +13,8 @@ rust-version.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.5", path = "../../crates/core" }
-curvy-prover = { version = "=0.1.0-rc.5", path = "../../crates/prover", features = ["parallel"] }
+curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
+curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", features = ["parallel"] }
 napi.workspace = true
 napi-derive.workspace = true
 rayon.workspace = true
