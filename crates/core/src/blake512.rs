@@ -7,6 +7,8 @@
 //! reference; cross-language parity vectors pin its behavior and prevent an
 //! accidental substitution with the incompatible BLAKE2 family.
 
+use zeroize::{Zeroize, Zeroizing};
+
 /// BLAKE-512 initial hash value (IV).
 const IV: [u64; 8] = [
     0x6a09e667f3bcc908,
@@ -115,6 +117,16 @@ pub struct Blake512 {
     nullt: bool,
 }
 
+impl Drop for Blake512 {
+    fn drop(&mut self) {
+        self.h.zeroize();
+        self.block.zeroize();
+        self.block_offset.zeroize();
+        self.length.zeroize();
+        self.nullt.zeroize();
+    }
+}
+
 impl Default for Blake512 {
     fn default() -> Self {
         Self::new()
@@ -133,14 +145,14 @@ impl Blake512 {
     }
 
     fn compress(&mut self) {
-        let mut m = [0u64; 16];
+        let mut m = Zeroizing::new([0u64; 16]);
         for (i, word) in m.iter_mut().enumerate() {
-            let mut b = [0u8; 8];
+            let mut b = Zeroizing::new([0u8; 8]);
             b.copy_from_slice(&self.block[i * 8..i * 8 + 8]);
-            *word = u64::from_be_bytes(b);
+            *word = u64::from_be_bytes(*b);
         }
 
-        let mut v = [0u64; 16];
+        let mut v = Zeroizing::new([0u64; 16]);
         v[..8].copy_from_slice(&self.h);
         v[8..16].copy_from_slice(&C[..8]); // salt is zero: v[8..12] = s ^ C[0..4] = C[0..4]
 

@@ -63,7 +63,7 @@ try {
 
   run("docker", ["version", "--format", "{{.Server.Version}}"], root, {}, 15_000);
   run("docker", ["buildx", "version"], root, {}, 15_000);
-  run("npm", ["ci"], packageDir, {
+  run("npm", ["ci", "--ignore-scripts"], packageDir, {
     npm_config_cache: join(tmpdir(), "curvy-rs-core-node-npm-cache"),
   });
 
@@ -78,9 +78,7 @@ try {
     packageDir,
     { MACOSX_DEPLOYMENT_TARGET: "11.0" },
   );
-  run("npm", ["test"], packageDir, {
-    NAPI_RS_NATIVE_LIBRARY_PATH: join(packageDir, targets[0].filename),
-  });
+  run("npm", ["test"], packageDir);
   verifyBinary(targets[0], join(packageDir, targets[0].filename));
   copyFileSync(join(packageDir, targets[0].filename), join(artifactsDir, targets[0].filename));
 

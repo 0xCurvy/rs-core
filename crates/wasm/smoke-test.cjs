@@ -100,8 +100,29 @@ assert.equal(
   true,
 );
 checks++;
+eq(
+  wasm.verifyMerkleProof(genericProof.leaf, genericProof.index + 2 ** generic.depth, genericProof.siblings, genericProof.root),
+  false,
+  "Merkle proof rejects index above its capacity",
+);
 genericProof.free();
 generic.free();
+
+const singleton = new wasm.MerkleTree(0);
+eq(singleton.leafCount, 0, "depth-zero tree starts empty");
+eq(field(singleton.root()), 0n, "empty depth-zero root");
+eq(singleton.insert(be32(7n)), 0, "depth-zero first insertion");
+const singletonProof = singleton.proofAt(0);
+eq(singletonProof.siblings.length, 0, "depth-zero proof has no siblings");
+eq(wasm.verifyMerkleProof(singletonProof.leaf, 0, singletonProof.siblings, singletonProof.root), true, "depth-zero proof verifies");
+eq(wasm.verifyMerkleProof(singletonProof.leaf, 1, singletonProof.siblings, singletonProof.root), false, "depth-zero proof rejects nonzero index");
+assert.throws(() => singleton.insert(be32(8n)), /full/);
+checks++;
+singleton.truncate(0);
+eq(singleton.leafCount, 0, "depth-zero truncate empties the tree");
+eq(singleton.insert(be32(8n)), 0, "depth-zero insertion after truncate");
+singletonProof.free();
+singleton.free();
 
 const tree = new wasm.ShardedNotesTree(8, 3);
 for (const i of [2, 9, 19]) tree.markOwned(be32(leaves[i]), i);
@@ -186,3 +207,74 @@ restored.free();
 tree.free();
 
 console.log(`WASM parity smoke test: ${checks} checks passed (Rust→wasm→JS == TS oracle)`);
+
+// Malformed boundary inputs throw JS Errors, preserve the module, and redact values.
+const healthyPoseidon = wasm.poseidon(["1"]);
+const secretSentinel = "PRIVATE_SENTINEL_1e+21";
+for (const invoke of [
+  () => wasm.ownerHash("1", "2", "1e+21"),
+  () => wasm.ownerHash("1", "2", secretSentinel),
+  () => wasm.poseidon([]), () => wasm.poseidon(Array(17).fill("1")),
+  () => wasm.poseidon([secretSentinel]), () => wasm.noteId(secretSentinel, "1", "1"),
+  () => wasm.nullifier(secretSentinel,"1","1"), () => wasm.ephemeralPubKey(secretSentinel),
+  () => wasm.ephemeralPubKey((1n << 256n).toString()),
+  () => wasm.sign(secretSentinel,"ab".repeat(32)), () => wasm.sign("9".repeat(79),"ab".repeat(32)),
+  () => wasm.sha256BigInt([secretSentinel]), () => wasm.sha256BigInt(["9".repeat(79)]),
+  () => wasm.encryptAmountToken("1","1",secretSentinel,"1","1"),
+  () => wasm.decryptAmountToken("1","1",secretSentinel,"1","1"),
+]) {
+  assert.throws(invoke, error => error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && !error.message.includes(secretSentinel));
+  assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
+  checks++;
+}
+console.log(`Boundary and parity checks: ${checks}`);
+
+// Raw ephemeral scalars include zero and values above the subgroup order.
+assert.deepEqual(wasm.ephemeralPubKey("0"), ["0", "1"]);
+assert.deepEqual(wasm.ephemeralPubKey("1"), wasm.pubFromScalar("1"));
+const babyjubVectors = require("../core/testdata/babyjubjub_vectors.json");
+for (const vector of babyjubVectors.mulPointEscalar) {
+  assert.deepEqual(wasm.ephemeralPubKey(vector.scalar), [vector.x, vector.y]);
+}
+console.log(`Ephemeral scalar regressions: ${babyjubVectors.mulPointEscalar.length + 2} checks passed`);
+
+const assertBoundaryError = invoke => assert.throws(invoke, error =>
+  error instanceof Error && !(error instanceof WebAssembly.RuntimeError));
+const importedSeed = new Uint8Array(32).fill(1);
+const importedScalar = new Uint8Array(32);
+importedScalar[0] = 7;
+const seedSigner = new wasm.SeedSigner(importedSeed);
+const scalarSigner = new wasm.ScalarSigner(importedScalar);
+importedSeed.fill(0);
+importedScalar.fill(0);
+try {
+  assert.deepEqual(seedSigner.publicKey(), wasm.pubFromPrivateKey("01".repeat(32)));
+  assert.deepEqual(scalarSigner.publicKey(), wasm.pubFromScalar("7"));
+  for (const message of ["0", "42", "123456789"]) {
+    assert.deepEqual(seedSigner.sign(message), wasm.sign(message, "01".repeat(32)));
+    assert.deepEqual(scalarSigner.sign(message), wasm.signWithScalar(message, "7"));
+  }
+  assertBoundaryError(() => seedSigner.sign((1n << 256n).toString()));
+  assertBoundaryError(() => scalarSigner.sign("invalid"));
+} finally {
+  seedSigner.free();
+  scalarSigner.free();
+}
+assertBoundaryError(() => seedSigner.sign("42"));
+assertBoundaryError(() => scalarSigner.publicKey());
+for (const size of [0, 1, 31, 33, 100000]) {
+  assertBoundaryError(() => new wasm.SeedSigner(new Uint8Array(size)));
+  assertBoundaryError(() => new wasm.ScalarSigner(new Uint8Array(size)));
+  assertBoundaryError(() => wasm.ephemeralPubKeyBytes(new Uint8Array(size)));
+}
+assertBoundaryError(() => new wasm.ScalarSigner(new Uint8Array(32)));
+assertBoundaryError(() => new wasm.ScalarSigner(new Uint8Array(32).fill(255)));
+for (const invalid of [null, undefined, "1".repeat(32), Array(32).fill(1)]) {
+  assertBoundaryError(() => new wasm.SeedSigner(invalid));
+  assertBoundaryError(() => new wasm.ScalarSigner(invalid));
+  assertBoundaryError(() => wasm.ephemeralPubKeyBytes(invalid));
+}
+assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32)), ["0", "1"]);
+assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32).fill(255)), wasm.ephemeralPubKey(((1n << 256n) - 1n).toString()));
+assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
+console.log("Byte-input and signer lifecycle regressions passed");

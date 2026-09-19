@@ -2,9 +2,8 @@
 
 use std::{env, fs, fs::File, io::Seek, io::SeekFrom, time::Instant};
 
-use curvy_prover::sparrow::{
-    SparrowConfig, SparrowProver, authenticate_reader, prove_reader_owned,
-};
+use curvy_prover::sparrow::{authenticate_reader, prove_reader_owned};
+use curvy_prover::{StreamingConfig, StreamingProver};
 use curvy_witness::Limits;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,14 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "batch" => Limits::batch_prover(),
         _ => return Err("limits must be client or batch".into()),
     };
-    let config = SparrowConfig::default();
+    let config = StreamingConfig::default();
     let total_started = Instant::now();
 
     let graph_read_started = Instant::now();
     let graph = fs::read(&args[3])?;
     let graph_read_ms = graph_read_started.elapsed().as_secs_f64() * 1_000.0;
     let graph_compile_started = Instant::now();
-    let prover = SparrowProver::from_signet_bytes(&graph, &args[4], &args[2], limits, config)?;
+    let prover = StreamingProver::from_signet_bytes(&graph, &args[4], &args[2], limits, config)?;
     let graph_compile_ms = graph_compile_started.elapsed().as_secs_f64() * 1_000.0;
     drop(graph);
 
@@ -36,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let witness_started = Instant::now();
     let assignment = prover.calculate_witness_json(&input)?;
     let witness_ms = witness_started.elapsed().as_secs_f64() * 1_000.0;
+    let prover_mode = prover.mode();
+    let profile = prover.profile();
     let sage_slots = prover.sage_slot_count();
     let assignment_size = prover.assignment_size();
     // This harness proves once. Releasing the compiled SAGE instruction stream
@@ -52,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bundle = prove_reader_owned(&mut zkey, assignment, &args[2], config)?;
     let proof_ms = proof_started.elapsed().as_secs_f64() * 1_000.0;
 
+    println!("prover_mode={prover_mode}");
+    println!("profile={profile}");
     println!("threads={threads}");
     println!("zkey_bytes={}", fs::metadata(&args[1])?.len());
     println!("graph_bytes={}", fs::metadata(&args[3])?.len());

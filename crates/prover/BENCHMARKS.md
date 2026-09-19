@@ -1,15 +1,21 @@
 # Prover benchmarks
 
-These measurements help integrators choose between the ordinary whole-key
-prover and SPARROW, and decide whether an origin-local SAGE cache is worthwhile.
-They are reference points, not capacity guarantees.
+Current resident loader, SAGE, queue, and scratch results are in
+[the 5 September report](../../RESIDENT_OPTIMIZATIONS.md). The earlier
+[reader comparison](../../READER_STARTUP_BENCHMARKS.md) has a correction: its
+previous/fixed binary labels did not identify distinct builds.
+
+These measurements help integrators choose between the HAWK `ResidentProver`
+and SPARROW `StreamingProver`, and decide whether an origin-local SAGE cache is
+worthwhile. They are reference points, not capacity guarantees.
 
 ## Method
 
 The native comparison used an Apple M4 Pro with 14 CPU cores and 48 GiB of RAM,
 a release build, 13 Rayon threads, warm local files, and authenticated artifacts.
-Each timing is the median of three paired runs. Every proof self-verified. Peak
-RSS came from a separate macOS `time -l` run at the same configuration.
+Each timing is the median of seven alternating runs after one warm-up. Every
+proof self-verified. Peak RSS came from a separate macOS `time -l` run at the
+same configuration.
 
 The two representative circuits are identified by assignment size instead of a
 product-specific circuit name:
@@ -17,17 +23,17 @@ product-specific circuit name:
 - medium: 224,505 BN254 witness fields;
 - large: 1,583,596 BN254 witness fields.
 
-`SPARROW total` includes WTNS and manifest decoding, one authenticated zkey pass,
-proof construction, and self-verification. `Whole-key total` includes zkey read,
-authentication, parsing, the same WTNS, proof construction, and
-self-verification.
+`SPARROW total` includes authenticated SAGE loading, input evaluation, manifest
+decoding, one authenticated zkey pass, proof construction, and
+self-verification. `Whole-key total` includes SIGNET v2 and compact-matrix zkey
+loading, input evaluation, proof construction, and self-verification.
 
-## Whole-key prover compared with SPARROW
+## Resident prover (HAWK) compared with streaming prover (SPARROW)
 
-| Circuit | SPARROW total | Whole-key total | Latency difference | SPARROW RSS | Whole-key RSS | RSS reduction |
+| Circuit | Warm SPARROW total | Optimized whole-key total | Latency difference | SPARROW RSS | Whole-key RSS | RSS reduction |
 |---|---:|---:|---:|---:|---:|---:|
-| Medium | 463 ms | 451 ms | +2.7% | 167.8 MiB | 440.4 MiB | 61.9% |
-| Large | 3.208 s | 3.188 s | +0.6% | 541 MiB | 2.83 GiB | 81.3% |
+| Medium | 495.155 ms | 482.349 ms | +2.7% | 205.7 MiB | 253.8 MiB | 19.0% |
+| Large | 3,455.497 ms | 3,453.205 ms | +0.1% | 506.3 MiB | 1,696.0 MiB | 70.1% |
 
 On these profiles, SPARROW preserved approximately the whole-key latency while
 substantially reducing peak memory. The benefit grows with proving-key size
@@ -47,8 +53,8 @@ hashes and validates the stored program.
 
 | Circuit | SIGNET source | SAGE program | Cold CPU | Warm load |
 |---|---:|---:|---:|---:|
-| Medium | 1.62 MiB | 18.62 MiB | 77.4 ms | 18.7 ms |
-| Large | 9.43 MiB | 125.67 MiB | 536.7 ms | 128.2 ms |
+| Medium | 1.62 MiB | 18.62 MiB | 75.614 ms | 18.772 ms |
+| Large | 9.43 MiB | 125.67 MiB | 514.306 ms | 127.210 ms |
 
 The cache trades origin quota and higher first-use peak memory for lower warm
 startup CPU. Cache only active circuit profiles on quota-constrained devices.
@@ -57,7 +63,7 @@ state and must be validated on every load.
 
 ## Tuning guidance
 
-Native SPARROW should start with `SparrowConfig::native_adaptive()`. The measured
+Native SPARROW should start with `StreamingConfig::native_adaptive()`. The measured
 query-size policy selects smaller windows for small queries and larger windows
 for large queries. Browser and mobile builds should use fixed settings measured
 on their target devices.

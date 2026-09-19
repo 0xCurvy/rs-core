@@ -30,8 +30,8 @@ for (const [subpath, binary] of [
     // rather than in a consumer.
     const digest = entry.poseidon(["1", "2"]);
     if (!/^\d+$/.test(digest)) throw new Error(`core poseidon returned ${digest}`);
-  } else if (typeof entry.WasmCircuitProver !== "function") {
-    throw new Error("prover is missing WasmCircuitProver");
+  } else if (typeof entry.WasmResidentProver !== "function") {
+    throw new Error("prover is missing WasmResidentProver");
   }
   console.log(`${subpath.padEnd(14)} instantiated`);
 }

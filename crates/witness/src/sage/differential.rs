@@ -275,7 +275,7 @@ fn sage_matches_the_default_evaluator_on_random_graphs() {
 
         // Version 2 only exists behind `signet`, so it is only a differential
         // target when that feature is on.
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         {
             let v2 = encode(2, &records, &signals, input_buffer_len);
             let (reference_v2, sage_v2) = assignments(&v2, &input);
@@ -317,9 +317,9 @@ fn sage_rejects_every_graph_the_default_parser_rejects() {
     let total = iterations(600);
     let accepted = sharded(total, 0xC0FF_EE00_1234_5678, |rng, shard| {
         let (records, signals, input_buffer_len) = random_graph(rng);
-        #[cfg(feature = "signet")]
+        #[cfg(feature = "signet-v2")]
         let mut bytes = encode(2, &records, &signals, input_buffer_len);
-        #[cfg(not(feature = "signet"))]
+        #[cfg(not(feature = "signet-v2"))]
         let mut bytes = encode(1, &records, &signals, input_buffer_len);
         // Corrupt one byte anywhere past the header.
         let position = 64 + rng.below(bytes.len() - 64);

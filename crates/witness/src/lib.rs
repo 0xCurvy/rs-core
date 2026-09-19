@@ -33,6 +33,9 @@
 #[cfg(feature = "sage")]
 pub mod sage;
 
+mod workspace;
+pub use workspace::WitnessWorkspace;
+
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
@@ -40,7 +43,8 @@ use std::io::{Cursor, Read};
 use ark_bn254::Fr;
 use ark_ff::{BigInt, BigInteger, Field, PrimeField, Zero};
 use num_bigint::BigUint;
-use serde_json::Value;
+mod input;
+use input::build_input_buffer;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -281,8 +285,8 @@ pub enum WitnessError {
     },
     #[error("witness input {name:?} contains an unsupported JSON value")]
     InvalidInputValue { name: String },
-    #[error("witness input {name:?} contains invalid decimal field value {value:?}")]
-    InvalidFieldValue { name: String, value: String },
+    #[error("witness input contains an invalid decimal field value")]
+    InvalidFieldValue,
     #[error("division or modulus by zero at graph node {0}")]
     DivisionByZero(usize),
     #[error("shift at graph node {0} is not in 0..256")]
@@ -432,6 +436,7 @@ enum NodeRecord {
 /// Authenticated header fields, already range-checked against the configured maxima.
 #[derive(Debug, Clone, Copy)]
 struct Header {
+    magic: [u8; 8],
     version: FormatVersion,
     r1cs_sha256: [u8; 32],
     node_count: usize,
@@ -462,6 +467,21 @@ pub struct WitnessGraph {
     input_mapping: Vec<InputMapping>,
     input_buffer_len: usize,
     r1cs_sha256: [u8; 32],
+    magic: [u8; 8],
+    format_version: u16,
+}
+
+/// Metadata from a fully parsed graph, independent of artifact compression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphMetadata {
+    pub magic: [u8; 8],
+    pub format_version: u16,
+    pub field_identifier: u16,
+    pub r1cs_sha256: [u8; 32],
+    pub node_count: usize,
+    pub signal_count: usize,
+    pub input_mapping_count: usize,
+    pub input_buffer_len: usize,
 }
 
 impl WitnessGraph {
@@ -493,8 +513,37 @@ impl WitnessGraph {
 
     /// Evaluate JSON circuit signals directly into the arkworks assignment.
     pub fn calculate_json(&self, input_json: &str) -> Result<Vec<Fr>, WitnessError> {
-        let inputs = self.parse_inputs(input_json)?;
-        let mut values = reserved_vec("evaluation values", self.nodes.len())?;
+        let mut values = zeroize::Zeroizing::new(Vec::new());
+        let mut assignment = zeroize::Zeroizing::new(Vec::new());
+        self.calculate_json_into(input_json, &mut values, &mut assignment)?;
+        Ok(std::mem::take(&mut *assignment))
+    }
+
+    /// Consume a witness while reusing bounded buffers. Buffers are zeroized
+    /// before returning, including on errors or panic unwinding.
+    pub fn with_witness_json<T>(
+        &self,
+        input_json: &str,
+        workspace: &mut crate::WitnessWorkspace,
+        consume: impl FnOnce(&[Fr]) -> T,
+    ) -> Result<T, WitnessError> {
+        let lease = crate::workspace::Lease(workspace);
+        self.calculate_json_into(input_json, &mut lease.0.values, &mut lease.0.assignment)?;
+        Ok(consume(&lease.0.assignment))
+    }
+
+    fn calculate_json_into(
+        &self,
+        input_json: &str,
+        values: &mut Vec<Fr>,
+        assignment: &mut Vec<Fr>,
+    ) -> Result<(), WitnessError> {
+        let inputs = zeroize::Zeroizing::new(self.parse_inputs(input_json)?);
+        values
+            .try_reserve(self.nodes.len())
+            .map_err(|_| WitnessError::AllocationFailed {
+                section: "evaluation values",
+            })?;
         for (index, node) in self.nodes.iter().enumerate() {
             let value = match *node {
                 Node::Input(input) => inputs[input],
@@ -506,12 +555,20 @@ impl WitnessGraph {
             };
             values.push(value);
         }
-        let mut assignment = reserved_vec("witness assignment", self.signals.len())?;
+        // Input nodes have copied every value they need into `values`; release
+        // the potentially large, JSON-derived input buffer before allocating
+        // the full witness assignment.
+        drop(inputs);
+        assignment
+            .try_reserve(self.signals.len())
+            .map_err(|_| WitnessError::AllocationFailed {
+                section: "witness assignment",
+            })?;
         assignment.extend(self.signals.iter().map(|index| values[*index]));
         if assignment.first().copied() != Some(Fr::from(1_u64)) {
             return Err(WitnessError::InvalidAssignmentOne);
         }
-        Ok(assignment)
+        Ok(())
     }
 
     pub fn assignment_size(&self) -> usize {
@@ -520,6 +577,20 @@ impl WitnessGraph {
 
     pub fn r1cs_sha256(&self) -> [u8; 32] {
         self.r1cs_sha256
+    }
+
+    /// Return validated metadata for release manifests and artifact inspection.
+    pub fn metadata(&self) -> GraphMetadata {
+        GraphMetadata {
+            magic: self.magic,
+            format_version: self.format_version,
+            field_identifier: FIELD_BN254_FR,
+            r1cs_sha256: self.r1cs_sha256,
+            node_count: self.nodes.len(),
+            signal_count: self.signals.len(),
+            input_mapping_count: self.input_mapping.len(),
+            input_buffer_len: self.input_buffer_len,
+        }
     }
 
     fn parse_inputs(&self, input_json: &str) -> Result<Vec<Fr>, WitnessError> {
@@ -578,56 +649,6 @@ fn is_zstd_artifact(bytes: &[u8]) -> bool {
         return false;
     };
     magic == u32::from_le_bytes(ZSTD_MAGIC)
-}
-
-/// Turn circuit-input JSON into the flat input buffer both evaluators consume.
-fn build_input_buffer(
-    input_mapping: &[InputMapping],
-    input_buffer_len: usize,
-    input_json: &str,
-    limits: &Limits,
-) -> Result<Vec<Fr>, WitnessError> {
-    if input_json.len() > limits.input_json_bytes {
-        return Err(WitnessError::InputTooLarge {
-            maximum: limits.input_json_bytes,
-        });
-    }
-    let value: Value = serde_json::from_str(input_json).map_err(WitnessError::InvalidInputJson)?;
-    let object = value.as_object().ok_or(WitnessError::InputNotObject)?;
-    // Circom graph evaluation leaves omitted input signals at zero.
-    let mut inputs = reserved_vec("input values", input_buffer_len)?;
-    inputs.resize(input_buffer_len, Fr::from(0_u64));
-    inputs[0] = Fr::from(1_u64);
-    let mut matched = reserved_vec("input mapping matches", input_mapping.len())?;
-    matched.resize(input_mapping.len(), false);
-
-    for (name, value) in object {
-        let hash = fnv1a(name);
-        let Some((mapping_index, mapping)) = input_mapping
-            .iter()
-            .enumerate()
-            .find(|(_, mapping)| mapping.hash == hash)
-        else {
-            return Err(WitnessError::UnknownInput(name.clone()));
-        };
-        if matched[mapping_index] {
-            return Err(WitnessError::InputHashCollision(hash));
-        }
-        let mut flattened = reserved_vec("flattened input", mapping.signal_size)?;
-        flatten_input(name, value, mapping.signal_size, &mut flattened)?;
-        if flattened.len() != mapping.signal_size {
-            return Err(WitnessError::InputLength {
-                name: name.clone(),
-                expected: mapping.signal_size,
-                actual: flattened.len(),
-            });
-        }
-        let end = mapping.signal_id + mapping.signal_size;
-        inputs[mapping.signal_id..end].copy_from_slice(&flattened);
-        matched[mapping_index] = true;
-    }
-
-    Ok(inputs)
 }
 
 fn decompress_graph(bytes: &[u8], limits: &Limits) -> Result<Vec<u8>, WitnessError> {
@@ -769,6 +790,12 @@ fn parse_graph(bytes: &[u8], limits: Limits) -> Result<WitnessGraph, WitnessErro
         input_mapping,
         input_buffer_len: header.input_buffer_len,
         r1cs_sha256: header.r1cs_sha256,
+        magic: header.magic,
+        format_version: match header.version {
+            FormatVersion::V1 => FORMAT_VERSION_V1,
+            #[cfg(feature = "signet-v2")]
+            FormatVersion::V2 => FORMAT_VERSION_V2,
+        },
     })
 }
 
@@ -813,6 +840,7 @@ fn read_header<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Header, Reader<'
     }
     Ok((
         Header {
+            magic,
             version,
             r1cs_sha256,
             node_count,
@@ -1039,50 +1067,6 @@ fn validate_reference(index: usize, reference: usize) -> Result<(), WitnessError
         return Err(WitnessError::ForwardReference { index, reference });
     }
     Ok(())
-}
-
-fn flatten_input(
-    name: &str,
-    value: &Value,
-    limit: usize,
-    output: &mut Vec<Fr>,
-) -> Result<(), WitnessError> {
-    if output.len() >= limit {
-        return Err(WitnessError::InputLength {
-            name: name.to_owned(),
-            expected: limit,
-            actual: output.len() + 1,
-        });
-    }
-    match value {
-        Value::String(value) => output.push(parse_field(name, value)?),
-        Value::Number(value) => output.push(parse_field(name, &value.to_string())?),
-        Value::Array(values) => {
-            for value in values {
-                flatten_input(name, value, limit, output)?;
-            }
-        }
-        _ => {
-            return Err(WitnessError::InvalidInputValue {
-                name: name.to_owned(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn parse_field(name: &str, value: &str) -> Result<Fr, WitnessError> {
-    let (negative, digits) = value
-        .strip_prefix('-')
-        .map_or((false, value), |digits| (true, digits));
-    let integer = BigUint::parse_bytes(digits.as_bytes(), 10).ok_or_else(|| {
-        WitnessError::InvalidFieldValue {
-            name: name.to_owned(),
-            value: value.to_owned(),
-        }
-    })?;
-    let field = Fr::from_be_bytes_mod_order(&integer.to_bytes_be());
-    Ok(if negative { -field } else { field })
 }
 
 fn compare_balanced(left: Fr, right: Fr) -> Ordering {
@@ -1424,6 +1408,17 @@ mod tests {
         let compressed = compress_to_vec(bytes.as_slice(), CompressionLevel::Uncompressed);
         let graph = WitnessGraph::from_bytes(&compressed, &digest(&compressed))
             .expect("compressed graph must parse");
+        let raw = WitnessGraph::from_bytes(&bytes, &digest(&bytes)).unwrap();
+        assert_eq!(graph.metadata(), raw.metadata());
+        let metadata = graph.metadata();
+        assert_eq!(metadata.magic, *MAGIC);
+        assert_eq!(metadata.format_version, FORMAT_VERSION_V1);
+        assert_eq!(metadata.field_identifier, FIELD_BN254_FR);
+        assert_eq!(metadata.r1cs_sha256, [7; 32]);
+        assert_eq!(metadata.node_count, 4);
+        assert_eq!(metadata.signal_count, 2);
+        assert_eq!(metadata.input_mapping_count, 1);
+        assert_eq!(metadata.input_buffer_len, 2);
         let assignment = graph
             .calculate_json(r#"{"a":"5"}"#)
             .expect("compressed graph must evaluate");

@@ -1,6 +1,6 @@
 import {
   cachedArtifactBytes,
-  loadOrCompileSageProver,
+  loadOrCompileStreamingProver,
   proveCachedZkeyOnePass,
   sha256Hex,
 } from "./sparrow-cache-api.mjs";
@@ -46,7 +46,7 @@ export async function runProof({
 
   onProgress("prover", "Loading or compiling the derived SAGE evaluator");
   const proverStarted = performance.now();
-  const sage = await loadOrCompileSageProver({
+  const sage = await loadOrCompileStreamingProver({
     wasm,
     cache,
     graphUrl: profile.artifacts.graph.url,
@@ -90,6 +90,8 @@ export async function runProof({
 
   return {
     timestamp: new Date().toISOString(),
+    proverMode: prover.mode,
+    proverProfile: prover.profile,
     profileId: profile.id,
     profileLabel: profile.label,
     settings,

@@ -9,7 +9,7 @@
 //! completed roots and owned paths. The stateless [`sharded_root`] and
 //! [`sharded_witness`] helpers remain parity oracles.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -191,6 +191,7 @@ pub struct Imt {
 
 impl Imt {
     /// An empty tree of the given depth. `root()` is the empty-tree root `Z[depth]`.
+    /// Panics if the capacity `2^depth` cannot fit in `usize`.
     pub fn new(depth: usize) -> Self {
         Self::new_with_zero(depth, Fr::ZERO)
     }
@@ -199,10 +200,16 @@ impl Imt {
     ///
     /// The sharded tree uses this for its cap: an empty cap leaf represents an
     /// entire empty shard, so its zero is `Z[shard_height]`, not field zero.
+    /// Panics if the capacity `2^depth` cannot fit in `usize`.
     pub fn new_with_zero(depth: usize, zero_leaf: Fr) -> Self {
+        tree_capacity(depth).expect("imt: capacity overflow");
         let z = zero_roots_from(depth, zero_leaf);
         let mut nodes = vec![Vec::new(); depth + 1];
-        nodes[depth] = vec![z[depth]]; // root of the empty tree
+        // At depth zero, the root and the leaf row coincide. Keep that row
+        // empty until insertion; root() supplies the empty-tree value.
+        if depth != 0 {
+            nodes[depth] = vec![z[depth]];
+        }
         Self {
             depth,
             zero_leaf,
@@ -212,12 +219,16 @@ impl Imt {
     }
 
     /// Bulk-build from an ordered leaf log (O(n) hashes), like the `IMT` constructor.
+    /// Panics if the depth overflows or the leaves exceed the tree's capacity.
     pub fn from_leaves(depth: usize, leaves: &[Fr]) -> Self {
         Self::from_leaves_with_zero(depth, Fr::ZERO, leaves)
     }
 
     /// Bulk-build with a caller-supplied leaf-level zero value.
+    /// Panics if the depth overflows or the leaves exceed the tree's capacity.
     pub fn from_leaves_with_zero(depth: usize, zero_leaf: Fr, leaves: &[Fr]) -> Self {
+        let capacity = tree_capacity(depth).expect("imt: capacity overflow");
+        assert!(leaves.len() <= capacity, "imt: tree is full");
         let mut t = Self::new_with_zero(depth, zero_leaf);
         if leaves.is_empty() {
             return t;
@@ -231,8 +242,12 @@ impl Imt {
 
     /// Append one leaf (incremental, O(depth) hashes). Produces the same tree as
     /// [`Self::from_leaves`] over the same leaf sequence.
+    /// Panics before changing the tree if it is already full.
     pub fn insert(&mut self, leaf: Fr) {
-        debug_assert!(self.nodes[0].len() < self.capacity().unwrap_or(usize::MAX));
+        assert!(
+            self.leaf_count() < self.capacity().expect("imt: capacity overflow"),
+            "imt: tree is full"
+        );
         let mut node = leaf;
         let mut index = self.nodes[0].len();
         for level in 0..self.depth {
@@ -268,9 +283,7 @@ impl Imt {
     }
 
     pub fn capacity(&self) -> Result<usize, TreeError> {
-        1usize
-            .checked_shl(self.depth as u32)
-            .ok_or(TreeError::CapacityOverflow { depth: self.depth })
+        tree_capacity(self.depth)
     }
 
     pub fn leaf(&self, index: usize) -> Option<Fr> {
@@ -317,7 +330,11 @@ impl Imt {
     }
 
     pub fn root(&self) -> Fr {
-        self.nodes[self.depth][0]
+        if self.depth == 0 && self.nodes[0].is_empty() {
+            self.zero_leaf
+        } else {
+            self.nodes[self.depth][0]
+        }
     }
 
     /// Inclusion proof for the leaf at `index` (`depth` siblings, bottom→top).
@@ -867,7 +884,7 @@ pub fn verify_proof(proof: &InclusionProof) -> bool {
         };
         idx >>= 1;
     }
-    node == proof.root
+    idx == 0 && node == proof.root
 }
 
 // ── stateful sharded tree (bounded live shard + mutable cap) ────────────────
@@ -1174,6 +1191,8 @@ pub struct ShardedNotesTree {
     live_leaves: Vec<Fr>,
     cap: Imt,
     owned_notes: HashMap<Fr, OwnedNoteWitness>,
+    // Reverse leaf index avoids scanning every owned witness on each import/mark.
+    owned_leaves: BTreeMap<usize, Fr>,
     dirty_owned_notes: HashSet<Fr>,
 }
 
@@ -1200,6 +1219,7 @@ impl ShardedNotesTree {
             live_leaves: Vec::new(),
             cap: Imt::new_with_zero(cap_depth, global_zeroes[shard_height]),
             owned_notes: HashMap::new(),
+            owned_leaves: BTreeMap::new(),
             dirty_owned_notes: HashSet::new(),
         })
     }
@@ -1237,10 +1257,7 @@ impl ShardedNotesTree {
                 )));
             }
             if tree.owned_notes.contains_key(&owned.note_id)
-                || tree
-                    .owned_notes
-                    .values()
-                    .any(|existing| existing.leaf_index == owned.leaf_index)
+                || tree.owned_leaves.contains_key(&owned.leaf_index)
             {
                 return Err(TreeError::InvalidSnapshot(format!(
                     "duplicate owned note or leaf {}",
@@ -1273,6 +1290,7 @@ impl ShardedNotesTree {
                     });
                 }
             }
+            tree.owned_leaves.insert(owned.leaf_index, owned.note_id);
             tree.owned_notes.insert(owned.note_id, owned);
         }
 
@@ -1413,9 +1431,9 @@ impl ShardedNotesTree {
             });
         }
         if self
-            .owned_notes
-            .values()
-            .any(|owned| owned.note_id != note_id && owned.leaf_index == leaf_index)
+            .owned_leaves
+            .get(&leaf_index)
+            .is_some_and(|id| *id != note_id)
         {
             return Err(TreeError::DuplicateOwnedLeaf { leaf_index });
         }
@@ -1425,6 +1443,7 @@ impl ShardedNotesTree {
             return Err(TreeError::OwnedLeafMismatch { leaf_index });
         }
 
+        self.owned_leaves.insert(leaf_index, note_id);
         self.owned_notes.insert(
             note_id,
             OwnedNoteWitness {
@@ -1439,7 +1458,12 @@ impl ShardedNotesTree {
 
     pub fn unmark_owned(&mut self, note_id: Fr) -> bool {
         self.dirty_owned_notes.remove(&note_id);
-        self.owned_notes.remove(&note_id).is_some()
+        if let Some(owned) = self.owned_notes.remove(&note_id) {
+            self.owned_leaves.remove(&owned.leaf_index);
+            true
+        } else {
+            false
+        }
     }
 
     /// Adopt a recovered local path for an owned note in a completed shard.
@@ -1461,13 +1485,14 @@ impl ShardedNotesTree {
             });
         }
         if self
-            .owned_notes
-            .values()
-            .any(|owned| owned.note_id != note_id && owned.leaf_index == leaf_index)
+            .owned_leaves
+            .get(&leaf_index)
+            .is_some_and(|id| *id != note_id)
         {
             return Err(TreeError::DuplicateOwnedLeaf { leaf_index });
         }
         self.verify_frozen_path(note_id, leaf_index, &within_shard_siblings)?;
+        self.owned_leaves.insert(leaf_index, note_id);
         self.owned_notes.insert(
             note_id,
             OwnedNoteWitness {
@@ -1542,8 +1567,7 @@ impl ShardedNotesTree {
             .map(|owned| owned.note_id)
             .collect();
         for note_id in &removed {
-            self.owned_notes.remove(note_id);
-            self.dirty_owned_notes.remove(note_id);
+            self.unmark_owned(*note_id);
         }
 
         self.live_leaves.truncate(leaf_count - completed_leaf_count);
@@ -1594,9 +1618,9 @@ impl ShardedNotesTree {
         note_id: Fr,
     ) -> Result<(), TreeError> {
         if self
-            .owned_notes
-            .values()
-            .any(|owned| owned.leaf_index == leaf_index && owned.note_id != note_id)
+            .owned_leaves
+            .get(&leaf_index)
+            .is_some_and(|id| *id != note_id)
         {
             return Err(TreeError::OwnedLeafMismatch { leaf_index });
         }
@@ -1689,8 +1713,9 @@ impl ShardedNotesTree {
 }
 
 fn tree_capacity(depth: usize) -> Result<usize, TreeError> {
-    1usize
-        .checked_shl(depth as u32)
+    u32::try_from(depth)
+        .ok()
+        .and_then(|shift| 1usize.checked_shl(shift))
         .ok_or(TreeError::CapacityOverflow { depth })
 }
 
@@ -1814,6 +1839,99 @@ mod tests {
     }
 
     #[test]
+    fn depth_zero_tree_tracks_its_single_leaf() {
+        for zero in [Fr::ZERO, Fr::from(42u64)] {
+            let mut tree = Imt::new_with_zero(0, zero);
+            assert_eq!(tree.capacity(), Ok(1));
+            assert_eq!(tree.leaf_count(), 0);
+            assert_eq!(tree.root(), zero);
+            assert_eq!(tree.root(), Imt::from_leaves_with_zero(0, zero, &[]).root());
+
+            tree.insert(Fr::from(7u64));
+            assert_eq!(tree.leaf_count(), 1);
+            assert_eq!(tree.root(), Fr::from(7u64));
+            let mut proof = tree.create_proof(0);
+            assert!(proof.siblings.is_empty());
+            assert!(verify_proof(&proof));
+            proof.index = 1;
+            assert!(!verify_proof(&proof));
+
+            tree.update(0, Fr::from(8u64)).unwrap();
+            assert_eq!(tree.root(), Fr::from(8u64));
+            tree.truncate(0).unwrap();
+            assert_eq!(tree.leaf_count(), 0);
+            assert_eq!(tree.root(), zero);
+            tree.insert(zero);
+            assert_eq!(tree.leaf_count(), 1);
+            assert!(verify_proof(&tree.create_proof(0)));
+        }
+    }
+
+    #[test]
+    fn checked_depth_zero_trees_insert_and_truncate() {
+        let leaf = Fr::from(7u64);
+        let mut indexed = IndexedMerkleTree::new(0).unwrap();
+        assert_eq!(indexed.leaves(), &[]);
+        assert_eq!(indexed.insert(leaf), Ok(0));
+        assert_eq!(indexed.get_index(leaf), Some(0));
+        assert!(verify_proof(&indexed.create_proof(leaf).unwrap()));
+        assert_eq!(
+            indexed.insert(Fr::ZERO),
+            Err(TreeError::TreeFull { depth: 0 })
+        );
+        indexed.truncate(0).unwrap();
+        assert_eq!(indexed.get_index(leaf), None);
+        assert_eq!(indexed.insert(Fr::ZERO), Ok(0));
+
+        let mut ordered = OrderedMerkleTree::from_leaves(0, &[]).unwrap();
+        assert_eq!(ordered.leaf_count(), 0);
+        assert_eq!(ordered.insert(leaf), Ok(0));
+        assert!(verify_proof(&ordered.create_proof_at(0).unwrap()));
+        assert_eq!(ordered.insert(leaf), Err(TreeError::TreeFull { depth: 0 }));
+    }
+
+    #[test]
+    fn raw_tree_rejects_overcapacity_without_mutation() {
+        let leaves = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)];
+        assert!(std::panic::catch_unwind(|| Imt::from_leaves(1, &leaves)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                Imt::from_leaves_with_zero(1, Fr::from(42u64), &leaves)
+            })
+            .is_err()
+        );
+        for depth in [0, 1] {
+            let count = 1 << depth;
+            let mut tree = Imt::from_leaves(depth, &leaves[..count]);
+            let root = tree.root();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tree.insert(leaves[count]);
+                }))
+                .is_err()
+            );
+            assert_eq!(tree.leaf_count(), count);
+            assert_eq!(tree.root(), root);
+            for index in 0..count {
+                assert!(verify_proof(&tree.create_proof(index)));
+            }
+        }
+    }
+
+    #[test]
+    fn tree_depth_must_have_a_representable_capacity() {
+        for depth in [usize::BITS as usize, usize::MAX] {
+            assert_eq!(
+                tree_capacity(depth),
+                Err(TreeError::CapacityOverflow { depth })
+            );
+            assert!(IndexedMerkleTree::new(depth).is_err());
+            assert!(OrderedMerkleTree::new(depth).is_err());
+            assert!(std::panic::catch_unwind(|| Imt::new(depth)).is_err());
+        }
+    }
+
+    #[test]
     fn insert_matches_from_leaves_and_proof_verifies() {
         let leaves: Vec<Fr> = (1u64..=11).map(Fr::from).collect();
         let mut incremental = Imt::new(6);
@@ -1841,6 +1959,29 @@ mod tests {
                 flat.create_proof(i)
             );
         }
+    }
+
+    #[test]
+    fn owned_leaf_index_survives_restore_unmark_and_rewind() {
+        let mut tree = ShardedNotesTree::new(12, 4).unwrap();
+        for index in 0..1024 {
+            tree.mark_owned(Fr::from(index as u64 + 1), index).unwrap();
+        }
+        let snapshot = tree.snapshot();
+        let mut restored = ShardedNotesTree::from_snapshot(snapshot.clone()).unwrap();
+        assert!(restored.mark_owned(Fr::from(9000_u64), 500).is_err());
+        assert!(restored.unmark_owned(Fr::from(501_u64)));
+        restored.mark_owned(Fr::from(9000_u64), 500).unwrap();
+        assert!(restored.append(Fr::from(2_u64)).is_err());
+        restored.rewind_live_to(0).unwrap();
+        assert!(restored.owned_notes.is_empty());
+        assert!(restored.owned_leaves.is_empty());
+        restored.mark_owned(Fr::from(42_u64), 0).unwrap();
+        restored.append(Fr::from(42_u64)).unwrap();
+        assert!(verify_proof(&restored.witness(Fr::from(42_u64)).unwrap()));
+        let mut duplicate = snapshot;
+        duplicate.owned_notes[1].leaf_index = 0;
+        assert!(ShardedNotesTree::from_snapshot(duplicate).is_err());
     }
 
     #[test]
@@ -2118,6 +2259,13 @@ mod tests {
             assert!(
                 !verify_proof(&bad_index),
                 "wrong index must be rejected (leaf {i})"
+            );
+
+            let mut out_of_range = good.clone();
+            out_of_range.index |= 1 << good.siblings.len();
+            assert!(
+                !verify_proof(&out_of_range),
+                "index above the proof's capacity must be rejected (leaf {i})"
             );
         }
     }

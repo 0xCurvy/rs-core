@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/oreparaz/dudect",
+  "commit": "dc269651fb2567e46755cfb2a13d3875592968b5",
+  "upstream_sha256": "3fb3b2bd7f9e17ae34b7c92518c1311c67342c56facc80da925d85f121b649da",
+  "vendored_sha256": "3b248c540f9c4951cec454132faa3d9eacfb8378802090e8aa8d019ee67bca06",
+  "modifications": "ARM64 CLOCK_MONOTONIC_RAW nanosecond timer and conditional x86 includes; statistics unchanged.",
+  "license": "Unlicense (embedded in header)"
+}

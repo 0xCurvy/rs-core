@@ -59,5 +59,77 @@ Native applications can select the global Rayon pool size with
 `RAYON_NUM_THREADS` or configure `rayon::ThreadPoolBuilder` before the first
 parallel call.
 
+Poseidon uses fixed-width stack scratch space and performs no per-round heap
+allocation. This matters most for Merkle construction, where every parent is a
+binary Poseidon hash; use the bulk tree methods to add Rayon parallelism on top
+of that allocation-free kernel.
+
+The default `poseidon-optimized` feature selects generated folded constants and
+sparse partial-round matrices without changing any output or API. Merkle-heavy
+workloads benefit most. Those tables are authenticated and decoded per arity on
+first use, so a caller that only hashes pairs pays for the arity-2 block rather
+than all sixteen; first-hash latency is tens of microseconds. Consumers that explicitly prefer the smaller compressed
+browser artifact can select the direct reference schedule with
+`default-features = false`; see the workspace `OPTIMIZATIONS.md` for measured
+native/WASM tradeoffs.
+
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for complete
 native and WASM build targets.
+
+## September 2026 boundary hardening
+
+Secret BabyJubjub multiplication and signature-response arithmetic use pinned
+RustCrypto `crypto-bigint` 0.7.5, fixed-width modular arithmetic, and a fixed
+256-bit point schedule. Public verification retains the independent variable-time
+implementation. This change preserves the established seed and direct-scalar
+signature vectors; it is not an external side-channel certification. Stealth
+pairing/scanning and prover arithmetic remain variable-time.
+
+Stealth private keys now require exactly 64 unprefixed hex characters; truncated,
+odd-length, prefixed, and invalid hex is rejected. Previously generated shorter
+keys need explicit left-padding to 64 characters before import. Do not recover
+keys from previously lossy inputs by silently padding the truncated result.
+Generated meta keys use 64 hex characters and spending keys use `0x` plus 64.
+Random nonzero field scalars use rejection sampling rather than reduction.
+
+Signing keys/nonces use fixed-width RustCrypto arithmetic and complete
+BabyJubjub projective formulas (EFD `add-2008-bbjlp`), computing both candidates
+and selecting without scalar-dependent branches. This includes scalar response
+arithmetic, not just point multiplication. Rejection sampling can repeat on a
+negligible fraction of nonce candidates; parsing and public verification are
+outside the fixed secret-arithmetic schedule. Source review and differential
+tests do not establish a compiler- and hardware-independent timing guarantee.
+
+Owned signing buffers, hash/cipher state, and witness evaluation buffers are
+wiped where their types permit it. Caller copies, exposed legacy `BigUint`
+values, compiler/register copies, and all third-party arithmetic temporaries
+are not covered by a complete-erasure claim.
+
+Note encryption is an additive field one-time pad, so recipients must recompute
+and validate `noteId` for integrity. Reusing a shared secret and ephemeral key
+reuses the pad and reveals amount differences. Use a fresh ephemeral key for
+every payment. Stealth point coordinates require canonical unsigned
+field decimals. Legacy witness builders reject a stored public key that does
+not match the seed.
+
+`ephemeral_pub_key` accepts values from zero through `2^256 - 1`, including
+values above the subgroup order. Larger values panic in Rust and return errors
+through WASM `ephemeralPubKey` and C `curvy_ephemeral_pub_key`. Its fixed-schedule
+timing model covers scalar multiplication; input parsing and encoding are
+outside that model.
+
+Secret scalar decimal imports convert directly into zeroizing 32-byte storage
+over a padded 78-digit buffer. Canonical subgroup keys reject zero, leading
+zeroes and values at or above the subgroup order. Raw ephemeral scalars accept
+zero and leading zeroes within the 78-character input limit. Length, syntax and
+range errors are observable; byte-based imports avoid decimal conversion.
+
+Both Poseidon schedules use fixed-width BN254 arithmetic, copy field
+representations without value-dependent canonicalization, and wipe owned state
+buffers. Decimal field accumulation has a fixed schedule for a given digit
+count; sign, length and validation status remain observable. Public signature
+verification and formatting returned values may take variable time.
+
+BLAKE-512 wipes owned state and compression buffers on drop. These protections
+do not guarantee erasure of caller copies or compiler temporaries, or timing
+behaviour independent of the compiler and runtime.

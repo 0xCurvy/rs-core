@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createRequire } from "node:module";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -13,13 +15,18 @@ const binding = require("../index.js");
 const zkeyPath = resolve(here, "../../../crates/prover/testdata/multiplier.zkey");
 const zkeySha256 = "320819c1761ecd5edc2d0f6978889457ea402e28d984c42b29153d0f7e81b21f";
 
+test("exports only the resident prover name", () => {
+  assert.equal(typeof binding.ResidentProver, "function");
+  assert.equal(binding["Circuit" + "Prover"], undefined);
+});
+
 test("proves an authenticated generic circuit with one worker", async () => {
   const directory = await mkdtemp(join(tmpdir(), "curvy-node-test-"));
   const graph = multiplierGraph();
   const graphPath = join(directory, "multiplier.graph.bin");
   await writeFile(graphPath, graph);
 
-  const prover = new binding.CircuitProver({
+  const prover = new binding.ResidentProver({
     zkeyPath,
     zkeySha256,
     witnessGraphPath: graphPath,
@@ -28,6 +35,8 @@ test("proves an authenticated generic circuit with one worker", async () => {
   });
 
   assert.equal(binding.rsCoreVersion(), "0.1.0-rc.5");
+  assert.equal(prover.mode, "resident");
+  assert.equal(prover.profile, "HAWK");
   assert.equal(prover.threads, 1);
   assert.equal(prover.numConstraints, 1);
   assert.equal(prover.numPublic, 1);
@@ -35,9 +44,42 @@ test("proves an authenticated generic circuit with one worker", async () => {
 
   const result = await prover.prove(JSON.stringify({ a: "3", b: "11" }));
   assert.deepEqual(JSON.parse(result.publicSignalsJson), ["33"]);
+
+  await assert.rejects(
+    binding.ResidentProver.create({
+      zkeyPath,
+      zkeySha256,
+      witnessGraphPath: graphPath,
+      witnessGraphSha256: digest(graph),
+      threads: 0,
+    }),
+    /between 1 and 64/,
+  );
   assert.equal(JSON.parse(result.proofJson).protocol, "groth16");
   assert.ok(result.witnessCalculationMs >= 0);
   assert.ok(result.proofGenerationMs >= 0);
+});
+
+test("initializes an authenticated prover through the async factory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "curvy-node-test-"));
+  const graph = multiplierGraph();
+  const graphPath = join(directory, "multiplier.graph.bin");
+  await writeFile(graphPath, graph);
+
+  const initialization = binding.ResidentProver.create({
+    zkeyPath,
+    zkeySha256,
+    witnessGraphPath: graphPath,
+    witnessGraphSha256: digest(graph),
+    threads: 1,
+  });
+  assert.ok(initialization instanceof Promise);
+
+  const prover = await initialization;
+  assert.ok(prover instanceof binding.ResidentProver);
+  assert.equal(prover.numConstraints, 1);
+  const result = await prover.prove(JSON.stringify({ a: "3", b: "11" }));
+  assert.deepEqual(JSON.parse(result.publicSignalsJson), ["33"]);
 });
 
 test("defaults to one worker and rejects unsafe thread counts", async () => {
@@ -52,9 +94,9 @@ test("defaults to one worker and rejects unsafe thread counts", async () => {
     witnessGraphSha256: digest(graph),
   };
 
-  assert.equal(new binding.CircuitProver(options).threads, 1);
-  assert.throws(() => new binding.CircuitProver({ ...options, threads: 0 }), /between 1 and 64/);
-  assert.throws(() => new binding.CircuitProver({ ...options, threads: 65 }), /between 1 and 64/);
+  assert.equal(new binding.ResidentProver(options).threads, 1);
+  assert.throws(() => new binding.ResidentProver({ ...options, threads: 0 }), /between 1 and 64/);
+  assert.throws(() => new binding.ResidentProver({ ...options, threads: 65 }), /between 1 and 64/);
 });
 
 test("constructs pending-commitment input with the native indexed tree", () => {
@@ -70,6 +112,120 @@ test("constructs pending-commitment input with the native indexed tree", () => {
   assert.deepEqual(input.pendingNoteIds, ["1", "0"]);
   assert.equal(input.siblings.length, 2);
   assert.equal(input.siblings[0].length, 4);
+});
+
+test("accepts canonical packed tree fields without decimal JSON arrays", () => {
+  const tree = binding.IndexedMerkleTree.fromPackedLeaves(4, packFields([]));
+  const previousRoot = tree.rootPacked();
+  const result = tree.buildPendingCommitmentPacked(2, packFields([1n]));
+
+  assert.ok(Buffer.isBuffer(previousRoot));
+  assert.equal(previousRoot.length, 32);
+  assert.equal(tree.rootPacked().length, 32);
+  assert.notDeepEqual(tree.rootPacked(), previousRoot);
+  assert.deepEqual(result.paddedNoteIds, ["1", "0"]);
+  assert.throws(
+    () => binding.IndexedMerkleTree.fromPackedLeaves(4, Buffer.alloc(31)),
+    /multiple of 32/,
+  );
+  assert.throws(
+    () => binding.IndexedMerkleTree.fromPackedLeaves(
+      4,
+      Buffer.from("30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001", "hex"),
+    ),
+    /not canonical/,
+  );
+});
+
+async function fixtureOptions() {
+  const directory = await mkdtemp(join(tmpdir(), "curvy-node-paths-"));
+  const graph = multiplierGraph();
+  const witnessGraphPath = join(directory, "graph.bin");
+  await writeFile(witnessGraphPath, graph);
+  return { zkeyPath, zkeySha256, witnessGraphPath, witnessGraphSha256: digest(graph), threads: 1 };
+}
+
+test("rejects oversized artifact files before authentication or whole-file allocation", async () => {
+  const options = await fixtureOptions();
+  const directory = dirname(options.witnessGraphPath);
+  try {
+    for (const [field, pin, limit, prefix] of [
+      ["witnessGraphPath", "witnessGraphSha256", 64 * 1024 * 1024, Buffer.from("CVYW")],
+      ["witnessGraphPath", "witnessGraphSha256", 32 * 1024 * 1024, Buffer.from([0x28, 0xb5, 0x2f, 0xfd])],
+      ["sageProgramPath", "sageProgramSha256", 64 * 1024 * 1024, Buffer.alloc(4)],
+      ["zkeyManifestPath", "zkeyManifestSha256", 4 * 1024 * 1024, Buffer.alloc(4)],
+    ]) {
+      const path = join(directory, "oversized.bin");
+      const file = await open(path, "w");
+      try { await file.write(prefix); await file.truncate(limit + 1); } finally { await file.close(); }
+      const oversized = { ...options, [field]: path, [pin]: "00".repeat(32) };
+      const error = new RegExp(`exceeds ${limit} byte limit`);
+      assert.throws(() => new binding.ResidentProver(oversized), error);
+      await assert.rejects(binding.ResidentProver.create(oversized), error);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("SAGE and manifest loading produce verified proofs", async () => {
+  const options = await fixtureOptions();
+  const zkey = await readFile(zkeyPath);
+  const header = Buffer.alloc(60);
+  header.write("CVYZKM01");
+  header.writeUInt32LE(1, 8);
+  header.writeUInt32LE(65536, 12);
+  header.writeBigUInt64LE(BigInt(zkey.length), 16);
+  Buffer.from(zkeySha256, "hex").copy(header, 24);
+  header.writeUInt32LE(1, 56);
+  const manifest = Buffer.concat([header, Buffer.from(zkeySha256, "hex")]);
+  const zkeyManifestPath = join(dirname(options.witnessGraphPath), "manifest.bin");
+  await writeFile(zkeyManifestPath, manifest);
+  const prover = await binding.ResidentProver.create({ ...options, useSage: true,
+    zkeyManifestPath, zkeyManifestSha256: digest(manifest) });
+  assert.equal(prover.witnessBackend, "sage");
+  assert.deepEqual(JSON.parse((await prover.prove('{"a":"7","b":"5"}')).publicSignalsJson), ["35"]);
+  await assert.rejects(binding.ResidentProver.create({ ...options, zkeyManifestPath }), /together/);
+  await assert.rejects(binding.ResidentProver.create({ ...options, zkeyManifestPath,
+    zkeyManifestSha256: "00".repeat(32) }), /SHA-256 mismatch/);
+  await assert.rejects(binding.ResidentProver.create({ ...options, sageProgramPath: "unused" }), /together/);
+});
+
+test("loads a compiled SAGE cache without the source graph file", async () => {
+  const options = await fixtureOptions();
+  // Generated by derive_sage_cache from multiplierGraph(); deterministic SAGEPC01.
+  const program = Buffer.from("U0FHRVBDMDEBAAAAbAAAAIEcAj2XphAPvRxzqyNKoDX6R7rfXcVa9FwjJpHXCW0YAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAACAAAAAwAAAAQAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAEAAAAAAAAAAAAAAAEAAAABAAAAAwAAAAAAAAAAAAAAAQAAAAIAAAACAAAAAwAAAAMAAAABAAAAjOwBhkzcY68BAAAAAQAAAKXxAYZM32OvAgAAAAEAAAA=", "base64");
+  const sageProgramPath = join(dirname(options.witnessGraphPath), "program.bin");
+  await writeFile(sageProgramPath, program);
+  const cachedOptions = { ...options, witnessGraphPath: undefined, sageProgramPath, sageProgramSha256: digest(program) };
+  const prover = await binding.ResidentProver.create(cachedOptions);
+  assert.equal(prover.witnessBackend, "sage");
+  assert.deepEqual(JSON.parse((await prover.prove('{"a":"3","b":"11"}')).publicSignalsJson), ["33"]);
+  await assert.rejects(binding.ResidentProver.create({ ...cachedOptions, witnessGraphSha256: "00".repeat(32) }), /source hash mismatch/);
+  await assert.rejects(binding.ResidentProver.create({ ...cachedOptions, sageProgramSha256: "00".repeat(32) }), /SHA-256 mismatch/);
+});
+
+test("bounded proof queue rejects overload and recovers after errors", async () => {
+  const options = await fixtureOptions();
+  for (const maxPendingProofs of [0, 65]) {
+    assert.throws(() => new binding.ResidentProver({ ...options, maxPendingProofs }), /between 1 and 64/);
+  }
+  const prover = new binding.ResidentProver({ ...options, maxPendingProofs: 1 });
+  const results = await Promise.allSettled(Array.from({ length: 32 }, () => prover.prove('{"a":"3","b":"11"}')));
+  assert.equal(results[0].status, "fulfilled");
+  assert.ok(results.some(result => result.status === "rejected" && /queue is full/.test(result.reason.message)));
+  await assert.rejects(prover.prove("{"));
+  for (let i = 0; i < 3; i++) {
+    assert.deepEqual(JSON.parse((await prover.prove('{"a":"3","b":"11"}')).publicSignalsJson), ["33"]);
+  }
+});
+
+test("waiting proofs leave the shared libuv pool available", async () => {
+  const options = await fixtureOptions();
+  const { stdout } = await promisify(execFile)(process.execPath,
+    [join(here, "queue-child.mjs"), JSON.stringify(options)],
+    { env: { ...process.env, UV_THREADPOOL_SIZE: "1" }, timeout: 30000 });
+  const result = JSON.parse(stdout);
+  assert.equal(result.completed, 32);
+  assert.ok(result.completedAtIO < 32, JSON.stringify(result));
 });
 
 function multiplierGraph() {
@@ -131,3 +287,43 @@ function fnv1a(value) {
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
+
+function packFields(values) {
+  return Buffer.concat(
+    values.map((value) => {
+      const encoded = value.toString(16).padStart(64, "0");
+      return Buffer.from(encoded, "hex");
+    }),
+  );
+}
+
+test("pending batches reject resource-exhausting sizes without changing the tree", () => {
+  const tree = new binding.IndexedMerkleTree(30, "[]");
+  const before = tree.root;
+  for (const count of [0,4097,200000,0xffffffff]) {
+    assert.throws(()=>tree.buildPendingCommitment(count,'["1"]'), /batchSize must be between/);
+    assert.throws(()=>tree.buildPendingCommitmentPacked(count,Buffer.alloc(32)), /batchSize must be between/);
+    assert.equal(tree.root,before);
+  }
+});
+
+
+test("witness errors redact invalid values and reject duplicate signals", async () => {
+  const prover = new binding.ResidentProver(await fixtureOptions());
+  for (const input of ['{"a":"PRIVATE_SENTINEL!","b":"11"}', '{"a":"3","a":"4","b":"11"}']) {
+    await assert.rejects(prover.prove(input), error => !error.message.includes("PRIVATE_SENTINEL"));
+  }
+  assert.deepEqual(JSON.parse((await prover.prove('{"a":"3","b":"11"}')).publicSignalsJson),["33"]);
+});
+
+test("zkey file size is bounded before hashing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "curvy-node-size-test-"));
+  const path = join(directory, "oversized.zkey");
+  try {
+    const file = await open(path, "w");
+    try { await file.truncate(4 * 1024 ** 3 + 1); } finally { await file.close(); }
+    assert.throws(() => new binding.ResidentProver({
+      zkeyPath: path, zkeySha256, witnessGraphPath: zkeyPath, witnessGraphSha256: zkeySha256,
+    }), /byte limit/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

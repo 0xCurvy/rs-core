@@ -5,7 +5,7 @@
 <script type="module">
   import {
     cachedArtifactBytes,
-    loadOrCompileSageProver,
+    loadOrCompileStreamingProver,
     proveCachedZkey,
     proveCachedZkeyOnePass,
   } from "./sparrow-cache-api.mjs";
@@ -49,7 +49,7 @@
     const compileStarted = performance.now();
     const appliedWindowBits = Number(params.get("windowBits") || 13);
     const appliedMsmChunkPoints = Number(params.get("msmChunkPoints") || 65536);
-    const sage = await loadOrCompileSageProver({
+    const sage = await loadOrCompileStreamingProver({
       wasm,
       cache,
       graphUrl: required("graph"),
@@ -155,6 +155,8 @@
       crossOriginIsolated,
       storageComparison,
       onePassManifest: params.has("manifest"),
+      proverMode: prover.mode,
+      proverProfile: prover.profile,
       sageCacheHit: sage.cacheHit,
       sageCacheStored: sage.cacheStored,
       sageCompilerVersion: sage.compilerVersion,

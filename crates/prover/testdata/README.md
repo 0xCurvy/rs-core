@@ -8,3 +8,7 @@
 - Upstream: <https://github.com/arkworks-rs/circom-compat>
 - Upstream license: MIT OR Apache-2.0
 
+`multiplier.vk.json` is the snarkjs verification-key export of that fixture.
+`noncanonical-g2.zkey` is a malformed mutation retained from the September 2026
+fuzzing run. It must be rejected before any unchecked field arithmetic. The
+fuzz corpus stores the same input with the target's one-byte format selector.

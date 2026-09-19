@@ -1,4 +1,4 @@
-// Cache API adapter for WasmSparrowProver. The large zkey paths never
+// Cache API adapter for WasmStreamingProver. The large zkey paths never
 // call Response.arrayBuffer(): only framing records or browser-supplied body
 // chunks cross the JS/WASM boundary. Small graphs, derived SAGE programs, and
 // manifests use byte slices because their Rust parsers currently do the same.
@@ -28,16 +28,17 @@ export async function cachedArtifactBytes(cache, url) {
  *
  * The cache is deliberately keyed by source digest, compiler-cache version,
  * and limits profile. Its stored digest detects truncation/storage corruption;
- * Rust additionally validates the program format, every index/dimension, and
- * the embedded source digest. This is origin-local derived state, not a new
- * protocol artifact.
+ * Warm loads require expectedSageProgramSha256 from trusted deployment metadata
+ * or retained trusted process state. Without it, compile the authenticated graph
+ * again. The embedded source digest does not prove correct compilation.
  */
-export async function loadOrCompileSageProver({
+export async function loadOrCompileStreamingProver({
   wasm,
   cache,
   graphUrl,
   expectedSourceGraphSha256,
   expectedZkeySha256,
+  expectedSageProgramSha256 = null,
   batchProfile = false,
   windowBits = 13,
   msmChunkPoints = 65_536,
@@ -47,7 +48,9 @@ export async function loadOrCompileSageProver({
   const compilerVersion = cacheVersion(wasm);
   const profile = batchProfile ? "batch" : "client";
   const request = sageCacheRequest(sourceHash, compilerVersion, profile);
-  const cached = await cache.match(request);
+  const trustedProgramHash = expectedSageProgramSha256 == null ? null
+    : normalizeSha256(expectedSageProgramSha256, "SAGE program SHA-256");
+  const cached = trustedProgramHash ? await cache.match(request) : null;
   if (cached) {
     const metadata = sageResponseMetadata(cached);
     if (
@@ -57,7 +60,7 @@ export async function loadOrCompileSageProver({
     ) {
       const program = new Uint8Array(await cached.arrayBuffer());
       const actualHash = await sha256Hex(program);
-      if (metadata.bytes === program.byteLength && metadata.programHash === actualHash) {
+      if (metadata.bytes === program.byteLength && metadata.programHash === actualHash && actualHash === trustedProgramHash) {
         try {
           const prover = constructCompiledProver({
             wasm,
@@ -91,7 +94,7 @@ export async function loadOrCompileSageProver({
 
   onStatus("Compiling SAGE from the authenticated source graph");
   let graphBytes = await cachedArtifactBytes(cache, graphUrl);
-  let prover = wasm.WasmSparrowProver.fromSignetWithConfig(
+  let prover = wasm.WasmStreamingProver.fromSignetWithConfig(
     graphBytes,
     sourceHash,
     expectedZkeySha256,
@@ -109,6 +112,10 @@ export async function loadOrCompileSageProver({
     throw error;
   }
   const programHash = await sha256Hex(program);
+  if (trustedProgramHash && programHash !== trustedProgramHash) {
+    prover.free?.();
+    throw new Error("compiled SAGE program does not match the trusted program pin");
+  }
 
   // The first proof uses the same decoder as every warm load. Explicitly free
   // the compiler-produced instance before decoding so both SAGE graphs are not
@@ -198,7 +205,7 @@ function constructCompiledProver({
   windowBits,
   msmChunkPoints,
 }) {
-  return wasm.WasmSparrowProver.fromCompiledSageWithConfig(
+  return wasm.WasmStreamingProver.fromCompiledSageWithConfig(
     program,
     programHash,
     sourceHash,
@@ -259,20 +266,69 @@ function errorMessage(error) {
   return error?.message || String(error);
 }
 
-export async function authenticateResponse(prover, response, observe = () => {}) {
+// Kept outside CacheStorage: only a successful whole-file authentication
+// authorizes these fixed-size chunk hashes for the following parse pass.
+const authenticatedResponses = new WeakMap();
+const AUTH_CHUNK_BYTES = 64 * 1024;
+async function* fixedChunks(response) {
   requireBody(response);
   const reader = response.body.getReader();
+  let buffer = new Uint8Array(AUTH_CHUNK_BYTES);
+  let filled = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      prover.authenticateZkeyChunk(value);
-      observe();
+      let offset = 0;
+      while (offset < value.length) {
+        const count = Math.min(buffer.length - filled, value.length - offset);
+        buffer.set(value.subarray(offset, offset + count), filled);
+        filled += count;
+        offset += count;
+        if (filled === buffer.length) {
+          yield buffer;
+          buffer = new Uint8Array(AUTH_CHUNK_BYTES);
+          filled = 0;
+        }
+      }
     }
-  } finally {
-    reader.releaseLock();
+    if (filled) yield buffer.slice(0, filled);
+  } finally { reader.releaseLock(); }
+}
+export async function authenticateResponse(prover, response, observe = () => {}) {
+  authenticatedResponses.delete(prover);
+  const hashes = [];
+  for await (const chunk of fixedChunks(response)) {
+    hashes.push(await sha256Hex(chunk));
+    prover.authenticateZkeyChunk(chunk);
+    observe();
   }
-  return prover.finishZkeyAuthentication();
+  const bytes = prover.finishZkeyAuthentication();
+  authenticatedResponses.set(prover, hashes);
+  return bytes;
+}
+function checkedResponse(prover, response) {
+  const hashes = authenticatedResponses.get(prover);
+  if (!hashes) throw new Error("authenticate this zkey response before proving");
+  const chunks = fixedChunks(response);
+  let index = 0;
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await chunks.next();
+        if (done) {
+          if (index !== hashes.length) throw new Error("zkey changed after authentication: truncated");
+          controller.close();
+        } else {
+          if (index >= hashes.length || await sha256Hex(value) !== hashes[index++]) {
+            throw new Error("zkey changed after authentication: chunk mismatch");
+          }
+          controller.enqueue(value);
+        }
+      } catch (error) { await chunks.return(); controller.error(error); }
+    },
+    async cancel() { await chunks.return(); },
+  }));
 }
 
 export async function proveResponse(
@@ -285,7 +341,8 @@ export async function proveResponse(
   requireBody(response);
   if (oneShot) prover.beginOneShotProof(inputJson);
   else prover.beginProof(inputJson);
-  const stream = new ExactStreamReader(response.body.getReader());
+  const checked = checkedResponse(prover, response);
+  const stream = new ExactStreamReader(checked.body.getReader());
   try {
     const fileHeader = await stream.readExact(12);
     prover.beginZkey(fileHeader);
@@ -323,8 +380,8 @@ export async function proveCachedZkey({
   await authenticateResponse(prover, authenticated, observe);
 
   // Cache.match returns a fresh Response with a fresh body. Reopening is
-  // load-bearing: the Rust state machine also hashes this proof pass and will
-  // not release a proof if it differs from the authenticated pass.
+  // checked adapter validates each second-pass chunk against private hashes
+  // from the authenticated pass before exposing it to the Rust parser.
   const proofPass = await cache.match(request);
   if (!proofPass) throw new Error(`zkey disappeared from cache: ${request}`);
   return proveResponse(prover, inputJson, proofPass, observe, oneShot);

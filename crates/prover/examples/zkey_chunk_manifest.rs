@@ -2,7 +2,7 @@
 
 use std::{env, fs, fs::File};
 
-use curvy_prover::sparrow::manifest::ZkeyChunkManifest;
+use curvy_prover::artifacts::manifest::ZkeyChunkManifest;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().collect::<Vec<_>>();

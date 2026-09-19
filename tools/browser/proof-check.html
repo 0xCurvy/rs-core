@@ -1,0 +1,84 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Curvy browser proof checks</title>
+<style>body{font:16px system-ui;max-width:900px;margin:48px auto;padding:0 24px}button{font:inherit;padding:12px 20px}pre{white-space:pre-wrap}</style>
+<h1>Browser proof checks</h1>
+<button id="run">Run proof checks</button>
+<pre id="result" role="status">Ready</pre>
+<script type="module">
+import { fixture } from './fixture.mjs';
+const query = new URLSearchParams(location.search);
+const result = document.querySelector('#result');
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const fetchBytes = async (url) => {
+  const response = await fetch(url);
+  check(response.ok, `fetch failed: ${url} (${response.status})`);
+  return new Uint8Array(await response.arrayBuffer());
+};
+document.querySelector('#run').onclick = async () => {
+  document.querySelector('#run').disabled = true;
+  result.textContent = 'Running';
+  try {
+    const mode = query.get('mode') || 'threaded';
+    check(['threaded', 'portable'].includes(mode), 'unknown mode');
+    check(crossOriginIsolated, 'cross-origin isolation is required');
+    const wasm = await import(`/crates/prover/pkg-web${mode === 'threaded' ? '-threads' : ''}/curvy_prover.js`);
+    result.textContent = 'Initializing WASM';
+    await wasm.default();
+    const threads = mode === 'threaded' ? Number(query.get('threads') || 2) : 1;
+    check(Number.isInteger(threads) && threads >= 1 && threads <= 16, 'invalid thread count');
+    result.textContent = 'Initializing workers';
+    if (mode === 'threaded') await wasm.initThreadPool(threads);
+    result.textContent = 'Loading artifacts';
+    let data;
+    if (query.has('scenario')) {
+      const response = await fetch('/benchmark/config.json');
+      check(response.ok, 'benchmark configuration unavailable');
+      const scenarios = await response.json();
+      data = scenarios.find(s => String(s.notes) === query.get('scenario'));
+      check(data, 'unknown benchmark scenario');
+    } else {
+      data = { zkeyUrl: '/crates/prover/testdata/multiplier.zkey', zkeySha256: fixture.zkeySha256,
+        graphSha256: fixture.graphSha256, input: {a:'3', b:'11'}, expectedPublics: ['33'] };
+    }
+    const loadStarted = performance.now();
+    const zkey = await fetchBytes(data.zkeyUrl);
+    const graph = data.graphUrl ? await fetchBytes(data.graphUrl) : Uint8Array.from(atob(fixture.graph), c => c.charCodeAt(0));
+    const prover = new wasm.WasmResidentProver(zkey, data.zkeySha256, graph, data.graphSha256);
+    result.textContent = 'Proving';
+    const loadMs = performance.now() - loadStarted;
+    const samples = Number(query.get('samples') || 5);
+    check(Number.isInteger(samples) && samples >= 1 && samples <= 30, 'invalid sample count');
+    const times = [];
+    let publics;
+    try {
+      for (let i = 0; i <= samples; i++) {
+        const started = performance.now();
+        const bundle = JSON.parse(prover.prove(JSON.stringify(data.input)));
+        const elapsed = performance.now() - started;
+        check(bundle.proof.protocol === 'groth16', 'wrong protocol');
+        check(JSON.stringify(bundle.publicSignals) === JSON.stringify(data.expectedPublics), 'public signals mismatch');
+        publics = bundle.publicSignals;
+        if (i) times.push(elapsed);
+      }
+      let rejected = false;
+      try { prover.prove('{'); } catch { rejected = true; }
+      check(rejected, 'malformed witness was accepted');
+    } finally { prover.free(); }
+    let rejected = false;
+    try { new wasm.WasmResidentProver(zkey, '00'.repeat(32), graph, data.graphSha256).free(); }
+    catch { rejected = true; }
+    check(rejected, 'incorrect key pin was accepted');
+    const sorted = [...times].sort((a,b) => a-b);
+    const report = { passed: true, mode, threads, crossOriginIsolated, userAgent: navigator.userAgent,
+      scenario: query.get('scenario') || 'multiplier', selfVerified: true, publicSignals: publics,
+      loadMs, proofMs: times, medianMs: sorted[Math.floor(sorted.length / 2)],
+      p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1] };
+    result.textContent = JSON.stringify(report, null, 2);
+    result.dataset.state = 'passed';
+  } catch (error) {
+    result.textContent = JSON.stringify({ passed: false, error: String(error), stack: error.stack }, null, 2);
+    result.dataset.state = 'failed';
+  }
+};
+</script>

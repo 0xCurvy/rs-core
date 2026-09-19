@@ -18,7 +18,7 @@ const response = () => new Response(Readable.toWeb(createReadStream(zkeyPath, { 
 const totalStarted = performance.now();
 const graph = await readFile(graphPath);
 const graphStarted = performance.now();
-const prover = new wasm.WasmSparrowProver(
+const prover = new wasm.WasmStreamingProver(
   graph,
   graphHash,
   zkeyHash,

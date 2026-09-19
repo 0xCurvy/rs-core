@@ -1,0 +1,35 @@
+name: Secret arithmetic leakage assessment
+
+on:
+  schedule:
+    - cron: '31 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
+      - name: Native timing distributions
+        run: python3 tools/leakage/run.py dudect --out leakage-results/dudect --samples 200000 --allow-variable-time sign_scalar
+      - name: Secret-dependent branches and addresses
+        if: ${{ !cancelled() }}
+        run: python3 tools/leakage/run.py timecop --out leakage-results/timecop
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: leakage-${{ matrix.runner }}
+          path: leakage-results/
+          retention-days: 30

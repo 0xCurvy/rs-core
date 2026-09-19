@@ -1,11 +1,11 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, normalize, resolve, sep } from "node:path";
 
 const port = Number(process.argv[2] || 8766);
-const root = resolve(process.env.CURVY_BENCH_ROOT || process.cwd());
+const root = await realpath(resolve(process.env.CURVY_BENCH_ROOT || process.cwd()));
 const accessToken = process.env.CURVY_BENCH_TOKEN || randomBytes(24).toString("base64url");
 if (accessToken.length < 24) throw new Error("CURVY_BENCH_TOKEN must contain at least 24 characters");
 const types = new Map([
@@ -25,6 +25,10 @@ const server = createServer(async (request, response) => {
   response.setHeader("Origin-Agent-Cluster", "?1");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
+  if (!["127.0.0.1", "localhost"].some(host => request.headers.host === `${host}:${port}`) ||
+      (request.headers.origin && ![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(request.headers.origin))) {
+    response.writeHead(403).end("forbidden host or origin"); return;
+  }
   if (request.method !== "GET" && request.method !== "HEAD") {
     response.writeHead(405, { Allow: "GET, HEAD" }).end("method not allowed");
     return;
@@ -46,7 +50,7 @@ const server = createServer(async (request, response) => {
     } else if (pathname.endsWith("/crates/wasm/pkg-web-threads/")) {
       pathname += "curvy_wasm.js";
     }
-    const path = normalize(resolve(root, `.${pathname}`));
+    const path = await realpath(normalize(resolve(root, `.${pathname}`)));
     if (path !== root && !path.startsWith(`${root}${sep}`)) {
       response.writeHead(403).end("forbidden");
       return;

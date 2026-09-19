@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 
 import {
   ExactStreamReader,
   cachedSageProgramMetadata,
   deleteCachedSagePrograms,
-  loadOrCompileSageProver,
+  loadOrCompileStreamingProver,
 } from "./sparrow-cache-api.mjs";
 
 const SOURCE_HASH = "11".repeat(32);
@@ -34,9 +35,11 @@ test("SAGE is compiled once, round-trip checked, and reused from the derived cac
   await cache.put(GRAPH_URL, new Response(Uint8Array.of(7, 8, 9)));
   const wasm = fakeWasm();
 
-  const cold = await loadOrCompileSageProver(options(wasm, cache));
+  const cold = await loadOrCompileStreamingProver(options(wasm, cache));
   assert.equal(cold.cacheHit, false);
   assert.equal(cold.cacheStored, true);
+  assert.equal(cold.prover.mode, "streaming");
+  assert.equal(cold.prover.profile, "SPARROW");
   assert.equal(cold.programBytes, PROGRAM.byteLength);
   assert.equal(wasm.calls.source, 1);
   assert.equal(wasm.calls.compiled, 1, "cold use round-trips through the cache decoder");
@@ -47,7 +50,7 @@ test("SAGE is compiled once, round-trip checked, and reused from the derived cac
   assert.equal(metadata.sourceHash, SOURCE_HASH);
   assert.equal(metadata.compilerVersion, 7);
 
-  const warm = await loadOrCompileSageProver(options(wasm, cache));
+  const warm = await loadOrCompileStreamingProver(options(wasm, cache));
   assert.equal(warm.cacheHit, true);
   assert.equal(wasm.calls.source, 1, "warm use must not read or compile the source graph");
   assert.equal(wasm.calls.compiled, 2);
@@ -60,7 +63,7 @@ test("a corrupted SAGE cache entry is evicted and rebuilt from the authenticated
   const cache = new MemoryCache();
   await cache.put(GRAPH_URL, new Response(Uint8Array.of(7, 8, 9)));
   const wasm = fakeWasm();
-  await loadOrCompileSageProver(options(wasm, cache));
+  await loadOrCompileStreamingProver(options(wasm, cache));
 
   const derivedRequest = (await cache.keys()).find((request) =>
     new URL(request.url).pathname.startsWith("/__curvy_derived/sage/"),
@@ -72,7 +75,7 @@ test("a corrupted SAGE cache entry is evicted and rebuilt from the authenticated
   );
 
   const messages = [];
-  const rebuilt = await loadOrCompileSageProver({
+  const rebuilt = await loadOrCompileStreamingProver({
     ...options(wasm, cache),
     onStatus: (message) => messages.push(message),
   });
@@ -88,6 +91,7 @@ function options(wasm, cache) {
     graphUrl: GRAPH_URL,
     expectedSourceGraphSha256: SOURCE_HASH,
     expectedZkeySha256: ZKEY_HASH,
+    expectedSageProgramSha256: createHash("sha256").update(PROGRAM).digest("hex"),
     batchProfile: false,
     windowBits: 10,
     msmChunkPoints: 65_536,
@@ -137,6 +141,8 @@ function fakeWasm() {
 
     constructor(source) {
       this.source = source;
+      this.mode = "streaming";
+      this.profile = "SPARROW";
     }
 
     compiledSageProgram() {
@@ -151,7 +157,7 @@ function fakeWasm() {
   return {
     calls,
     sageCacheVersion: () => 7,
-    WasmSparrowProver: Prover,
+    WasmStreamingProver: Prover,
   };
 }
 
@@ -192,3 +198,25 @@ class MemoryCache {
 function requestUrl(request) {
   return request instanceof Request ? request.url : new Request(request).url;
 }
+
+test("a cache-controlled digest is not a trusted compiled-program pin", async () => {
+  const cache = new MemoryCache();
+  await cache.put(GRAPH_URL, new Response(Uint8Array.of(7,8,9)));
+  const wasm = fakeWasm();
+  await loadOrCompileStreamingProver(options(wasm,cache));
+  const result = await loadOrCompileStreamingProver({...options(wasm,cache), expectedSageProgramSha256: null});
+  assert.equal(result.cacheHit,false);
+  assert.equal(wasm.calls.source,2);
+});
+
+test("a replaced stream is rejected before any changed header reaches Rust", async () => {
+  const {authenticateResponse,proveResponse} = await import('./sparrow-cache-api.mjs');
+  let began = false;
+  const prover = {
+    authenticateZkeyChunk() {}, finishZkeyAuthentication() {return 12;},
+    beginProof() {}, beginZkey() { began=true; throw new Error('parser must not see changed bytes'); },
+  };
+  await authenticateResponse(prover,new Response(new Uint8Array(12)));
+  await assert.rejects(proveResponse(prover,'{}',new Response(new Uint8Array(12).fill(1))),/changed after authentication/);
+  assert.equal(began,false);
+});

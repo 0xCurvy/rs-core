@@ -94,6 +94,14 @@
 //! );
 //! ```
 
+macro_rules! leakage_phase {
+    ($phase:ident, $body:expr) => {{
+        #[cfg(feature = "leakage")]
+        let _measurement = crate::leakage::phase(crate::leakage::Phase::$phase);
+        $body
+    }};
+}
+
 // ── Shared: the boundary (field arithmetic + byte encodings) ────────────────────
 pub mod encoding;
 pub mod field;
@@ -104,6 +112,10 @@ pub mod blake512;
 pub mod cipher;
 pub mod eddsa;
 pub mod hash_utils;
+#[cfg(feature = "leakage")]
+#[doc(hidden)]
+pub mod leakage;
+
 pub mod note;
 pub mod poseidon;
 
@@ -118,3 +130,6 @@ pub mod stealth;
 pub use field::Fr;
 pub use imt::{NOTES_SHARD_HEIGHT, NOTES_SHARD_SIZE, NOTES_TREE_DEPTH, NOTES_TREE_VERSION};
 pub use poseidon::poseidon;
+
+mod secret_arithmetic;
+mod secret_field;

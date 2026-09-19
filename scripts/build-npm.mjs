@@ -15,14 +15,20 @@
 // package out of their bundler's pre-bundling/optimization step (see README).
 
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { marker, owner, validateOutput, publishOutput } from "./npm-output.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const outIndex = args.indexOf("--out");
-const outDir = resolve(repoRoot, outIndex === -1 ? "dist/npm" : (args[outIndex + 1] ?? "dist/npm"));
+if (outIndex !== -1 && (!args[outIndex + 1] || args[outIndex + 1].startsWith("--"))) {
+  throw new Error("--out requires a directory");
+}
+const destination = resolve(repoRoot, outIndex === -1 ? "dist/npm" : args[outIndex + 1]);
+validateOutput(destination, repoRoot);
 const shouldPack = args.includes("--pack");
 
 const PACKAGE_NAME = "@0xcurvy/rs-core-wasm";
@@ -83,8 +89,12 @@ function assertBuilt({ subpath, source, module, threaded }) {
 }
 
 const version = workspaceVersion();
-rmSync(outDir, { force: true, recursive: true });
-mkdirSync(outDir, { recursive: true });
+// Validate every input before staging, and preserve the previous output if
+// packaging fails. The final rename is the only operation exposing new output.
+for (const entry of ENTRIES) assertBuilt(entry);
+mkdirSync(dirname(destination), { recursive: true });
+const outDir = mkdtempSync(join(dirname(destination), ".curvy-npm-"));
+try {
 
 const exportsMap = { "./package.json": "./package.json" };
 
@@ -159,8 +169,12 @@ for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
 }
 cpSync(join(repoRoot, "bindings/wasm/README.md"), join(outDir, "README.md"));
 
-if (shouldPack) {
-  execFileSync("npm", ["pack", "--pack-destination", repoRoot], { cwd: outDir, stdio: "inherit" });
+writeFileSync(join(outDir, marker), owner);
+publishOutput(outDir, destination, repoRoot);
+} finally {
+  rmSync(outDir, { recursive: true, force: true });
 }
-
-console.log(`assembled ${PACKAGE_NAME}@${version} in ${outDir}`);
+if (shouldPack) {
+  execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", repoRoot], { cwd: destination, stdio: "inherit" });
+}
+console.log(`assembled ${PACKAGE_NAME}@${version} in ${destination}`);

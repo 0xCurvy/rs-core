@@ -101,7 +101,7 @@ fn handle_out(handle: u64, out: *mut u64) -> CurvyStatus {
     if out.is_null() {
         return CurvyStatus::InvalidArgument;
     }
-    unsafe { *out = handle };
+    unsafe { std::ptr::write_unaligned(out, handle) };
     CurvyStatus::Ok
 }
 
@@ -109,7 +109,7 @@ fn u32_out(value: u32, out: *mut u32) -> CurvyStatus {
     if out.is_null() {
         return CurvyStatus::InvalidArgument;
     }
-    unsafe { *out = value };
+    unsafe { std::ptr::write_unaligned(out, value) };
     CurvyStatus::Ok
 }
 
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn curvy_verify_merkle_proof(
         if out.is_null() {
             return CurvyStatus::InvalidArgument;
         }
-        unsafe { *out = c_int::from(verify_proof(&proof)) };
+        unsafe { std::ptr::write_unaligned(out, c_int::from(verify_proof(&proof))) };
         CurvyStatus::Ok
     })
 }
@@ -201,8 +201,15 @@ pub unsafe extern "C" fn curvy_verify_merkle_proof(
 // Inclusion proofs
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_proof_free(handle: u64) {
-    PROOFS.remove(handle);
+pub extern "C" fn curvy_proof_free(handle: u64) -> CurvyStatus {
+    crate::abi::guard(|| {
+        if PROOFS.remove(handle) {
+            CurvyStatus::Ok
+        } else {
+            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
+            CurvyStatus::InvalidArgument
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -278,8 +285,15 @@ pub unsafe extern "C" fn curvy_merkle_from_leaves(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_merkle_free(handle: u64) {
-    MERKLE.remove(handle);
+pub extern "C" fn curvy_merkle_free(handle: u64) -> CurvyStatus {
+    crate::abi::guard(|| {
+        if MERKLE.remove(handle) {
+            CurvyStatus::Ok
+        } else {
+            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
+            CurvyStatus::InvalidArgument
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -394,7 +408,7 @@ pub unsafe extern "C" fn curvy_merkle_get_index(
             if out.is_null() {
                 return CurvyStatus::InvalidArgument;
             }
-            unsafe { *out = value };
+            unsafe { std::ptr::write_unaligned(out, value) };
             CurvyStatus::Ok
         },
     )
@@ -487,8 +501,15 @@ pub unsafe extern "C" fn curvy_ordered_from_leaves(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_ordered_free(handle: u64) {
-    ORDERED.remove(handle);
+pub extern "C" fn curvy_ordered_free(handle: u64) -> CurvyStatus {
+    crate::abi::guard(|| {
+        if ORDERED.remove(handle) {
+            CurvyStatus::Ok
+        } else {
+            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
+            CurvyStatus::InvalidArgument
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -646,8 +667,15 @@ pub unsafe extern "C" fn curvy_sharded_restore_parts(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_sharded_free(handle: u64) {
-    SHARDED.remove(handle);
+pub extern "C" fn curvy_sharded_free(handle: u64) -> CurvyStatus {
+    crate::abi::guard(|| {
+        if SHARDED.remove(handle) {
+            CurvyStatus::Ok
+        } else {
+            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
+            CurvyStatus::InvalidArgument
+        }
+    })
 }
 
 // Keep these explicit because cbindgen does not expand macros.
@@ -861,7 +889,7 @@ pub unsafe extern "C" fn curvy_sharded_unmark_owned(
             if out.is_null() {
                 return CurvyStatus::InvalidArgument;
             }
-            unsafe { *out = c_int::from(removed) };
+            unsafe { std::ptr::write_unaligned(out, c_int::from(removed)) };
             CurvyStatus::Ok
         },
     )
@@ -1030,8 +1058,15 @@ pub unsafe extern "C" fn curvy_frontier_restore(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_frontier_free(handle: u64) {
-    FRONTIER.remove(handle);
+pub extern "C" fn curvy_frontier_free(handle: u64) -> CurvyStatus {
+    crate::abi::guard(|| {
+        if FRONTIER.remove(handle) {
+            CurvyStatus::Ok
+        } else {
+            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
+            CurvyStatus::InvalidArgument
+        }
+    })
 }
 
 // Keep these explicit because cbindgen does not expand macros.

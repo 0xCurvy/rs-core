@@ -1,5 +1,10 @@
 # Curvy Rust core
 
+The 7 September follow-up to Fable’s independent review is recorded in
+[FABLE_AUDIT_REMEDIATION.md](FABLE_AUDIT_REMEDIATION.md), including fixes, compatibility changes, validation, and remaining operational work.
+
+Current audit and follow-up results: [security, performance, and organization](SECURITY_PERFORMANCE_AUDIT.md).
+
 [![crates.io](https://img.shields.io/crates/v/curvy-core?logo=rust&logoColor=black&label=crates.io&labelColor=white&color=orange)](https://crates.io/crates/curvy-core)
 [![wasm-bindings](https://img.shields.io/npm/v/@0xcurvy/rs-core-wasm?logo=npm&logoColor=black&label=wasm-bindings&labelColor=white&color=red)](https://www.npmjs.com/package/@0xcurvy/rs-core-wasm)
 [![CI](https://img.shields.io/github/actions/workflow/status/0xCurvy/rs-core/ci.yml?branch=main&logo=github&logoColor=black&label=CI&labelColor=white)](https://github.com/0xCurvy/rs-core/actions/workflows/ci.yml)
@@ -100,8 +105,14 @@ compatibility.
 `curvy-prover` combines that graph with the matching snarkjs `.zkey` and returns a
 self-verified Groth16 proof in snarkjs JSON format:
 
+- `ResidentProver` is the **HAWK** profile (High-throughput Authenticated
+  Whole-Key prover): authenticate and load once, then reuse the parsed key.
+- `StreamingProver` is the **SPARROW** profile (Streaming Prover Architecture
+  for Resource-Restricted One-pass Workflows): authenticate chunks and process
+  the key sequentially with bounded memory.
+
 ```rust
-use curvy_prover::CircuitProver;
+use curvy_prover::ResidentProver;
 
 fn prove(
     zkey: &[u8],
@@ -110,7 +121,7 @@ fn prove(
     graph_sha256: &str,
     inputs: &str,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let prover = CircuitProver::from_artifacts(
+    let prover = ResidentProver::from_artifacts(
         zkey,
         zkey_sha256,
         graph,
@@ -125,7 +136,12 @@ fn prove(
 Both artifact hashes are required. Authentication happens before unchecked
 proving-key coordinates or graph data are parsed. The graph and `.zkey` must be
 the matching pair supplied by the Curvy deployment you are interacting with;
-they are not bundled into these crates.
+they are not bundled into these crates. Native file-backed callers should use
+`ResidentProver::from_artifacts_reader` to avoid retaining a complete zkey byte
+buffer beside the parsed proving key. See
+[PRODUCTION_BENCHMARKS.md](PRODUCTION_BENCHMARKS.md) for the production-key
+whole/stream comparison and [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for the full
+cross-target audit.
 
 ## Build targets
 
@@ -230,8 +246,10 @@ curvy-native-prover <zkey> <zkey-sha256> <graph.bin> <graph-sha256> \
 On a build with `parallel`, set `CURVY_PROVER_NUM_THREADS` to an integer from 1
 through 64. It defaults to one so container CPU quotas do not accidentally
 create an oversized Rayon pool. A serial build rejects values greater than one.
-The executable authenticates and parses artifacts through `CircuitProver`; it
-does not introduce a second witness runtime or graph format.
+The executable runs `ResidentProver` in `resident` mode under the HAWK profile;
+it does not introduce a second witness runtime or graph format. Its timing JSON
+includes `proverMode` and `profile` so operational data uses the same terms as
+the API.
 
 ```bash
 CURVY_PROVER_NUM_THREADS=8 curvy-native-prover \
@@ -266,7 +284,11 @@ SIGNET decoder. For explicit development or constrained-memory SPARROW builds,
 use `--sparrow` (which implies SIGNET v2); combine either flag with `--threads`
 for the threaded web target. `--bench` implies SPARROW and adds only the
 development arithmetic kernels used by the browser benchmark; do not use it for
-application builds.
+application builds. Compact matrices are available with `--compact-matrix`.
+Optimized Poseidon is the default; the compatible `--poseidon-optimized` flag
+may still be supplied explicitly. Neither changes the generated JavaScript API.
+Production-key results and size tradeoffs are recorded in
+[`PRODUCTION_BENCHMARKS.md`](PRODUCTION_BENCHMARKS.md).
 
 #### Node.js target
 
@@ -412,3 +434,5 @@ cross-origin isolation.
 Portions of this software are ported from permissively licensed third-party
 projects. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full
 attribution list.
+
+Resident performance work and current measurements: [RESIDENT_OPTIMIZATIONS.md](RESIDENT_OPTIMIZATIONS.md).

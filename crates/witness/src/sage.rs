@@ -159,11 +159,10 @@ impl SageGraph {
     /// Load the liveness-allocated instruction program produced by
     /// [`Self::to_compiled_bytes`].
     ///
-    /// A locally derived cache records the digest produced immediately after
-    /// compiling an authenticated SIGNET graph. The program header must also
-    /// bind the expected source-graph digest. Callers that move these bytes to a
-    /// different trust domain are responsible for publishing an independent
-    /// program digest there.
+    /// The expected program digest must be trusted independently of these
+    /// bytes and their cache metadata. The embedded source digest binds an
+    /// identifier, not a proof of correct compilation. Without a trusted program
+    /// pin, compile the authenticated source graph instead.
     pub fn from_compiled_bytes(
         bytes: &[u8],
         expected_program_sha256: &str,
@@ -202,9 +201,9 @@ impl SageGraph {
     }
 
     /// Serialize the immutable, already validated SAGE instruction program.
-    /// Locally cached bytes use a digest recorded at derivation time and remain
-    /// inside the authenticated source graph's trust boundary. Moving the bytes
-    /// to a different trust domain requires an independent digest pin.
+    /// Persist the expected program digest in an independently trusted location.
+    /// A digest stored beside cache bytes only detects accidental corruption;
+    /// the embedded source digest does not prove correct compilation.
     pub fn to_compiled_bytes(&self) -> Result<Vec<u8>, WitnessError> {
         encode_program(self)
     }
@@ -218,15 +217,48 @@ impl SageGraph {
     /// Produces the identical assignment to
     /// [`WitnessGraph::calculate_json`](crate::WitnessGraph::calculate_json).
     pub fn calculate_json(&self, input_json: &str) -> Result<Vec<Fr>, WitnessError> {
-        let inputs = build_input_buffer(
+        let mut values = zeroize::Zeroizing::new(Vec::new());
+        let mut assignment = zeroize::Zeroizing::new(Vec::new());
+        self.calculate_json_into(input_json, &mut values, &mut assignment)?;
+        Ok(std::mem::take(&mut *assignment))
+    }
+
+    /// Consume a witness while reusing bounded buffers. Buffers are zeroized
+    /// before returning, including on errors or panic unwinding.
+    pub fn with_witness_json<T>(
+        &self,
+        input_json: &str,
+        workspace: &mut crate::WitnessWorkspace,
+        consume: impl FnOnce(&[Fr]) -> T,
+    ) -> Result<T, WitnessError> {
+        let lease = crate::workspace::Lease(workspace);
+        self.calculate_json_into(input_json, &mut lease.0.values, &mut lease.0.assignment)?;
+        Ok(consume(&lease.0.assignment))
+    }
+
+    fn calculate_json_into(
+        &self,
+        input_json: &str,
+        values: &mut Vec<Fr>,
+        assignment: &mut Vec<Fr>,
+    ) -> Result<(), WitnessError> {
+        let inputs = zeroize::Zeroizing::new(build_input_buffer(
             &self.input_mapping,
             self.input_buffer_len,
             input_json,
             &self.limits,
-        )?;
-        let mut values = reserved_vec("evaluation slots", self.slots)?;
+        )?);
+        values
+            .try_reserve(self.slots)
+            .map_err(|_| WitnessError::AllocationFailed {
+                section: "evaluation slots",
+            })?;
         values.resize(self.slots, Fr::zero());
-        let mut assignment = reserved_vec("witness assignment", self.signal_count)?;
+        assignment
+            .try_reserve(self.signal_count)
+            .map_err(|_| WitnessError::AllocationFailed {
+                section: "witness assignment",
+            })?;
         assignment.resize(self.signal_count, Fr::zero());
         let mut output_index = 0_usize;
 
@@ -235,16 +267,16 @@ impl SageGraph {
             let value = match instruction.kind {
                 Kind::Input => *slot(&inputs, instruction.left, "input")?,
                 Kind::Constant => *slot(&self.constants, instruction.left, "constant")?,
-                Kind::Inverse => slot(&values, instruction.left, "inverse source")?
+                Kind::Inverse => slot(values, instruction.left, "inverse source")?
                     .inverse()
                     .unwrap_or_else(Fr::zero),
                 Kind::Operation(operation) => {
-                    let left = *slot(&values, instruction.left, "left source")?;
-                    let right = *slot(&values, instruction.right, "right source")?;
+                    let left = *slot(values, instruction.left, "left source")?;
+                    let right = *slot(values, instruction.right, "right source")?;
                     operation.evaluate(index, left, right)?
                 }
             };
-            *slot_mut(&mut values, instruction.destination, "destination")? = value;
+            *slot_mut(values, instruction.destination, "destination")? = value;
 
             // Outputs are sorted by node, so every write for this node is contiguous.
             // Copying `value` rather than re-reading the slot is load-bearing: it is
@@ -254,7 +286,7 @@ impl SageGraph {
                 .get(output_index)
                 .filter(|output| output.node as usize == index)
             {
-                *slot_mut(&mut assignment, output.signal, "output signal")? = value;
+                *slot_mut(assignment, output.signal, "output signal")? = value;
                 output_index += 1;
             }
         }
@@ -269,7 +301,7 @@ impl SageGraph {
         if assignment.first().copied() != Some(Fr::from(1_u64)) {
             return Err(WitnessError::InvalidAssignmentOne);
         }
-        Ok(assignment)
+        Ok(())
     }
 
     pub fn assignment_size(&self) -> usize {

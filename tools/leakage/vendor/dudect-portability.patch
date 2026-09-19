@@ -1,0 +1,32 @@
+--- upstream/dudect.h
++++ vendor/dudect.h
+@@ -71,8 +71,14 @@
+ 
+ #include <stddef.h>
+ #include <stdint.h>
++#if defined(__x86_64__)
+ #include <emmintrin.h>
+ #include <x86intrin.h>
++#elif defined(__aarch64__) || defined(__arm64__)
++#include <time.h>
++#else
++#error Unsupported timing architecture
++#endif
+ 
+ #ifdef DUDECT_VISIBLITY_STATIC
+ #define DUDECT_VISIBILITY static
+@@ -279,8 +285,14 @@
+  Also see https://stackoverflow.com/a/12634857
+ */
+ static inline int64_t cpucycles(void) {
++#if defined(__x86_64__)
+   _mm_mfence();
+   return (int64_t)__rdtsc();
++#else
++  struct timespec now;
++  clock_gettime(CLOCK_MONOTONIC_RAW, &now);
++  return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
++#endif
+ }
+ 
+ // threshold values for Welch's t-test

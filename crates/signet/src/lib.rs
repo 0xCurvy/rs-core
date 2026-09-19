@@ -146,9 +146,60 @@ fn compress_with_system_zstd(bytes: &[u8], level: i32) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child.stdin.take()?.write_all(bytes).ok()?;
-    let output = child.wait_with_output().ok()?;
+    let mut stdin = child.stdin.take()?;
+    // Drain stdout while feeding stdin. Writing the entire artifact first can
+    // deadlock once incompressible output fills the child's stdout pipe: zstd
+    // blocks on output while the parent blocks on input. Production v1 graphs
+    // are large enough to cross that boundary even though smaller fixtures are
+    // not.
+    let (output, wrote_input) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(bytes));
+        let output = child.wait_with_output().ok();
+        let wrote_input = writer.join().ok().and_then(Result::ok).is_some();
+        (output, wrote_input)
+    });
+    if !wrote_input {
+        return None;
+    }
+    let output = output?;
     output.status.success().then_some(output.stdout)
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use std::io::Read;
+    use std::process::Command;
+
+    use super::compress_with_system_zstd;
+
+    #[test]
+    fn system_zstd_drains_large_output_while_writing() {
+        if !Command::new("zstd")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+
+        // Deterministic, effectively incompressible output well above ordinary
+        // pipe capacity. The old write-then-drain implementation deadlocked on
+        // this shape and on the 50-note production SIGNET v1 artifact.
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut source = vec![0_u8; 2 * 1024 * 1024];
+        for chunk in source.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        let compressed = compress_with_system_zstd(&source, 1).expect("system zstd");
+        let mut decoder =
+            ruzstd::decoding::StreamingDecoder::new(compressed.as_slice()).expect("zstd frame");
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).expect("decode frame");
+        assert_eq!(decoded, source);
+    }
 }
 
 /// Which body encoding the artifact uses.

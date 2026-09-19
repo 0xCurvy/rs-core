@@ -37,6 +37,13 @@ bindings/node/THIRD-PARTY-NOTICES.md
 
 # Local JavaScript tooling.
 node_modules
+__pycache__/
+*.py[cod]
+/tools/leakage/pkg/
+/tools/benchmarks/results/leakage-*/**/dudect
+/tools/benchmarks/results/leakage-*/**/timecop
+/tools/benchmarks/results/leakage-*/**/phases
+/tools/benchmarks/results/leakage-*/**/*.dSYM/
 
 # macOS / IDE metadata.
 .DS_Store

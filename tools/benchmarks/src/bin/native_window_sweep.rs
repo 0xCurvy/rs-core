@@ -8,10 +8,8 @@
 use std::{env, fs, fs::File, time::Instant};
 
 use curvy_prover::{
-    sparrow::{
-        SparrowConfig,
-        manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
-    },
+    ProverMode, SPARROW_PROFILE, StreamingConfig,
+    sparrow::manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
     wtns::read_wtns,
 };
 
@@ -32,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_threads(threads)
         .build_global()?;
 
-    let mut base_config = SparrowConfig::native_adaptive();
+    let mut base_config = StreamingConfig::native_adaptive();
     if let Some(value) = args.get(7) {
         base_config.msm_chunk_points = value.parse()?;
     }
@@ -60,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         for index in indices {
             let window_bits = timings[index].0;
-            let config = SparrowConfig {
+            let config = StreamingConfig {
                 window_bits,
                 ..base_config
             };
@@ -77,6 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("prover_mode={}", ProverMode::Streaming);
+    println!("profile={SPARROW_PROFILE}");
     println!("threads={threads}");
     println!("msm_chunk_points={}", base_config.msm_chunk_points);
     println!("samples={samples}");

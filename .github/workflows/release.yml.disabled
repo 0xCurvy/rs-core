@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       # Releases come off main. CI (ci.yml) only runs on main and pull
@@ -112,13 +112,13 @@ jobs:
           install_dir="$(mktemp -d)"
           cd "$install_dir"
           npm init -y > /dev/null
-          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/0xcurvy-rs-core-wasm-*.tgz
+          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/0xcurvy-rs-core-wasm-*.tgz
           node "$GITHUB_WORKSPACE/scripts/smoke-npm.mjs" "$install_dir"
 
       # Version immutability is the registry's job: a re-run of the same tag
       # fails here instead of silently replacing a published artifact.
       - name: Publish
         working-directory: dist/npm
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Configure the package's trusted publisher for this workflow before
+        # enabling it. No long-lived publish token is loaded into the runner.
+        run: npm publish --ignore-scripts --provenance

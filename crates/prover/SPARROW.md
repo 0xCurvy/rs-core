@@ -1,13 +1,16 @@
-# SPARROW integration guide
+# Streaming prover (SPARROW) integration guide
 
-SPARROW is the opt-in bounded-memory Groth16 prover in `curvy-prover`. It uses
-SAGE for witness evaluation and processes a snarkjs proving key sequentially so
-the host does not need to retain the complete zkey or a complete query section.
-Every returned proof is verified with arkworks before it leaves the crate.
+SPARROW means **Streaming Prover Architecture for Resource-Restricted One-pass
+Workflows**. It is the opt-in bounded-memory Groth16 prover in `curvy-prover`.
+`StreamingProver` uses SAGE for witness evaluation and processes a snarkjs
+proving key sequentially so the host does not need to retain the complete zkey
+or a complete query section. Every returned proof is verified with arkworks
+before it leaves the crate.
 
 Use SPARROW when peak memory is more important than the lowest possible latency.
-Use `CircuitProver` or `Prover` when the host has enough memory to load the full
-proving key and prefers the simpler whole-key flow.
+Use the HAWK `ResidentProver` when the host has enough memory to load the full
+proving key and benefits from reusing it. Use lower-level `Prover` only when the
+host already owns a `.wtns` assignment.
 
 Measured memory and latency comparisons are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -83,19 +86,19 @@ The one-pass manifest flow is the preferred native integration:
 
 ```rust,no_run
 use std::{fs, fs::File};
-use curvy_prover::sparrow::{SparrowConfig, SparrowProver};
+use curvy_prover::{StreamingConfig, StreamingProver};
 use curvy_witness::Limits;
 
 let graph = fs::read("circuit.signet")?;
 let manifest = fs::read("circuit.zkey.manifest")?;
 let input = fs::read_to_string("input.json")?;
 
-let prover = SparrowProver::from_signet_bytes(
+let prover = StreamingProver::from_signet_bytes(
     &graph,
     "GRAPH_SHA256",
     "ZKEY_SHA256",
     Limits::client(),
-    SparrowConfig::native_adaptive(),
+    StreamingConfig::native_adaptive(),
 )?;
 
 let proof = prover.prove_json_with_manifest(
@@ -131,7 +134,7 @@ On first use, a host should:
 1. Load the SIGNET bytes through `SageGraph::from_bytes_with_limits`, which
    authenticates the pinned source digest before parsing.
 2. Serialize the compiled evaluator with `to_compiled_bytes` or
-   `WasmSparrowProver.compiledSageProgram()`.
+   `WasmStreamingProver.compiledSageProgram()`.
 3. Hash the program bytes.
 4. Release the compiler-produced evaluator.
 5. Reload the bytes through the normal compiled-program decoder.
@@ -144,10 +147,16 @@ The cache key must contain:
 - the client or batch limits profile; and
 - the cache layout version owned by the host adapter.
 
-Every warm load must authenticate the cached program digest and supply the
-source graph digest to `from_compiled_sage_bytes` or
-`fromCompiledSageWithConfig`. Delete and rebuild an entry after any digest,
-metadata, format, dimension, index, or source-binding failure.
+Every warm load must authenticate the cached program against an independently
+trusted program digest and supply the source graph digest to
+`from_compiled_sage_bytes` or `fromCompiledSageWithConfig`. Hashing a cache entry
+and using its own hash as the expected digest does not authenticate it. The
+source digest inside a compiled blob also does not prove correct compilation.
+Publish program digests through the trusted artifact channel. The JavaScript
+adapter accepts `expectedSageProgramSha256`; without it, it recompiles the
+authenticated source graph each session instead of reading compiled cache entries.
+Delete and rebuild an entry after any digest, metadata, format, dimension, index,
+or source-binding failure.
 
 Raw cache bytes provide the lowest warm-load latency. Compression saves storage
 but adds decompression CPU and requires an additional bounded streaming decoder.
@@ -199,7 +208,7 @@ is no longer active.
 Window width and MSM chunk size are performance and memory settings. They do
 not change the mathematical MSM result and are not part of any artifact digest.
 
-Native callers should start with `SparrowConfig::native_adaptive()`. It selects
+Native callers should start with `StreamingConfig::native_adaptive()`. It selects
 a window independently for each authenticated query size and uses a bounded
 point batch. Browser and mobile hosts should pin values measured on their target
 devices because worker scheduling, process limits, and thermal behavior differ.
@@ -225,8 +234,11 @@ SPARROW constructs bulk zkey points without repeating subgroup validation for
 every point. This is safe only behind the documented authentication boundary:
 
 - the native manifest path authenticates each complete chunk before parsing;
-- the native fallback authenticates the whole zkey before its parsing pass;
-- direct `SparrowProofBuilder` callers must provide an equivalent boundary; and
+- the native fallback and public `prove_reader` helpers use `AuthenticatedReader`,
+  authenticating the whole zkey and rechecking each chunk before parsing;
+- the browser two-response helper verifies second-response chunks against hashes
+  privately recorded during the successful first pass;
+- direct `StreamingProofBuilder` callers must provide an equivalent boundary; and
 - every completed proof is verified with arkworks before release.
 
 The manifest is an independently pinned trust root for one-pass parsing. Its
@@ -248,3 +260,12 @@ Run the feature-specific suite before distributing a SPARROW build:
 cargo test -p curvy-prover --features sparrow
 cargo test -p curvy-prover --features parallel,sparrow
 ```
+
+All streaming headers reject domains above 2^22 before QAP allocation. Native,
+manifest, and WASM adapters additionally cap the domain by authenticated zkey
+length divided by 64 (the H query requires one 64-byte point per domain element).
+Direct `StreamingProofBuilder::new` callers must still supply preauthenticated
+bytes: its final digest does not retroactively make untrusted parsing safe.
+`prove_reader` and `prove_reader_owned` now require `Read + Seek`; use a pinned
+manifest for nonseekable input. Assignment element zero must equal one before
+streaming begins, and verification-key anchors must be nonidentity points.

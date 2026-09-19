@@ -9,11 +9,13 @@
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
 use curvy_core::eddsa::{
-    ScalarSignature, ScalarSigningKey, ephemeral_pub_key, pub_from_private_key_hex, sign_hex,
+    ScalarSignature, ScalarSigningKey, ephemeral_pub_key_bytes, pub_from_private_key_hex, sign_hex,
     verify_scalar_compat,
 };
-use curvy_core::encoding::dec_to_biguint;
-use curvy_core::field::{Bn254Fr, Fr, fr_from_be_32_checked, fr_from_dec, fr_to_be_32, fr_to_dec};
+use curvy_core::encoding::{try_dec_to_le_32, try_dec_to_u256};
+use curvy_core::field::{
+    Bn254Fr, Fr, fr_from_be_32_checked, fr_to_be_32, fr_to_dec, try_fr_from_dec,
+};
 use curvy_core::hash_utils::sha256_bigint as core_sha256_bigint;
 use curvy_core::imt::{
     CompletedShard, FrontierAppend, InclusionProof, IndexedMerkleTree,
@@ -24,50 +26,81 @@ use curvy_core::note;
 use curvy_core::poseidon::poseidon as core_poseidon;
 use curvy_core::stealth;
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
+
+mod signers;
 
 // Threaded builds export `initThreadPool(n)` - call it once (after `init()`)
 // on a cross-origin-isolated page before scans or bulk tree construction.
 #[cfg(feature = "wasm-threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+fn field_input(s: &str) -> Result<Fr, JsError> {
+    if s.len() > 4096 {
+        return Err(JsError::new("field decimal exceeds 4096 characters"));
+    }
+    try_fr_from_dec(s).map_err(|e| JsError::new(&e.to_string()))
+}
+fn raw_input(s: &str) -> Result<num_bigint::BigUint, JsError> {
+    try_dec_to_u256(s).map_err(JsError::new)
+}
+
 /// Poseidon hash of `1..=16` decimal field elements.
 #[wasm_bindgen]
-pub fn poseidon(inputs: Vec<String>) -> String {
-    let fes: Vec<_> = inputs.iter().map(|s| fr_from_dec(s)).collect();
-    fr_to_dec(&core_poseidon(&fes))
+pub fn poseidon(inputs: Vec<String>) -> Result<String, JsError> {
+    if !(1..=16).contains(&inputs.len()) {
+        return Err(JsError::new("Poseidon requires 1..=16 inputs"));
+    }
+    let fes = Zeroizing::new(
+        inputs
+            .iter()
+            .map(|s| field_input(s))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(fr_to_dec(&core_poseidon(&fes)))
 }
 
 /// `ownerHash = Poseidon([pub.x, pub.y, sharedSecret])`.
 #[wasm_bindgen(js_name = ownerHash)]
-pub fn owner_hash(pub_x: String, pub_y: String, shared_secret: String) -> String {
-    fr_to_dec(&note::owner_hash(
-        (fr_from_dec(&pub_x), fr_from_dec(&pub_y)),
-        fr_from_dec(&shared_secret),
-    ))
+pub fn owner_hash(pub_x: String, pub_y: String, shared_secret: String) -> Result<String, JsError> {
+    let pub_x = Zeroizing::new(pub_x);
+    let pub_y = Zeroizing::new(pub_y);
+    let shared_secret = Zeroizing::new(shared_secret);
+    Ok(fr_to_dec(&note::owner_hash(
+        (field_input(&pub_x)?, field_input(&pub_y)?),
+        field_input(&shared_secret)?,
+    )))
 }
 
 /// `id = Poseidon([ownerHash, amount, token])`.
 #[wasm_bindgen(js_name = noteId)]
-pub fn note_id(owner_hash: String, amount: String, token: String) -> String {
-    fr_to_dec(&note::note_id(
-        fr_from_dec(&owner_hash),
-        fr_from_dec(&amount),
-        fr_from_dec(&token),
-    ))
+pub fn note_id(owner_hash: String, amount: String, token: String) -> Result<String, JsError> {
+    let owner_hash = Zeroizing::new(owner_hash);
+    let amount = Zeroizing::new(amount);
+    let token = Zeroizing::new(token);
+    Ok(fr_to_dec(&note::note_id(
+        field_input(&owner_hash)?,
+        field_input(&amount)?,
+        field_input(&token)?,
+    )))
 }
 
 /// `nullifier = Poseidon([sharedSecret, pub.x, pub.y])`.
 #[wasm_bindgen]
-pub fn nullifier(shared_secret: String, pub_x: String, pub_y: String) -> String {
-    fr_to_dec(&note::nullifier(
-        fr_from_dec(&shared_secret),
-        (fr_from_dec(&pub_x), fr_from_dec(&pub_y)),
-    ))
+pub fn nullifier(shared_secret: String, pub_x: String, pub_y: String) -> Result<String, JsError> {
+    let shared_secret = Zeroizing::new(shared_secret);
+    let pub_x = Zeroizing::new(pub_x);
+    let pub_y = Zeroizing::new(pub_y);
+    Ok(fr_to_dec(&note::nullifier(
+        field_input(&shared_secret)?,
+        (field_input(&pub_x)?, field_input(&pub_y)?),
+    )))
 }
 
 /// Returns a BabyJubJub public key or throws for malformed private-key hex.
 #[wasm_bindgen(js_name = pubFromPrivateKey)]
 pub fn pub_from_private_key(private_key_hex: String) -> Result<Vec<String>, JsError> {
+    let private_key_hex = Zeroizing::new(private_key_hex);
     let (x, y) = pub_from_private_key_hex(&private_key_hex)
         .map_err(|e| JsError::new(&format!("invalid EdDSA private key: {e}")))?;
     Ok(vec![fr_to_dec(&x), fr_to_dec(&y)])
@@ -75,15 +108,19 @@ pub fn pub_from_private_key(private_key_hex: String) -> Result<Vec<String>, JsEr
 
 /// Ephemeral public key `R = scalar · Base8` as `[x, y]` (`ephemeralPubKey`).
 #[wasm_bindgen(js_name = ephemeralPubKey)]
-pub fn ephemeral_pub_key_wasm(scalar: String) -> Vec<String> {
-    let (x, y) = ephemeral_pub_key(&dec_to_biguint(&scalar));
-    vec![fr_to_dec(&x), fr_to_dec(&y)]
+pub fn ephemeral_pub_key_wasm(scalar: String) -> Result<Vec<String>, JsError> {
+    let scalar = Zeroizing::new(scalar);
+    let bytes = try_dec_to_le_32(&scalar).map_err(|error| JsError::new(&error.to_string()))?;
+    let (x, y) = ephemeral_pub_key_bytes(&bytes);
+    Ok(vec![fr_to_dec(&x), fr_to_dec(&y)])
 }
 
 /// Returns an EdDSA-Poseidon signature or throws for malformed private-key hex.
 #[wasm_bindgen]
 pub fn sign(message: String, private_key_hex: String) -> Result<Vec<String>, JsError> {
-    let sig = sign_hex(&dec_to_biguint(&message), &private_key_hex)
+    let message = Zeroizing::new(message);
+    let private_key_hex = Zeroizing::new(private_key_hex);
+    let sig = sign_hex(&raw_input(&message)?, &private_key_hex)
         .map_err(|e| JsError::new(&format!("invalid EdDSA private key: {e}")))?;
     Ok(vec![
         fr_to_dec(&sig.r8.0),
@@ -96,6 +133,7 @@ pub fn sign(message: String, private_key_hex: String) -> Result<Vec<String>, JsE
 /// scalar. This path performs no seed hashing, pruning, or clamping.
 #[wasm_bindgen(js_name = pubFromScalar)]
 pub fn pub_from_scalar(scalar: String) -> Result<Vec<String>, JsError> {
+    let scalar = Zeroizing::new(scalar);
     let key = ScalarSigningKey::from_decimal(&scalar).map_err(|e| JsError::new(&e.to_string()))?;
     let public = key.verifying_key();
     Ok(vec![fr_to_dec(&public.x()), fr_to_dec(&public.y())])
@@ -105,6 +143,8 @@ pub fn pub_from_scalar(scalar: String) -> Result<Vec<String>, JsError> {
 /// BabyJubjub subgroup scalar and canonical BN254 field message.
 #[wasm_bindgen(js_name = signWithScalar)]
 pub fn sign_with_scalar(message: String, scalar: String) -> Result<Vec<String>, JsError> {
+    let message = Zeroizing::new(message);
+    let scalar = Zeroizing::new(scalar);
     let message = Bn254Fr::try_from_dec(&message).map_err(|e| JsError::new(&e.to_string()))?;
     let key = ScalarSigningKey::from_decimal(&scalar).map_err(|e| JsError::new(&e.to_string()))?;
     let signature = key
@@ -128,6 +168,12 @@ pub fn verify_scalar_signature(
     r8_y: String,
     s: String,
 ) -> Result<bool, JsError> {
+    let message = Zeroizing::new(message);
+    let public_x = Zeroizing::new(public_x);
+    let public_y = Zeroizing::new(public_y);
+    let r8_x = Zeroizing::new(r8_x);
+    let r8_y = Zeroizing::new(r8_y);
+    let s = Zeroizing::new(s);
     let message = Bn254Fr::try_from_dec(&message).map_err(|e| JsError::new(&e.to_string()))?;
     let public = BabyJubPoint::try_from_dec(&public_x, &public_y)
         .map_err(|e| JsError::new(&e.to_string()))?;
@@ -148,15 +194,20 @@ pub fn encrypt_amount_token_wasm(
     shared_secret: String,
     ephemeral_key_x: String,
     ephemeral_key_y: String,
-) -> Vec<String> {
-    let ss = dec_to_biguint(&shared_secret);
-    let ex = dec_to_biguint(&ephemeral_key_x);
-    let ey = dec_to_biguint(&ephemeral_key_y);
-    let out = encrypt_amount_token(fr_from_dec(&amount), fr_from_dec(&token), &ss, (&ex, &ey));
-    vec![
+) -> Result<Vec<String>, JsError> {
+    let amount = Zeroizing::new(amount);
+    let token = Zeroizing::new(token);
+    let shared_secret = Zeroizing::new(shared_secret);
+    let ephemeral_key_x = Zeroizing::new(ephemeral_key_x);
+    let ephemeral_key_y = Zeroizing::new(ephemeral_key_y);
+    let ss = raw_input(&shared_secret)?;
+    let ex = raw_input(&ephemeral_key_x)?;
+    let ey = raw_input(&ephemeral_key_y)?;
+    let out = encrypt_amount_token(field_input(&amount)?, field_input(&token)?, &ss, (&ex, &ey));
+    Ok(vec![
         fr_to_dec(&out.encrypted_amount),
         fr_to_dec(&out.encrypted_token),
-    ]
+    ])
 }
 
 /// Decrypt `(encryptedAmount, encryptedToken)` -> `[amount, token]`.
@@ -167,24 +218,32 @@ pub fn decrypt_amount_token_wasm(
     shared_secret: String,
     ephemeral_key_x: String,
     ephemeral_key_y: String,
-) -> Vec<String> {
-    let ss = dec_to_biguint(&shared_secret);
-    let ex = dec_to_biguint(&ephemeral_key_x);
-    let ey = dec_to_biguint(&ephemeral_key_y);
+) -> Result<Vec<String>, JsError> {
+    let encrypted_amount = Zeroizing::new(encrypted_amount);
+    let encrypted_token = Zeroizing::new(encrypted_token);
+    let shared_secret = Zeroizing::new(shared_secret);
+    let ephemeral_key_x = Zeroizing::new(ephemeral_key_x);
+    let ephemeral_key_y = Zeroizing::new(ephemeral_key_y);
+    let ss = raw_input(&shared_secret)?;
+    let ex = raw_input(&ephemeral_key_x)?;
+    let ey = raw_input(&ephemeral_key_y)?;
     let (amount, token) = decrypt_amount_token(
-        fr_from_dec(&encrypted_amount),
-        fr_from_dec(&encrypted_token),
+        field_input(&encrypted_amount)?,
+        field_input(&encrypted_token)?,
         &ss,
         (&ex, &ey),
     );
-    vec![fr_to_dec(&amount), fr_to_dec(&token)]
+    Ok(vec![fr_to_dec(&amount), fr_to_dec(&token)])
 }
 
 /// `sha256BigInt`: raw 256-bit decimal inputs -> decimal digest (no field reduction).
 #[wasm_bindgen(js_name = sha256BigInt)]
-pub fn sha256_bigint(inputs: Vec<String>) -> String {
-    let ints: Vec<_> = inputs.iter().map(|s| dec_to_biguint(s)).collect();
-    core_sha256_bigint(&ints).to_string()
+pub fn sha256_bigint(inputs: Vec<String>) -> Result<String, JsError> {
+    let ints = inputs
+        .iter()
+        .map(|s| raw_input(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(core_sha256_bigint(&ints).to_string())
 }
 
 // Stateful notes trees
@@ -802,7 +861,7 @@ fn js_tree_error(error: TreeError) -> JsError {
 
 #[wasm_bindgen]
 pub fn version() -> String {
-    "v1.0.2".to_string()
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Fresh random meta-keys `[k, v, K, V]` = spend priv, view priv, spend pub, view pub.
@@ -824,6 +883,8 @@ pub fn get_meta(k: String, v: String) -> Result<Vec<String>, JsError> {
 /// Throws for malformed or off-curve recipient keys.
 #[wasm_bindgen]
 pub fn send(big_k: String, big_v: String) -> Result<Vec<String>, JsError> {
+    let big_k = Zeroizing::new(big_k);
+    let big_v = Zeroizing::new(big_v);
     let (r, out) = stealth::send(&big_k, &big_v)?;
     Ok(vec![r, out.big_r, out.view_tag, out.spending_pub_key])
 }
@@ -839,6 +900,8 @@ pub fn scan(
     rs: Vec<String>,
     view_tags: Vec<String>,
 ) -> Result<Vec<ScanMatch>, JsError> {
+    let k = Zeroizing::new(k);
+    let v = Zeroizing::new(v);
     Ok(stealth::scan(&k, &v, &rs, &view_tags)?
         .into_iter()
         .map(ScanMatch)
@@ -854,6 +917,8 @@ pub fn viewer_scan(
     rs: Vec<String>,
     view_tags: Vec<String>,
 ) -> Result<Vec<ViewerMatch>, JsError> {
+    let v = Zeroizing::new(v);
+    let big_k = Zeroizing::new(big_k);
     Ok(stealth::viewer_scan(&v, &big_k, &rs, &view_tags)?
         .into_iter()
         .map(ViewerMatch)
@@ -898,10 +963,12 @@ impl ViewerMatch {
 
 #[wasm_bindgen(js_name = dbg_isValidBN254Point)]
 pub fn dbg_is_valid_bn254_point(point: String) -> bool {
+    let point = Zeroizing::new(point);
     stealth::is_valid_bn254_point(&point)
 }
 
 #[wasm_bindgen(js_name = dbg_isValidSECP256k1Point)]
 pub fn dbg_is_valid_secp256k1_point(point: String) -> bool {
+    let point = Zeroizing::new(point);
     stealth::is_valid_secp256k1_point(&point)
 }

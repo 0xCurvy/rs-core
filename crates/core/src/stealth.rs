@@ -27,7 +27,7 @@ use num_bigint::BigUint;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::encoding::from_hex_lossy;
+use crate::encoding::from_hex_exact;
 
 // Map announcements → the SPARSE list of matches (the closure returns
 // `Option<Match>`), in input order. With the `parallel` feature the work fans
@@ -87,13 +87,22 @@ fn xy_secp(p: &SecpG1) -> String {
 }
 
 fn parse_xy<F: PrimeField>(s: &str) -> Result<(F, F), StealthError> {
-    let (x, y) = s
-        .split_once('.')
-        .ok_or_else(|| err(format!("point must be \"X.Y\", got {s:?}")))?;
-    Ok((
-        F::from_str(x).map_err(|_| err(format!("bad point X: {x:?}")))?,
-        F::from_str(y).map_err(|_| err(format!("bad point Y: {y:?}")))?,
-    ))
+    if s.len() > 160 {
+        return Err(err("point encoding exceeds 160 characters"));
+    }
+    let (x, y) = s.split_once('.').ok_or_else(|| err("point must be X.Y"))?;
+    let coordinate = |s: &str| {
+        if s.is_empty() || s.len() > 78 || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(err("point coordinates must be unsigned canonical decimals"));
+        }
+        let value = BigUint::parse_bytes(s.as_bytes(), 10)
+            .ok_or_else(|| err("invalid point coordinate"))?;
+        if value >= BigUint::from_bytes_le(&F::MODULUS.to_bytes_le()) {
+            return Err(err("point coordinate exceeds field modulus"));
+        }
+        F::from_str(s).map_err(|_| err("invalid point coordinate"))
+    };
+    Ok((coordinate(x)?, coordinate(y)?))
 }
 
 // Both BN254 G1 and secp256k1 have cofactor 1, so on-curve already implies the
@@ -104,7 +113,7 @@ fn parse_bn(s: &str, what: &str) -> Result<BnG1, StealthError> {
     let (x, y) = parse_xy::<BnFq>(s)?;
     let p = BnG1::new_unchecked(x, y);
     if !p.is_on_curve() {
-        return Err(err(format!("{what} is not on BN254 G1: {s:?}")));
+        return Err(err(format!("{what} is not on BN254 G1")));
     }
     Ok(p)
 }
@@ -112,7 +121,7 @@ fn parse_secp(s: &str, what: &str) -> Result<SecpG1, StealthError> {
     let (x, y) = parse_xy::<SecpFq>(s)?;
     let p = SecpG1::new_unchecked(x, y);
     if !p.is_on_curve() {
-        return Err(err(format!("{what} is not on secp256k1: {s:?}")));
+        return Err(err(format!("{what} is not on secp256k1")));
     }
     Ok(p)
 }
@@ -120,14 +129,24 @@ fn parse_secp(s: &str, what: &str) -> Result<SecpG1, StealthError> {
 /// Private scalar from big-endian hex, rejecting a zero reduction (a zero spend or
 /// view key would put every derived point at the identity).
 fn parse_secp_scalar(hex: &str, what: &str) -> Result<SecpFr, StealthError> {
-    let s = SecpFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
+    let s = SecpFr::from_be_bytes_mod_order(
+        &zeroize::Zeroizing::new(
+            from_hex_exact::<32>(hex)
+                .map_err(|_| err(format!("{what} must be exactly 32 bytes of unprefixed hex")))?,
+        )[..],
+    );
     if s.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }
     Ok(s)
 }
 fn parse_bn_scalar(hex: &str, what: &str) -> Result<BnFr, StealthError> {
-    let v = BnFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
+    let v = BnFr::from_be_bytes_mod_order(
+        &zeroize::Zeroizing::new(
+            from_hex_exact::<32>(hex)
+                .map_err(|_| err(format!("{what} must be exactly 32 bytes of unprefixed hex")))?,
+        )[..],
+    );
     if v.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }
@@ -184,7 +203,10 @@ pub struct SendOutput {
 }
 
 pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, StealthError> {
-    let r = BnFr::from_str(r_dec).map_err(|_| err(format!("bad ephemeral r: {r_dec:?}")))?;
+    if r_dec.len() > 78 {
+        return Err(err("ephemeral scalar exceeds 78 characters"));
+    }
+    let r = BnFr::from_str(r_dec).map_err(|_| err("invalid ephemeral decimal scalar"))?;
     if r.is_zero() {
         return Err(err("ephemeral r must be nonzero"));
     }
@@ -261,7 +283,7 @@ pub fn scan(
         Some(ScanMatch {
             index: i as u32,
             spending_pub_key: xy_secp(&secp_mul(big_s, b)),
-            spending_priv_key: format!("0x{}", fp_to_biguint(sb).to_str_radix(16)),
+            spending_priv_key: format!("0x{:064x}", fp_to_biguint(sb)),
         })
     }))
 }
@@ -308,18 +330,21 @@ fn random_scalar_bytes() -> Result<[u8; 32], StealthError> {
     Ok(b)
 }
 
-fn pad_even(s: &str) -> String {
-    if s.len().is_multiple_of(2) {
-        s.to_string()
-    } else {
-        format!("0{s}")
-    }
-}
-
 fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
     // A zero draw has probability ~2⁻²⁵⁴; redraw rather than emit a degenerate key.
     loop {
-        let x = F::from_le_bytes_mod_order(&random_scalar_bytes()?);
+        let mut bytes = zeroize::Zeroizing::new(random_scalar_bytes()?);
+        // Mask unused top bits, then reject rather than reduce: every accepted
+        // nonzero field element has exactly one equally likely encoding.
+        let bits = F::MODULUS_BIT_SIZE as usize;
+        if bits < 256 {
+            bytes[bits / 8] &= (1u8 << (bits % 8)) - 1;
+            bytes[bits / 8 + 1..].fill(0);
+        }
+        let x = F::from_le_bytes_mod_order(&bytes[..]);
+        if x.into_bigint().to_bytes_le() != bytes[..] {
+            continue;
+        }
         if !x.is_zero() {
             return Ok(x);
         }
@@ -331,8 +356,8 @@ fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
 pub fn new_meta() -> Result<(String, String, String, String), StealthError> {
     let s = random_nonzero::<SecpFr>()?;
     let v = random_nonzero::<BnFr>()?;
-    let k_hex = pad_even(&fp_to_biguint(s).to_str_radix(16));
-    let v_hex = pad_even(&fp_to_biguint(v).to_str_radix(16));
+    let k_hex = format!("{:064x}", fp_to_biguint(s));
+    let v_hex = format!("{:064x}", fp_to_biguint(v));
     Ok((
         k_hex,
         v_hex,
@@ -363,6 +388,25 @@ pub fn is_valid_secp256k1_point(point: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_hex_is_exact_and_generated_keys_are_fixed_width() {
+        let (k, v, _, _) = new_meta().unwrap();
+        assert_eq!(k.len(), 64);
+        assert_eq!(v.len(), 64);
+        for bad in [
+            "aabbZ".to_owned() + &"00".repeat(29),
+            "aabb".into(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "ab".repeat(32) + "f",
+            "0x".to_owned() + &k,
+        ] {
+            assert!(get_meta(&bad, &v).is_err());
+            assert!(get_meta(&k, &bad).is_err());
+            assert!(scan(&bad, &v, &[], &[]).is_err());
+        }
+    }
 
     #[test]
     fn new_meta_round_trips_through_get_meta() {

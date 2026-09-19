@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "batch" => Limits::batch_prover(),
         _ => return Err("limits must be client or batch".into()),
     };
-    let graph_bytes = fs::read(&args[1])?;
+    let graph_bytes = curvy_prover::artifacts::read_graph_file_bounded(&args[1], limits)?;
     let graph = SageGraph::from_bytes_with_limits(&graph_bytes, &args[2], limits)?;
     let program = graph.to_compiled_bytes()?;
     let program_sha256 = hex(Sha256::digest(&program));

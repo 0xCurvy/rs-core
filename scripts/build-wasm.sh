@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the complete Curvy Rust core for WebAssembly and generate JS bindings.
 #
-# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench]
+# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized]
 #
 # `--threads` is available only for the `web` target and requires nightly with
 # rust-src plus a cross-origin-isolated browser at runtime. The non-threaded
@@ -11,6 +11,9 @@
 # Published/default WASM packages intentionally omit both.
 # `--signet-v2` enables only the compact witness body decoder; SPARROW implies it.
 # `--bench` adds development-only arithmetic kernels and implies SPARROW.
+# `--compact-matrix` selects the opt-in constraint representation.
+# `--poseidon-optimized` is retained as a compatible explicit assertion of the
+# optimized default and does not change the exported API.
 #
 # Build controls:
 #   CURVY_WASM_LTO               release LTO mode (default: fat)
@@ -21,8 +24,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ "$#" -gt 5 ]; then
-  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench]" >&2
+if [ "$#" -gt 7 ]; then
+  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized]" >&2
   exit 1
 fi
 
@@ -34,6 +37,8 @@ thread_mode=""
 signet_v2_mode=""
 sparrow_mode=""
 bench_mode=""
+compact_matrix_mode=""
+poseidon_optimized_mode=""
 for mode in "$@"; do
   case "$mode" in
     --threads)
@@ -64,8 +69,22 @@ for mode in "$@"; do
       fi
       bench_mode="--bench"
       ;;
+    --compact-matrix)
+      if [ -n "$compact_matrix_mode" ]; then
+        echo "--compact-matrix may be supplied only once" >&2
+        exit 1
+      fi
+      compact_matrix_mode="--compact-matrix"
+      ;;
+    --poseidon-optimized)
+      if [ -n "$poseidon_optimized_mode" ]; then
+        echo "--poseidon-optimized may be supplied only once" >&2
+        exit 1
+      fi
+      poseidon_optimized_mode="--poseidon-optimized"
+      ;;
     *)
-      echo "unknown mode: $mode (use --threads, --signet-v2, --sparrow, --bench, or omit it)" >&2
+      echo "unknown mode: $mode (use --threads, --signet-v2, --sparrow, --bench, --compact-matrix, --poseidon-optimized, or omit it)" >&2
       exit 1
       ;;
   esac
@@ -90,6 +109,12 @@ elif [ "$sparrow_mode" = "--sparrow" ]; then
   prover_features+=",curvy-prover/sparrow"
 elif [ "$signet_v2_mode" = "--signet-v2" ]; then
   prover_features+=",curvy-prover/signet-v2"
+fi
+if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
+  prover_features+=",curvy-prover/compact-matrix"
+fi
+if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
+  prover_features+=",curvy-wasm/poseidon-optimized"
 fi
 
 case "$thread_mode" in
@@ -122,6 +147,12 @@ case "$thread_mode" in
       prover_features+=",curvy-prover/sparrow"
     elif [ "$signet_v2_mode" = "--signet-v2" ]; then
       prover_features+=",curvy-prover/signet-v2"
+    fi
+    if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
+      prover_features+=",curvy-prover/compact-matrix"
+    fi
+    if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
+      prover_features+=",curvy-wasm/poseidon-optimized"
     fi
     CARGO_PROFILE_RELEASE_LTO="$wasm_release_lto" \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$wasm_release_codegen_units" \
@@ -193,4 +224,10 @@ if [ "$sparrow_mode" = "--sparrow" ] || [ "$signet_v2_mode" = "--signet-v2" ]; t
 else
   signet_v2_status="disabled"
 fi
-echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status)"
+if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
+  compact_matrix_status="enabled"
+else
+  compact_matrix_status="disabled"
+fi
+poseidon_optimized_status="enabled-default"
+echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, compact-matrix=$compact_matrix_status, poseidon-optimized=$poseidon_optimized_status)"

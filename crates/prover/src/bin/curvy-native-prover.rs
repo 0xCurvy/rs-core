@@ -2,11 +2,11 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufReader, Read, Take};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use curvy_prover::CircuitProver;
+use curvy_prover::ResidentProver;
 
 const DEFAULT_THREADS: usize = 1;
 const MAX_THREADS: usize = 64;
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let load_started = Instant::now();
     let limits = curvy_witness::Limits::batch_prover();
-    let zkey = read_limited(&arguments.zkey_path, MAX_ZKEY_BYTES, "zkey")?;
+    let mut zkey = open_limited(&arguments.zkey_path, MAX_ZKEY_BYTES, "zkey")?;
     let graph = read_limited(
         &arguments.graph_path,
         limits.graph_bytes as u64,
@@ -46,11 +46,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let artifact_load = load_started.elapsed();
 
     let initialization_started = Instant::now();
-    let prover = CircuitProver::from_artifacts(
-        &zkey,
+    let prover = ResidentProver::from_artifacts_reader_with_limits(
+        &mut zkey,
         &arguments.zkey_sha256,
         &graph,
         &arguments.graph_sha256,
+        limits,
     )?;
     let artifact_initialization = initialization_started.elapsed();
     drop(zkey);
@@ -74,6 +75,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "\"artifactInitializationMs\":{:.3},",
             "\"witnessCalculationMs\":{:.3},",
             "\"proofGenerationMs\":{:.3},",
+            "\"proverMode\":\"{}\",",
+            "\"profile\":\"{}\",",
             "\"rayonThreads\":{}",
             "}}"
         ),
@@ -81,6 +84,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         elapsed_ms(artifact_initialization),
         elapsed_ms(witness_calculation),
         elapsed_ms(proof_generation),
+        prover.mode(),
+        prover.profile(),
         rayon_threads,
     );
     Ok(())
@@ -195,4 +200,23 @@ fn read_limited(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, Box<d
         return Err(format!("{label} changed size while it was being read").into());
     }
     Ok(bytes)
+}
+
+fn open_limited(
+    path: &Path,
+    maximum: u64,
+    label: &str,
+) -> Result<BufReader<Take<File>>, Box<dyn Error>> {
+    let file = File::open(path)?;
+    let expected = file.metadata()?.len();
+    if expected > maximum {
+        return Err(format!(
+            "{label} is {expected} bytes; maximum accepted size is {maximum} bytes"
+        )
+        .into());
+    }
+    // Read one byte beyond the accepted size if the file grows after metadata.
+    // Its authenticated digest will then fail before parsing.
+    let capped = file.take(maximum.checked_add(1).ok_or("zkey size limit overflow")?);
+    Ok(BufReader::new(capped))
 }

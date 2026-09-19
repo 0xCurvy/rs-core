@@ -6,6 +6,8 @@
 
 mod abi;
 mod registry;
+mod signers;
+pub use signers::*;
 
 // The vector binary links the rlib, so these exports must also be public Rust items.
 pub mod prover;
@@ -19,11 +21,11 @@ use std::ffi::{c_char, c_int};
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
 use curvy_core::eddsa::{
-    ScalarSignature, ScalarSigningKey, ephemeral_pub_key, pub_from_private_key_hex, sign_hex,
+    ScalarSignature, ScalarSigningKey, ephemeral_pub_key_bytes, pub_from_private_key_hex, sign_hex,
     verify_scalar_compat,
 };
-use curvy_core::encoding::dec_to_biguint;
-use curvy_core::field::{Bn254Fr, fr_from_dec, fr_to_dec};
+use curvy_core::encoding::{try_dec_to_le_32, try_dec_to_u256};
+use curvy_core::field::{Bn254Fr, fr_to_dec, try_fr_from_dec};
 use curvy_core::hash_utils::sha256_bigint as core_sha256_bigint;
 use curvy_core::note;
 use curvy_core::poseidon::poseidon as core_poseidon;
@@ -33,16 +35,36 @@ use abi::{guard, guard_result, str_in, str_vec_in, str_vec_out, string_out};
 
 pub use abi::{CurvyBytes, CurvyStatus, curvy_bytes_free, curvy_last_error, curvy_string_free};
 
+// Malformed inputs must return before arithmetic, without invoking the process
+// panic hook (catch_unwind runs only after that hook).
+macro_rules! checked {
+    ($value:expr) => {
+        match $value {
+            Ok(value) => value,
+            Err(error) => {
+                crate::abi::set_last_error(error.to_string());
+                return CurvyStatus::InvalidArgument;
+            }
+        }
+    };
+}
+fn field_input(s: &str) -> Result<curvy_core::Fr, &'static str> {
+    if s.len() > 4096 {
+        return Err("field decimal exceeds 4096 characters");
+    }
+    try_fr_from_dec(s).map_err(|_| "invalid decimal field element")
+}
+
 /// Returns the boundary version shared with `curvy-wasm`.
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_version(out: *mut *mut c_char) -> CurvyStatus {
-    guard(|| string_out("v1.0.2".to_string(), out))
+    guard(|| string_out(env!("CARGO_PKG_VERSION").to_string(), out))
 }
 
 /// Verifies that the native library is linked. Safe to call more than once.
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_init() -> CurvyStatus {
-    CurvyStatus::Ok
+    guard(|| CurvyStatus::Ok)
 }
 
 // Hashing
@@ -59,7 +81,16 @@ pub unsafe extern "C" fn curvy_poseidon(
             Ok(values) => values,
             Err(status) => return status,
         };
-        let elements: Vec<_> = inputs.iter().map(|value| fr_from_dec(value)).collect();
+        if !(1..=16).contains(&inputs.len()) {
+            crate::abi::set_last_error("Poseidon requires 1..=16 inputs");
+            return CurvyStatus::InvalidArgument;
+        }
+        let elements = checked!(
+            inputs
+                .iter()
+                .map(|value| field_input(value))
+                .collect::<Result<Vec<_>, _>>()
+        );
         string_out(fr_to_dec(&core_poseidon(&elements)), out)
     })
 }
@@ -78,7 +109,12 @@ pub unsafe extern "C" fn curvy_sha256_bigint(
             Ok(values) => values,
             Err(status) => return status,
         };
-        let integers: Vec<_> = inputs.iter().map(|value| dec_to_biguint(value)).collect();
+        let integers = checked!(
+            inputs
+                .iter()
+                .map(|value| try_dec_to_u256(value))
+                .collect::<Result<Vec<_>, _>>()
+        );
         string_out(core_sha256_bigint(&integers).to_string(), out)
     })
 }
@@ -100,8 +136,8 @@ pub unsafe extern "C" fn curvy_owner_hash(
             };
         string_out(
             fr_to_dec(&note::owner_hash(
-                (fr_from_dec(pub_x), fr_from_dec(pub_y)),
-                fr_from_dec(shared_secret),
+                (checked!(field_input(pub_x)), checked!(field_input(pub_y))),
+                checked!(field_input(shared_secret)),
             )),
             out,
         )
@@ -125,9 +161,9 @@ pub unsafe extern "C" fn curvy_note_id(
             };
         string_out(
             fr_to_dec(&note::note_id(
-                fr_from_dec(owner_hash),
-                fr_from_dec(amount),
-                fr_from_dec(token),
+                checked!(field_input(owner_hash)),
+                checked!(field_input(amount)),
+                checked!(field_input(token)),
             )),
             out,
         )
@@ -151,8 +187,8 @@ pub unsafe extern "C" fn curvy_nullifier(
             };
         string_out(
             fr_to_dec(&note::nullifier(
-                fr_from_dec(shared_secret),
-                (fr_from_dec(pub_x), fr_from_dec(pub_y)),
+                checked!(field_input(shared_secret)),
+                (checked!(field_input(pub_x)), checked!(field_input(pub_y))),
             )),
             out,
         )
@@ -221,7 +257,8 @@ pub unsafe extern "C" fn curvy_ephemeral_pub_key(
             Ok(value) => value,
             Err(status) => return status,
         };
-        let (x, y) = ephemeral_pub_key(&dec_to_biguint(scalar));
+        let bytes = checked!(try_dec_to_le_32(scalar));
+        let (x, y) = ephemeral_pub_key_bytes(&bytes);
         str_vec_out(vec![fr_to_dec(&x), fr_to_dec(&y)], out)
     })
 }
@@ -241,7 +278,7 @@ pub unsafe extern "C" fn curvy_sign(
             (Ok(message), Ok(hex)) => (message, hex),
             _ => return CurvyStatus::InvalidArgument,
         };
-        let signature = match sign_hex(&dec_to_biguint(message), hex) {
+        let signature = match sign_hex(&checked!(try_dec_to_u256(message)), hex) {
             Ok(signature) => signature,
             Err(error) => {
                 crate::abi::set_last_error(format!("invalid EdDSA private key: {error}"));
@@ -324,7 +361,7 @@ pub unsafe extern "C" fn curvy_verify_scalar_signature(
             if out.is_null() {
                 return CurvyStatus::InvalidArgument;
             }
-            unsafe { *out = c_int::from(valid) };
+            unsafe { std::ptr::write_unaligned(out, c_int::from(valid)) };
             CurvyStatus::Ok
         },
     )
@@ -357,10 +394,13 @@ pub unsafe extern "C" fn curvy_encrypt_amount_token(
             return CurvyStatus::InvalidArgument;
         };
         let out_values = encrypt_amount_token(
-            fr_from_dec(amount),
-            fr_from_dec(token),
-            &dec_to_biguint(secret),
-            (&dec_to_biguint(ex), &dec_to_biguint(ey)),
+            checked!(field_input(amount)),
+            checked!(field_input(token)),
+            &checked!(try_dec_to_u256(secret)),
+            (
+                &checked!(try_dec_to_u256(ex)),
+                &checked!(try_dec_to_u256(ey)),
+            ),
         );
         str_vec_out(
             vec![
@@ -397,10 +437,13 @@ pub unsafe extern "C" fn curvy_decrypt_amount_token(
             return CurvyStatus::InvalidArgument;
         };
         let (amount, token) = decrypt_amount_token(
-            fr_from_dec(amount),
-            fr_from_dec(token),
-            &dec_to_biguint(secret),
-            (&dec_to_biguint(ex), &dec_to_biguint(ey)),
+            checked!(field_input(amount)),
+            checked!(field_input(token)),
+            &checked!(try_dec_to_u256(secret)),
+            (
+                &checked!(try_dec_to_u256(ex)),
+                &checked!(try_dec_to_u256(ey)),
+            ),
         );
         str_vec_out(vec![fr_to_dec(&amount), fr_to_dec(&token)], out)
     })

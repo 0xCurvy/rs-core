@@ -8,7 +8,7 @@
 //! The public API speaks **decimal strings** at the boundary; internally we use
 //! `ark_bn254::Fr`. These helpers are the single conversion point.
 
-use core::{fmt, str::FromStr};
+use core::fmt;
 
 use ark_ff::{BigInteger, PrimeField};
 use num_bigint::BigUint;
@@ -53,19 +53,20 @@ impl std::error::Error for Bn254FrError {}
 impl Bn254Fr {
     /// Parse a canonical unsigned decimal integer in `[0, p)`.
     pub fn try_from_dec(s: &str) -> Result<Self, Bn254FrError> {
-        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(Bn254FrError::InvalidDecimal);
+        use crate::encoding::{DecimalU256Error, try_dec_to_le_32};
+        if s.len() > FIELD_MODULUS_DEC.len() {
+            return Err(Bn254FrError::OutOfRange);
         }
+        let bytes = try_dec_to_le_32(s).map_err(|error| match error {
+            DecimalU256Error::InvalidDecimal => Bn254FrError::InvalidDecimal,
+            DecimalU256Error::OutOfRange => Bn254FrError::OutOfRange,
+        })?;
         if s.len() > 1 && s.starts_with('0') {
             return Err(Bn254FrError::NonCanonicalDecimal);
         }
-        let value = BigUint::parse_bytes(s.as_bytes(), 10).ok_or(Bn254FrError::InvalidDecimal)?;
-        let modulus =
-            BigUint::parse_bytes(FIELD_MODULUS_DEC.as_bytes(), 10).expect("valid BN254 modulus");
-        if value >= modulus {
-            return Err(Bn254FrError::OutOfRange);
-        }
-        Ok(Self(fr_from_biguint(&value)))
+        crate::secret_field::from_le_bytes(&bytes)
+            .map(Self)
+            .ok_or(Bn254FrError::OutOfRange)
     }
 
     /// Wrap an already canonical internal field element.
@@ -89,10 +90,7 @@ impl Bn254Fr {
     }
 
     pub fn to_le_32(self) -> [u8; 32] {
-        let bytes = fr_to_biguint(&self.0).to_bytes_le();
-        let mut out = [0u8; 32];
-        out[..bytes.len()].copy_from_slice(&bytes);
-        out
+        crate::secret_field::to_le_bytes(self.0)
     }
 }
 
@@ -102,12 +100,58 @@ impl Bn254Fr {
 /// This is deliberate: it mirrors how poseidon-lite / circom coerce inputs, so it
 /// is the correct boundary for *field-element* values (Poseidon inputs, amounts,
 /// commitments). For *raw 256-bit* integers that must NOT be reduced - the cipher
-/// key material, `sha256BigInt` inputs, and the EdDSA signing message - use a
-/// [`num_bigint::BigUint`] with the raw byte encodings in [`crate::encoding`].
+/// key material, `sha256BigInt` inputs, and the EdDSA signing message - use the
+/// checked raw encodings in [`crate::encoding`], such as
+/// [`crate::encoding::try_dec_to_le_32`].
 ///
 /// Panics only if `s` is not a valid (optionally signed) decimal integer.
 pub fn fr_from_dec(s: &str) -> Fr {
-    Fr::from_str(s).unwrap_or_else(|_| panic!("invalid field decimal: {s:?}"))
+    try_fr_from_dec(s).expect("invalid field decimal")
+}
+
+/// Fallible reducing decimal parser. Uses bounded-size arithmetic, including for
+/// long inputs, and never includes input contents in an error.
+/// Work depends on digit count; sign and validation status remain observable.
+pub fn try_fr_from_dec(s: &str) -> Result<Fr, Bn254FrError> {
+    try_fr_from_decimal_bytes(s.as_bytes())
+}
+
+pub(crate) fn try_fr_from_decimal_bytes(s: &[u8]) -> Result<Fr, Bn254FrError> {
+    use crate::secret_field::{self, Element};
+    use crypto_bigint::{U256, ctutils::CtSelect};
+    use zeroize::Zeroizing;
+
+    let negative = s.first() == Some(&b'-');
+    #[cfg(feature = "leakage")]
+    let negative = crate::leakage::public_flag(negative);
+    let digits = &s[usize::from(negative)..];
+    if digits.is_empty() {
+        return Err(Bn254FrError::InvalidDecimal);
+    }
+    let mut invalid = 0_u8;
+    let mut value = Zeroizing::new(Element::ZERO);
+    for chunk in digits.chunks(19) {
+        let mut word = Zeroizing::new(0_u64);
+        for character in chunk {
+            let digit = character.wrapping_sub(b'0');
+            invalid |= u8::from(digit > 9);
+            *word = word.wrapping_mul(10).wrapping_add(u64::from(digit));
+        }
+        let scale = Element::new(&U256::from(10_u64.pow(chunk.len() as u32)));
+        *value = secret_field::add(*value * scale, Element::new(&U256::from(*word)));
+    }
+    let invalid = invalid != 0;
+    #[cfg(feature = "leakage")]
+    let invalid = crate::leakage::public_flag(invalid);
+    if invalid {
+        return Err(Bn254FrError::InvalidDecimal);
+    }
+    let negated = Zeroizing::new(secret_field::negate(*value));
+    Ok(secret_field::into_ark(Element::from_montgomery(
+        value
+            .as_montgomery()
+            .ct_select(negated.as_montgomery(), u8::from(negative).into()),
+    )))
 }
 
 /// Reduce a non-negative integer modulo the field modulus into an `Fr`.
@@ -128,11 +172,9 @@ pub fn fr_to_biguint(x: &Fr) -> BigUint {
 /// 32-byte **big-endian** packing of a field element's canonical representative.
 /// This is the wire encoding used by the note cipher and `sha256BigInt`.
 pub fn fr_to_be_32(x: &Fr) -> [u8; 32] {
-    let be = x.into_bigint().to_bytes_be(); // BN254 Fr -> BigInt<4> -> exactly 32 bytes
-    debug_assert_eq!(be.len(), 32);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&be);
-    out
+    let mut bytes = crate::secret_field::to_le_bytes(*x);
+    bytes.reverse();
+    bytes
 }
 
 /// Interpret big-endian bytes as an integer reduced into the field (`mod modulus`).
@@ -146,16 +188,36 @@ pub fn fr_from_be_bytes_mod(bytes: &[u8]) -> Fr {
 /// to the modulus instead of silently reducing them. Use it for persisted or
 /// network-supplied tree data where non-canonical encodings indicate corruption.
 pub fn fr_from_be_32_checked(bytes: &[u8]) -> Option<Fr> {
-    if bytes.len() != 32 {
-        return None;
-    }
-    let value = Fr::from_be_bytes_mod_order(bytes);
-    (fr_to_be_32(&value).as_slice() == bytes).then_some(value)
+    let mut encoded = zeroize::Zeroizing::new(<[u8; 32]>::try_from(bytes).ok()?);
+    encoded.reverse();
+    crate::secret_field::from_le_bytes(&encoded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_field_decimal_reduction_matches_integer_oracle() {
+        let modulus = BigUint::parse_bytes(FIELD_MODULUS_DEC.as_bytes(), 10).unwrap();
+        for length in [1, 18, 19, 20, 38, 76, 77, 78, 256, 4096] {
+            for digit in ['0', '1', '5', '9'] {
+                let decimal = digit.to_string().repeat(length);
+                let integer = BigUint::parse_bytes(decimal.as_bytes(), 10).unwrap();
+                let expected = fr_from_biguint(&(&integer % &modulus));
+                assert_eq!(try_fr_from_dec(&decimal).unwrap(), expected);
+                assert_eq!(try_fr_from_dec(&format!("-{decimal}")).unwrap(), -expected);
+            }
+        }
+        for invalid in ["", "-", "+5", "5_", "1e2", "１２", " 5", "5 "] {
+            assert!(try_fr_from_dec(invalid).is_err());
+        }
+        for index in 0..78 {
+            let mut malformed = [b'9'; 78];
+            malformed[index] = 0xff;
+            assert!(try_fr_from_decimal_bytes(&malformed).is_err());
+        }
+    }
 
     #[test]
     fn decimal_roundtrip() {

@@ -56,7 +56,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: bindings/node/package-lock.json
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: bindings/node
       - run: npm run build -- --target x86_64-unknown-linux-gnu -- --locked
         working-directory: bindings/node
@@ -76,8 +76,11 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
       - run: cargo fmt --all --check
+      - run: cargo run --locked -p curvy-benchmarks --bin generate_poseidon_optimized -- --check
       - run: cargo check --workspace --all-targets --locked
       - run: cargo test --workspace --all-targets --locked
+      # Keep the direct Poseidon schedule buildable as an independent oracle.
+      - run: cargo test -p curvy-core --no-default-features --locked
       # Workspace feature unification includes the internal SIGNET producer.
       # These isolated commands prove the published defaults still refuse v2
       # and use stock serial ark-groth16.
@@ -87,6 +90,28 @@ jobs:
       # not select its integration suite or examples.
       - run: cargo test -p curvy-prover --features sparrow --all-targets --locked
       - run: cargo test -p curvy-prover --features parallel,sparrow --all-targets --locked
+      # `compact-matrix` swaps in a hand-rolled two-pass CSR zkey parser and its
+      # own QAP path, neither of which the default workspace test reaches. Cover
+      # the serial and parallel proof assemblies it can pair with.
+      - run: cargo test -p curvy-prover --features compact-matrix --all-targets --locked
+      - run: cargo test -p curvy-prover --features compact-matrix,parallel,sparrow --all-targets --locked
+      # Execute buffer-reuse success/error/unwind tests, not just compilation.
+      - run: cargo test -p curvy-prover --features scratch,sage,zkey-manifest --all-targets --locked
+      - run: cargo test -p curvy-prover --features scratch,parallel,sparrow --all-targets --locked
+      - run: cargo test -p curvy-prover --features zkey-manifest --all-targets --locked
+      - run: cargo build -p curvy-prover --example artifact_manifest_check --features sage --locked
+      - run: python3 tools/artifacts/test_release.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci --prefix tools/artifacts --ignore-scripts
+      - run: npm audit --prefix tools/artifacts --audit-level=high
+      - run: python3 tools/artifacts/test_pipeline.py
+      # `zkey-single-pass` replaces the seek-and-rehash zkey reader with one
+      # forward digesting walk. Cover it alone and paired with `compact-matrix`,
+      # whose two-pass CSR parser makes the walk buffer section 4.
+      - run: cargo test -p curvy-prover --features zkey-single-pass --all-targets --locked
+      - run: cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
       - run: cargo test --workspace --doc --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo doc --workspace --all-features --no-deps --locked
@@ -133,23 +158,23 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: node --test crates/prover/js/*.test.mjs
+      - run: node --test crates/prover/js/*.test.mjs scripts/*.test.mjs
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: scripts/build.sh wasm-nodejs
       - run: node crates/wasm/smoke-test.cjs
       - name: Check production prover bindings exclude SPARROW and SAGE
         run: |
-          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmCircuitProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmSparrowProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
+          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmResidentProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
       - run: node crates/prover/js/signet-v2-cross-target.cjs --expect-v2-disabled
       - run: scripts/build-wasm.sh nodejs --signet-v2
       - name: Check standalone SIGNET v2 bindings
         run: |
-          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmSparrowProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
+          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
       - run: node crates/prover/js/signet-v2-cross-target.cjs
       - run: scripts/build-wasm.sh nodejs --sparrow
       - name: Check opt-in SPARROW and SAGE bindings
         run: |
-          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); const sparrow = wasm.WasmSparrowProver; if (typeof wasm.WasmCircuitProver !== "function" || typeof sparrow !== "function" || typeof wasm.sageCacheVersion !== "function" || typeof sparrow.fromSignetWithConfig !== "function" || typeof sparrow.prototype.compiledSageProgram !== "function" || wasm.benchSha256 !== undefined) process.exit(1)'
+          node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); const streaming = wasm.WasmStreamingProver; if (typeof wasm.WasmResidentProver !== "function" || typeof streaming !== "function" || typeof wasm.sageCacheVersion !== "function" || typeof streaming.fromSignetWithConfig !== "function" || typeof streaming.prototype.compiledSageProgram !== "function" || wasm.benchSha256 !== undefined) process.exit(1)'
       - run: scripts/build.sh wasm-web
       - run: scripts/build.sh wasm-bundler
 
@@ -165,4 +190,31 @@ jobs:
           components: rust-src
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - run: scripts/build.sh wasm-web-threads
+      - run: scripts/build-wasm.sh web --threads --compact-matrix
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/browser/package-lock.json
+      - run: npm ci --prefix tools/browser --ignore-scripts
+      - run: npx --prefix tools/browser playwright install --with-deps chromium firefox
+      - run: node tools/browser/check.mjs
+
+  parser-fuzz:
+    name: Authenticated parser fuzz smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: nightly-2026-07-03
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: cargo +nightly-2026-07-03 fetch --manifest-path fuzz/Cargo.toml --locked
+      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build
+      - run: git diff --exit-code -- fuzz/Cargo.lock
+      - name: Exercise parsers after digest authentication
+        run: |
+          for target in graph sage prover_formats input_json; do
+            CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
+          done
