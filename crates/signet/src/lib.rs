@@ -146,8 +146,21 @@ fn compress_with_system_zstd(bytes: &[u8], level: i32) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child.stdin.take()?.write_all(bytes).ok()?;
-    let output = child.wait_with_output().ok()?;
+    // Feed stdin from its own thread while this one drains stdout. Writing all of
+    // stdin first deadlocks once zstd's pending output fills the stdout pipe: zstd
+    // blocks writing, we block writing, and neither runs again (it hung the
+    // pending-notes-commitment (50, 30) export). Dropping `stdin` at the end of the
+    // writer closes it, which is what lets zstd finish.
+    let mut stdin = child.stdin.take()?;
+    let output = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(bytes));
+        let output = child.wait_with_output();
+        let written = writer.join();
+        match (output, written) {
+            (Ok(output), Ok(Ok(()))) => Some(output),
+            _ => None,
+        }
+    })?;
     output.status.success().then_some(output.stdout)
 }
 
