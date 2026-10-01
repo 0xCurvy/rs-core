@@ -76,7 +76,9 @@ point. That optimization is inside an explicit artifact trust boundary:
 - default native whole-key loads authenticate the pinned zkey digest before
   parsing and recheck each reader chunk before exposing its bytes;
 - opt-in `zkey-single-pass` loads use the same pre-authenticated chunk view;
-- the one-pass path authenticates each complete manifest chunk before parsing;
+- the one-pass path authenticates each complete manifest chunk before parsing,
+  against a manifest whose own pin is the trust root (its claimed whole-file
+  digest is checked only by release tooling);
 - direct users of `StreamingProofBuilder` must perform one of those
   authentication steps before supplying bytes; and
 - every completed proof is verified with arkworks before it is returned.
@@ -172,11 +174,14 @@ are excluded from the published crate.
 ## Additional resident paths
 
 `Prover::from_zkey_manifest_reader` (feature `zkey-manifest`) accepts any `Read`
-source starting at byte zero and a `ZkeyChunkManifest` authenticated with both
-trusted pins. Complete chunks authenticate before parsing; truncated or excess
-streams fail. The Groth16 header must precede query sections. The manifest's
-whole-file digest and chunk table must be checked together by release tooling
-before its independent pin is published, as with SPARROW.
+source starting at byte zero and a `ZkeyChunkManifest` built from the manifest
+pin and the zkey pin. Complete chunks authenticate against the manifest before
+parsing; truncated or excess streams fail. The Groth16 header must precede query
+sections. On this path, as with SPARROW, the manifest pin is the sole trust
+root: the zkey pin is only compared with the whole-file digest the manifest
+claims, and that digest is not recomputed during loading. Release tooling must
+run `ZkeyChunkManifest::verify_reader`, which does recompute it, before the
+manifest pin is published.
 
 `ResidentProver::with_sage` and `from_compiled_sage` (feature `sage`) use SAGE
 with a resident proving key. Compiled caches require both their own pin and
@@ -190,7 +195,10 @@ explicit maximum retained byte counts; a zero limit retains nothing. The limits
 apply to idle capacity, not active peak memory. Owned buffers are zeroized on
 success, error, panic unwinding, and drop; caller inputs and temporary copies
 inside dependencies are outside this guarantee. MSM bucket reuse is not enabled.
-Default APIs retain no workspaces between proofs. See
+Default APIs retain no workspaces between proofs. They still wipe, on a best
+effort basis, the QAP and MSM-scalar buffers this crate allocates for a proof;
+copies inside arkworks (including the stock serial assembly's own scalar
+conversions) are not reached, so neither path claims complete erasure. See
 [measurements and promotion decisions](../../RESIDENT_OPTIMIZATIONS.md).
 
 The complete `prove_assignment`, `prove_json`, and `prove_wtns` APIs self-verify.

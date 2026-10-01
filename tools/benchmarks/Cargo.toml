@@ -28,3 +28,12 @@ scratch = ["curvy-prover/scratch"]
 compact-matrix = ["curvy-prover/compact-matrix"]
 zkey-single-pass = ["curvy-prover/zkey-single-pass"]
 poseidon-optimized = ["curvy-core/poseidon-optimized"]
+
+# `curvy_prover::proof_bench` exists only with the prover's `parallel` feature.
+[[bin]]
+name = "proof_msm_schedule"
+required-features = ["parallel"]
+
+[[bin]]
+name = "matrix_evaluation"
+required-features = ["parallel"]

@@ -54,7 +54,7 @@ A production integration should publish and pin these values together:
 |---|---|---|
 | SIGNET graph | exact byte length and SHA-256 | Source for authenticated SAGE compilation |
 | snarkjs zkey | exact byte length and SHA-256 | Groth16 proving key |
-| chunk manifest | exact byte length and SHA-256 | Authenticates each zkey chunk before parsing |
+| chunk manifest | exact byte length and SHA-256 | Trust root for one-pass proofs; authenticates each zkey chunk before parsing |
 | verification key | version or digest | Verifies proofs outside the prover |
 | circuit dimensions | public inputs and assignment size | Rejects mismatched artifact bundles during publication |
 
@@ -241,10 +241,15 @@ every point. This is safe only behind the documented authentication boundary:
 - direct `StreamingProofBuilder` callers must provide an equivalent boundary; and
 - every completed proof is verified with arkworks before release.
 
-The manifest is an independently pinned trust root for one-pass parsing. Its
-claimed whole-file digest is not recomputed during proving. Artifact publication
-must call `ZkeyChunkManifest::verify_reader` so the manifest's chunk table,
-length, and whole-file digest are known to describe the same zkey.
+The manifest pin is the sole trust root for one-pass parsing. The zkey pin
+supplied with it (`expected_zkey_sha256` in `StreamingProver`, or the zkey
+argument of `ZkeyChunkManifest::from_bytes`) is only compared with the
+whole-file digest the manifest claims; that digest is not recomputed during
+proving, and recomputing it would reintroduce the whole-file pass the manifest
+exists to avoid. Artifact publication must call
+`ZkeyChunkManifest::verify_reader`, the only check that recomputes it, so the
+manifest's chunk table, length, and whole-file digest are known to describe the
+same zkey.
 
 SPARROW retains arkworks for BN254 field arithmetic, group operations,
 randomness, Groth16 proof construction, and final verification. The Curvy-owned

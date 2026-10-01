@@ -1119,8 +1119,9 @@ where
         })?;
         // A padded top bit is necessary for signed recoding, but is not by
         // itself a field-generic proof that the final carry vanishes. SPARROW is
-        // fixed to BN254 Fr; its modulus and the allowed 4..=16 widths satisfy
-        // that stronger invariant, which the recoder tests exercise directly.
+        // fixed to BN254 Fr; its modulus and every width it can select (explicit
+        // 4..=16, or 3..=13 from the adaptive policy) satisfy that stronger
+        // invariant, which the recoder tests exercise directly for 3..=16.
         if recoding_bits <= Fr::MODULUS_BIT_SIZE as usize {
             return invalid("signed-window recoding needs a carry bit");
         }
@@ -1415,32 +1416,6 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, StreamingError> {
     Err(StreamingError::InvalidZkey(message.into()))
 }
 
-pub fn authenticate_reader<R: Read + Seek>(
-    reader: &mut R,
-    expected_sha256: &str,
-    chunk_bytes: usize,
-) -> Result<(), StreamingError> {
-    let expected = normalize_hash(expected_sha256)?;
-    reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = Sha256::new();
-    if !(FILE_HEADER_BYTES..=8 * 1024 * 1024).contains(&chunk_bytes) {
-        return invalid("I/O chunk bytes must be in 12..=8388608");
-    }
-    let mut buffer = vec![0_u8; chunk_bytes];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let actual = hex_digest(hasher.finalize());
-    if actual != expected {
-        return Err(StreamingError::ZkeyHashMismatch { expected, actual });
-    }
-    Ok(())
-}
-
 /// Authenticate the whole file and each subsequently exposed chunk before parsing.
 /// Non-seekable sources must use the independently pinned manifest adapter.
 pub fn prove_reader<R: Read + Seek>(
@@ -1461,9 +1436,8 @@ pub fn prove_reader_owned<R: Read + Seek>(
 ) -> Result<ProofBundle, StreamingError> {
     let config = config.validate()?;
     let mut authenticated =
-        crate::authenticated_reader::AuthenticatedReader::new(reader, expected_sha256).map_err(
-            |error| StreamingError::InvalidZkey(format!("zkey authentication failed: {error}")),
-        )?;
+        crate::authenticated_reader::AuthenticatedReader::new(reader, expected_sha256)
+            .map_err(authentication_error)?;
     let length = authenticated.seek(SeekFrom::End(0))?;
     authenticated.seek(SeekFrom::Start(0))?;
     let reader = &mut authenticated;
@@ -1507,6 +1481,19 @@ fn read_exact_stream<R: Read>(reader: &mut R, mut bytes: &mut [u8]) -> Result<()
     Ok(())
 }
 
+/// Preserve the typed pin and I/O failures of the shared whole-file pass.
+fn authentication_error(error: crate::ProverError) -> StreamingError {
+    use crate::ProverError as P;
+    match error {
+        P::InvalidExpectedHash => StreamingError::InvalidExpectedHash,
+        P::ZkeyHashMismatch { expected, actual } => {
+            StreamingError::ZkeyHashMismatch { expected, actual }
+        }
+        P::ZkeyIo(error) => StreamingError::Io(error),
+        error => StreamingError::InvalidZkey(format!("zkey authentication failed: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ark_bn254::Fr;
@@ -1529,6 +1516,55 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    /// The whole-file pass must surface the same typed pin and I/O errors that
+    /// callers matched before it moved into the shared authenticated reader.
+    #[test]
+    fn whole_file_authentication_keeps_typed_errors() {
+        use std::io::{Cursor, Read, Seek, SeekFrom};
+
+        use super::{StreamingError, prove_reader_owned};
+
+        let key = include_bytes!("../testdata/multiplier.zkey");
+        let assignment = || vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)];
+        let prove = |pin: &str| {
+            prove_reader_owned(
+                &mut Cursor::new(key),
+                assignment(),
+                pin,
+                StreamingConfig::default(),
+            )
+        };
+        assert!(matches!(
+            prove(&"00".repeat(32)),
+            Err(StreamingError::ZkeyHashMismatch { .. })
+        ));
+        assert!(matches!(
+            prove("not-a-digest"),
+            Err(StreamingError::InvalidExpectedHash)
+        ));
+
+        struct Failing;
+        impl Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk failed"))
+            }
+        }
+        impl Seek for Failing {
+            fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+                Ok(0)
+            }
+        }
+        assert!(matches!(
+            prove_reader_owned(
+                &mut Failing,
+                assignment(),
+                &"00".repeat(32),
+                StreamingConfig::default(),
+            ),
+            Err(StreamingError::Io(_))
+        ));
     }
 
     #[test]
@@ -1608,7 +1644,8 @@ mod tests {
         ];
         scalars.extend((0..128).map(|_| Fr::rand(&mut rng)));
 
-        for width in 4..=16 {
+        // Width 3 is reachable through the adaptive policy for tiny queries.
+        for width in 3..=16 {
             let windows = (Fr::MODULUS_BIT_SIZE as usize).div_ceil(width);
             for scalar in &scalars {
                 let mut reconstructed = NumBigInt::from(0);

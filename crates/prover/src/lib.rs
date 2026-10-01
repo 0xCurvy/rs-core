@@ -21,11 +21,17 @@
 //! describes proves nothing: an attacker who controls that host serves a
 //! matched pair and every check in this crate passes. Pins must be compiled
 //! into the application, or read from something the artifact host does not
-//! control - the deployed verifier contract being the natural source. The
-//! `zkey-chunk-manifest` shape reflects this: it takes the manifest digest and
-//! the zkey digest as two separate caller-supplied values and cross-checks the
-//! zkey hash it carries against the second, so the manifest can never attest to
-//! itself.
+//! control - the deployed verifier contract being the natural source.
+//!
+//! On the one-pass manifest paths (`zkey-manifest`), the manifest pin is the
+//! sole trust root. `ZkeyChunkManifest::from_bytes` authenticates the manifest
+//! against it, and every zkey chunk is then checked against the manifest's
+//! chunk table before parsing. The zkey pin passed alongside it is only a
+//! consistency check: it is compared with the whole-file digest the manifest
+//! *claims*, and that digest is not recomputed while loading or proving -
+//! avoiding that second pass is the manifest's purpose. Only
+//! `ZkeyChunkManifest::verify_reader` recomputes it, so release tooling must
+//! run it before publishing a manifest pin.
 //!
 //! [`Prover::verifying_key_digest`] exists to make that practical. It is 32
 //! bytes and stable across artifact rebuilds, so it can live in application
@@ -221,9 +227,13 @@ impl Prover {
     }
 
     /// Load a resident key in one forward pass using an independently pinned
-    /// manifest. Each chunk authenticates before point decoding. Construct the
-    /// manifest with both trusted manifest and zkey pins, and validate their
-    /// consistency with release tooling before publishing those pins.
+    /// manifest. Each chunk authenticates against the manifest before point
+    /// decoding. The manifest pin is the trust root here: the zkey pin given to
+    /// [`artifacts::manifest::ZkeyChunkManifest::from_bytes`] is only compared
+    /// with the digest the manifest claims, which this load does not recompute.
+    /// Release tooling must check that claim with
+    /// [`artifacts::manifest::ZkeyChunkManifest::verify_reader`] before
+    /// publishing the manifest pin.
     ///
     /// The source starts at byte zero and does not need Seek. As with the
     /// sequential parser, the Groth16 header must precede the query sections.
@@ -232,19 +242,20 @@ impl Prover {
         reader: &mut R,
         manifest: &artifacts::manifest::ZkeyChunkManifest,
     ) -> Result<Self, artifacts::manifest::ArtifactError> {
+        use artifacts::manifest::ArtifactError;
+
         let mut authenticated = artifacts::manifest::ManifestReader::new(reader, manifest);
-        let (pk, matrices, _) = zkey::read_zkey_forward(
-            &mut authenticated,
-            manifest.zkey_bytes(),
-            false,
-        )
-        .map_err(|error| match error {
-            SerializationError::IoError(error) => artifacts::manifest::ArtifactError::Io(error),
-            error => artifacts::manifest::ArtifactError::InvalidZkey(error.to_string()),
+        // The manifest reader reports a changed chunk as an `io::Error` wrapping
+        // its typed error; surface that rather than a generic I/O failure.
+        let parsed = zkey::read_zkey_forward(&mut authenticated, manifest.zkey_bytes(), false);
+        let (pk, matrices, _) = parsed.map_err(|error| match error {
+            SerializationError::IoError(error) => error
+                .downcast::<ArtifactError>()
+                .unwrap_or_else(ArtifactError::Io),
+            error => ArtifactError::InvalidZkey(error.to_string()),
         })?;
         authenticated.finish()?;
-        zkey::spot_check(&pk)
-            .map_err(|error| artifacts::manifest::ArtifactError::InvalidZkey(error.to_string()))?;
+        zkey::spot_check(&pk).map_err(|error| ArtifactError::InvalidZkey(error.to_string()))?;
         Ok(Self::from_parsed(pk, matrices))
     }
 

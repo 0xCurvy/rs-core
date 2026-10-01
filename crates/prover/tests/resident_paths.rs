@@ -2,14 +2,16 @@
 
 mod common;
 use common::{digest, multiplier_graph};
-use curvy_prover::{Prover, ResidentProver};
+#[cfg(any(feature = "zkey-manifest", feature = "sage"))]
+use curvy_prover::Prover;
+use curvy_prover::ResidentProver;
 
 const ZKEY: &[u8] = include_bytes!("../testdata/multiplier.zkey");
 
 #[cfg(feature = "zkey-manifest")]
 #[test]
 fn manifest_reader_loads_without_seek_and_rejects_every_changed_chunk() {
-    use curvy_prover::artifacts::manifest::ZkeyChunkManifest;
+    use curvy_prover::artifacts::manifest::{ArtifactError, ZkeyChunkManifest};
     let mut bytes = ZKEY.to_vec();
     bytes.resize(3 * 65536 + 7, 0); // Also authenticate bytes outside parsed sections.
     let (encoded, pin) = ZkeyChunkManifest::generate(&mut bytes.as_slice(), 65536).unwrap();
@@ -31,19 +33,33 @@ fn manifest_reader_loads_without_seek_and_rejects_every_changed_chunk() {
         "[\"33\"]"
     );
 
-    for offset in [0, 65536, 131072, bytes.len() - 1] {
+    for (index, offset) in [(0, 0), (1, 65536), (2, 131072), (3, bytes.len() - 1)] {
         let mut changed = bytes.clone();
         changed[offset] ^= 1;
         let error = Prover::from_zkey_manifest_reader(&mut changed.as_slice(), &manifest)
             .err()
             .unwrap();
-        assert!(error.to_string().contains("SHA-256 mismatch"));
+        let ArtifactError::ZkeyChunkHashMismatch { index: actual, .. } = error else {
+            panic!("offset {offset} must fail chunk authentication, got {error}");
+        };
+        assert_eq!(actual, index, "offset {offset}");
     }
     assert!(Prover::from_zkey_manifest_reader(&mut &bytes[..bytes.len() - 1], &manifest).is_err());
     bytes.push(0);
     assert!(Prover::from_zkey_manifest_reader(&mut bytes.as_slice(), &manifest).is_err());
-    assert!(ZkeyChunkManifest::from_bytes(&encoded, &pin, &"00".repeat(32)).is_err());
-    assert!(ZkeyChunkManifest::from_bytes(&encoded, &"00".repeat(32), &digest(&bytes)).is_err());
+    bytes.pop();
+    assert!(matches!(
+        ZkeyChunkManifest::from_bytes(&encoded, &pin, &"00".repeat(32)),
+        Err(ArtifactError::ManifestZkeyHashMismatch { .. })
+    ));
+    assert!(matches!(
+        ZkeyChunkManifest::from_bytes(&encoded, &pin, "not-a-digest"),
+        Err(ArtifactError::InvalidExpectedHash)
+    ));
+    assert!(matches!(
+        ZkeyChunkManifest::from_bytes(&encoded, &"00".repeat(32), &digest(&bytes)),
+        Err(ArtifactError::ManifestHashMismatch { .. })
+    ));
 }
 
 #[cfg(feature = "sage")]

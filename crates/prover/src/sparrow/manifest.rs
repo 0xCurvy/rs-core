@@ -149,8 +149,7 @@ impl ManifestProofStream {
             .chunks(self.manifest.chunk_bytes)
             .zip(expected)
             .enumerate()
-            .map(verify)
-            .collect::<Result<(), _>>()?;
+            .try_for_each(verify)?;
 
         for chunk in bytes.chunks(self.manifest.chunk_bytes) {
             self.framer.push(chunk)?;

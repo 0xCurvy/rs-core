@@ -37,6 +37,11 @@ const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// A compact, independently pinned list of SHA-256 hashes over consecutive zkey
 /// chunks. Its encoded size is 60 bytes plus 32 bytes per chunk, so hosts can
 /// authenticate it in full before any zkey bytes are interpreted.
+///
+/// The manifest pin is the sole trust root for every load or proof that uses
+/// it: zkey bytes are authenticated only against its chunk table. The
+/// whole-file zkey digest it carries is a claim that one-pass loading and
+/// proving never recompute; [`Self::verify_reader`] is the only check of it.
 #[derive(Clone)]
 pub struct ZkeyChunkManifest {
     pub(crate) chunk_bytes: usize,
@@ -46,6 +51,13 @@ pub struct ZkeyChunkManifest {
 }
 
 impl ZkeyChunkManifest {
+    /// Authenticate an encoded manifest against `expected_manifest_sha256`.
+    ///
+    /// `expected_zkey_sha256` is a consistency check only: it must equal the
+    /// whole-file digest recorded in the manifest, but nothing here or in the
+    /// one-pass readers hashes the zkey itself to confirm that record. Release
+    /// tooling must call [`Self::verify_reader`] before publishing the manifest
+    /// pin.
     pub fn from_bytes(
         bytes: &[u8],
         expected_manifest_sha256: &str,
@@ -184,10 +196,12 @@ impl ZkeyChunkManifest {
     /// Recheck a complete zkey against both the chunk table and the manifest's
     /// claimed whole-file digest.
     ///
-    /// One-pass proving intentionally trusts an independently pinned manifest and
-    /// therefore does not add a second whole-file hash. Release tooling can call
-    /// this method once to prove that the published manifest is internally
-    /// consistent without charging every proof for duplicate SHA-256 work.
+    /// One-pass loading and proving intentionally trust an independently pinned
+    /// manifest and therefore do not add a second whole-file hash. This is the
+    /// only place the claimed digest is recomputed: release tooling must call
+    /// it before publishing the manifest pin, so the published manifest is
+    /// known to be internally consistent without charging every proof for
+    /// duplicate SHA-256 work.
     pub fn verify_reader<R: Read>(&self, reader: &mut R) -> Result<(), ArtifactError> {
         let mut chunk = vec![0_u8; self.chunk_bytes];
         let mut whole = Sha256::new();

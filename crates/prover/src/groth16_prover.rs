@@ -24,6 +24,7 @@ use rayon::prelude::*;
 use crate::msm;
 #[cfg(not(feature = "compact-matrix"))]
 use crate::qap::CircomReduction;
+use crate::qap::WipeOnDrop;
 #[cfg(feature = "compact-matrix")]
 use crate::qap::{CompactMatrix, witness_map_from_compact_matrices};
 
@@ -77,12 +78,14 @@ fn create_proof_from_h(
     num_inputs: usize,
     full_assignment: &[Fr],
 ) -> Result<Proof<Bn254>, SynthesisError> {
+    // H and both scalar conversions are derived from the witness, so each is
+    // wiped when dropped (best effort; see `WipeOnDrop`).
     let h_assignment = into_bigints(h);
     // Public inputs (except the leading one) followed by private witnesses are
     // exactly `full_assignment[1..]`; retain one conversion for A, B1, B2, and
     // L. The L query starts where the private-witness suffix starts in this
     // shared representation, avoiding a second full copy of those scalars.
-    let assignment = to_bigints(&full_assignment[1..]);
+    let assignment = WipeOnDrop(to_bigints(&full_assignment[1..]));
     assemble_proof(pk, r, s, &h_assignment, &assignment, num_inputs)
 }
 
@@ -161,16 +164,17 @@ fn to_bigints(scalars: &[Fr]) -> Vec<BigInt<4>> {
 }
 
 #[cfg(feature = "parallel")]
-fn into_bigints(scalars: Vec<Fr>) -> Vec<BigInt<4>> {
-    scalars
-        .into_par_iter()
-        .map(PrimeField::into_bigint)
-        .collect()
+fn into_bigints(scalars: Vec<Fr>) -> WipeOnDrop<BigInt<4>> {
+    // Wipe the field form as soon as its integer copy exists.
+    let scalars = WipeOnDrop(scalars);
+    WipeOnDrop(to_bigints(&scalars))
 }
 
 #[cfg(not(feature = "parallel"))]
-fn into_bigints(scalars: Vec<Fr>) -> Vec<BigInt<4>> {
-    scalars.into_iter().map(PrimeField::into_bigint).collect()
+fn into_bigints(scalars: Vec<Fr>) -> WipeOnDrop<BigInt<4>> {
+    // std collects this same-layout `map` in place, so each field element is
+    // overwritten by its integer form rather than left in a freed buffer.
+    WipeOnDrop(scalars.into_iter().map(PrimeField::into_bigint).collect())
 }
 
 #[cfg(feature = "scratch")]

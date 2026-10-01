@@ -31,6 +31,7 @@
 //!  PointsH(9)
 //!  Contributions(10)
 use ark_ff::{BigInteger256, PrimeField, Zero};
+use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 #[cfg(not(feature = "compact-matrix"))]
 use ark_relations::utils::matrix::Matrix;
 use ark_serialize::{CanonicalDeserialize, SerializationError};
@@ -107,8 +108,30 @@ pub fn read_zkey<R: Read + Seek>(
     let mut binfile = BinFile::new(reader)?;
     let proving_key = binfile.proving_key()?;
     let matrices = binfile.matrices()?;
+    check_domain_size(&proving_key, &matrices)?;
     spot_check(&proving_key)?;
     Ok((proving_key, matrices))
+}
+
+/// Reject a Groth header whose QAP domain disagrees with its own constraints.
+///
+/// The prover sizes the witness map from the constraint count, not from the
+/// header, and its H-query MSM pairs bases with scalars only up to the shorter
+/// of the two. A larger declared domain would silently drop H bases, so
+/// [`crate::Prover::prove`] would return an invalid proof instead of an error.
+/// SPARROW makes the same check when it finishes section 4.
+fn check_domain_size(pk: &ProvingKey<Bn254>, matrices: &ZkeyMatrices<Fr>) -> IoResult<()> {
+    let used = matrices
+        .num_constraints
+        .checked_add(matrices.num_instance_variables)
+        .ok_or(SerializationError::InvalidData)?;
+    // `h_query.len()` equals the header's domain size: the section length is
+    // checked against it while parsing.
+    let expected = GeneralEvaluationDomain::<Fr>::new(used).map(|domain| domain.size());
+    if expected != Some(pk.h_query.len()) {
+        return Err(SerializationError::InvalidData);
+    }
+    Ok(())
 }
 
 /// Check that a proving key's CRS is internally consistent.
@@ -905,6 +928,7 @@ pub(crate) fn read_zkey_forward<R: Read>(
         l_query: l_query.ok_or(SerializationError::InvalidData)?,
     };
     let matrices = matrices.ok_or(SerializationError::InvalidData)?;
+    check_domain_size(&proving_key, &matrices)?;
     Ok((proving_key, matrices, digest))
 }
 
@@ -1254,6 +1278,69 @@ mod crs_consistency_tests {
         let mut pk = key();
         pk.b_g2_query.pop();
         assert!(super::validate_crs_consistency(&pk).is_err());
+    }
+}
+
+#[cfg(test)]
+mod domain_tests {
+    use std::io::Cursor;
+
+    const ZKEY: &[u8] = include_bytes!("../testdata/multiplier.zkey");
+
+    /// Re-emit the fixture with `domain_size` in its Groth header and the H
+    /// query padded with identity points to match, so every section length
+    /// still agrees with the header.
+    fn with_domain(domain_size: u32) -> Vec<u8> {
+        let count = u32::from_le_bytes(ZKEY[8..12].try_into().expect("section count"));
+        let mut out = ZKEY[..12].to_vec();
+        let mut offset = 12;
+        for _ in 0..count {
+            let id = u32::from_le_bytes(ZKEY[offset..offset + 4].try_into().expect("section id"));
+            let length = u64::from_le_bytes(
+                ZKEY[offset + 4..offset + 12]
+                    .try_into()
+                    .expect("section length"),
+            ) as usize;
+            let mut body = ZKEY[offset + 12..offset + 12 + length].to_vec();
+            match id {
+                // n8q, q, n8r, r, n_vars and n_public precede domain_size.
+                2 => body[80..84].copy_from_slice(&domain_size.to_le_bytes()),
+                9 => body.resize(domain_size as usize * super::G1_BYTES, 0),
+                _ => {}
+            }
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(&(body.len() as u64).to_le_bytes());
+            out.extend_from_slice(&body);
+            offset += 12 + length;
+        }
+        out
+    }
+
+    /// One constraint and one public input need a four-point domain. A header
+    /// claiming eight is internally consistent with its padded H query, but the
+    /// prover would only ever use four of those bases.
+    #[test]
+    fn a_domain_larger_than_the_constraints_need_is_rejected() {
+        let (pk, _) = super::read_zkey(&mut Cursor::new(with_domain(4)))
+            .expect("re-emitting the fixture's own domain must still parse");
+        assert_eq!(pk.h_query.len(), 4);
+
+        let oversized = with_domain(8);
+        assert!(super::read_zkey(&mut Cursor::new(&oversized)).is_err());
+        #[cfg(feature = "zkey-single-pass")]
+        assert!(super::read_zkey_sequential(&mut Cursor::new(&oversized)).is_err());
+
+        use sha2::Digest;
+        let pin = sha2::Sha256::digest(&oversized)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert!(matches!(
+            crate::Prover::from_zkey_bytes(&oversized, &pin),
+            Err(crate::ProverError::InvalidZkey(
+                ark_serialize::SerializationError::InvalidData
+            ))
+        ));
     }
 }
 

@@ -2,17 +2,17 @@
 //!
 //! This is feature-gated benchmark support, not part of the proving API. It
 //! uses Curvy's actual MSM implementation and deterministic BN254 inputs while
-//! excluding zkey I/O and witness-map FFTs.
+//! excluding zkey I/O and witness-map FFTs. The module only exists with both
+//! `bench` and `parallel`, so it has no serial fallbacks.
 
 use ark_bn254::{Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ec::CurveGroup;
 use ark_ff::{BigInt, PrimeField};
 #[cfg(feature = "compact-matrix")]
 use ark_groth16::r1cs_to_qap::evaluate_constraint;
 #[cfg(feature = "compact-matrix")]
 use ark_relations::utils::matrix::Matrix;
 
-#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::msm::{adaptive_window_bits, msm_bigint, msm_bigint_with_window};
@@ -30,6 +30,9 @@ pub struct ProofMsmOutput {
 }
 
 /// Deterministic equal-sized stand-ins for H, L, A, B1, and B2 queries.
+///
+/// Every base is a distinct multiple of its group's generator, within and across
+/// queries, so pairing a scalar with the wrong base changes the result.
 pub struct ProofMsmFixture {
     h: Vec<G1Affine>,
     l: Vec<G1Affine>,
@@ -45,13 +48,13 @@ impl ProofMsmFixture {
         let size = 1usize
             .checked_shl(log_size)
             .expect("benchmark log size must fit usize");
-        let g1 = G1Projective::generator();
-        let g2 = G2Projective::generator();
-        let h = vec![g1.mul_bigint([3]).into_affine(); size];
-        let l = vec![g1.mul_bigint([5]).into_affine(); size];
-        let a = vec![g1.mul_bigint([7]).into_affine(); size];
-        let b1 = vec![g1.mul_bigint([11]).into_affine(); size];
-        let b2 = vec![g2.mul_bigint([13]).into_affine(); size];
+        // Disjoint runs of multiples: query k uses (k * size + 1 + i) * G.
+        let start = |query: u64| query * size as u64 + 1;
+        let h = distinct_bases::<G1Projective>(start(0), size);
+        let l = distinct_bases::<G1Projective>(start(1), size);
+        let a = distinct_bases::<G1Projective>(start(2), size);
+        let b1 = distinct_bases::<G1Projective>(start(3), size);
+        let b2 = distinct_bases::<G2Projective>(start(0), size);
         let h_scalars = deterministic_scalars(size, 0x726f_6f74_2d68_7a31);
         let assignment = deterministic_scalars(size, 0x6173_7369_676e_7631);
         Self {
@@ -85,7 +88,6 @@ impl ProofMsmFixture {
 
     /// Materialize the same scalar vectors, then expose independent outer MSMs
     /// to the existing Rayon pool. Each MSM still parallelizes its own windows.
-    #[cfg(feature = "parallel")]
     pub fn materialized_concurrent(&self) -> ProofMsmOutput {
         let h_scalars = to_bigints(&self.h_scalars);
         let assignment = to_bigints(&self.assignment);
@@ -219,7 +221,6 @@ impl MatrixEvaluationFixture {
     }
 }
 
-#[cfg(feature = "parallel")]
 fn to_bigints(scalars: &[Fr]) -> Vec<BigInt<4>> {
     scalars
         .par_iter()
@@ -227,9 +228,17 @@ fn to_bigints(scalars: &[Fr]) -> Vec<BigInt<4>> {
         .collect()
 }
 
-#[cfg(not(feature = "parallel"))]
-fn to_bigints(scalars: &[Fr]) -> Vec<BigInt<4>> {
-    scalars.iter().map(|scalar| scalar.into_bigint()).collect()
+/// `(start + i) * G` for `i in 0..size`: one scalar multiplication, then
+/// incremental additions and a single batch normalization.
+fn distinct_bases<G: CurveGroup>(start: u64, size: usize) -> Vec<G::Affine> {
+    let generator = G::generator();
+    let mut point = generator.mul_bigint([start]);
+    let mut points = Vec::with_capacity(size);
+    for _ in 0..size {
+        points.push(point);
+        point += generator;
+    }
+    G::normalize_batch(&points)
 }
 
 fn deterministic_scalars(size: usize, seed: u64) -> Vec<Fr> {
@@ -250,17 +259,37 @@ fn deterministic_scalars(size: usize, seed: u64) -> Vec<Fr> {
 
 #[cfg(test)]
 mod tests {
+    use ark_bn254::{G1Projective, G2Projective};
+    use ark_ec::VariableBaseMSM;
+
     #[cfg(feature = "compact-matrix")]
     use super::MatrixEvaluationFixture;
-    use super::ProofMsmFixture;
+    use super::{ProofMsmFixture, to_bigints};
 
     #[test]
     fn schedules_and_chunking_preserve_all_five_msm_results() {
         let fixture = ProofMsmFixture::new(7);
-        let expected = fixture.materialized_sequential();
-        assert_eq!(fixture.chunked_sequential(17), expected);
-        #[cfg(feature = "parallel")]
-        assert_eq!(fixture.materialized_concurrent(), expected);
+        let bases = fixture.h.iter().chain(&fixture.l).chain(&fixture.a);
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            bases.chain(&fixture.b1).all(|base| seen.insert(*base)),
+            "every G1 base must be distinct"
+        );
+
+        // Arkworks' own MSM is independent of Curvy's recoder and scheduler.
+        let h_scalars = to_bigints(&fixture.h_scalars);
+        let assignment = to_bigints(&fixture.assignment);
+        let reference = super::ProofMsmOutput {
+            h: G1Projective::msm_bigint(&fixture.h, &h_scalars),
+            l: G1Projective::msm_bigint(&fixture.l, &assignment),
+            a: G1Projective::msm_bigint(&fixture.a, &assignment),
+            b1: G1Projective::msm_bigint(&fixture.b1, &assignment),
+            b2: G2Projective::msm_bigint(&fixture.b2, &assignment),
+        };
+        assert_eq!(fixture.materialized_sequential(), reference);
+        // 17 does not divide 128, so the final chunk is also a short one.
+        assert_eq!(fixture.chunked_sequential(17), reference);
+        assert_eq!(fixture.materialized_concurrent(), reference);
     }
 
     #[cfg(feature = "compact-matrix")]

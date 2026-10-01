@@ -54,8 +54,11 @@ with `cargo run --release -p curvy-benchmarks --bin witness_boundary`.
 
 `proof_msm_schedule` runs Curvy's real MSM kernel over deterministic,
 equal-sized H, L, A, B1, and B2 stand-ins. Its correctness test requires the
-sequential, concurrent, and chunked results to be identical. Five-run medians
-at 131,072 points per query were:
+sequential, concurrent, and chunked results to equal arkworks' independent MSM.
+The fixture now uses a distinct base for every point so that test can detect a
+base/scalar misalignment; the timings below were taken with the earlier
+repeated-base fixture, which performs essentially the same bucket additions.
+Five-run medians at 131,072 points per query were:
 
 | Workers | Materialized sequential | Materialized concurrent | 16,384-point chunks |
 |---:|---:|---:|---:|
