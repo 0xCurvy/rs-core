@@ -12,7 +12,8 @@ Use the HAWK `ResidentProver` when the host has enough memory to load the full
 proving key and benefits from reusing it. Use lower-level `Prover` only when the
 host already owns a `.wtns` assignment.
 
-Measured memory and latency comparisons are in [BENCHMARKS.md](BENCHMARKS.md).
+Measured memory and latency comparisons are in the workspace
+[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#3-sparrow-streaming).
 
 ## Enable SPARROW
 
@@ -240,8 +241,8 @@ Record the following values with benchmark and deployment metadata:
 
 Change a pin only when repeated self-verifying runs show an improvement larger
 than normal thermal and scheduling noise. The benchmark package contains the
-window sweep and end-to-end comparison tools described in
-[BENCHMARKS.md](BENCHMARKS.md).
+window sweep and end-to-end comparison tools described in the workspace
+[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#3-sparrow-streaming).
 
 ## Security boundary
 

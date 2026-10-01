@@ -40,10 +40,9 @@ node_modules
 __pycache__/
 *.py[cod]
 /tools/leakage/pkg/
-/tools/benchmarks/results/leakage-*/**/dudect
-/tools/benchmarks/results/leakage-*/**/timecop
-/tools/benchmarks/results/leakage-*/**/phases
-/tools/benchmarks/results/leakage-*/**/*.dSYM/
+
+# Raw benchmark and leakage runs stay local; summarize them in docs/benchmarks.md.
+/tools/benchmarks/results/
 
 # macOS / IDE metadata.
 .DS_Store

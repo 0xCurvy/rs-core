@@ -100,7 +100,7 @@ All binaries use Node-API 8.
 
 Native Node builds now use compact constraint matrices by default. The Rust,
 C, and WASM package defaults remain separate. Measurements and their scope are
-in [the resident benchmark report](../../RESIDENT_OPTIMIZATIONS.md).
+in [the repository benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#4-resident-loading-and-node-concurrency).
 
 For one-pass key loading, supply `zkeyManifestPath` and
 `zkeyManifestSha256` together. On this path the manifest pin is the sole trust

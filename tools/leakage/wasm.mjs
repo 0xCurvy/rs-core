@@ -26,6 +26,7 @@ const selectedEngines = selected.filter(value => !budgets.includes(value) && !ca
 const engines = selectedEngines.length ? selectedEngines : ['chromium', 'firefox'];
 if (engines.some(name => !['chromium', 'firefox', 'webkit'].includes(name))) throw new Error('invalid engine');
 const out = resolve(output);
+await mkdir(dirname(out), { recursive: true });
 await mkdir(out, { recursive: false });
 const token = randomBytes(16).toString('hex');
 const files = new Map([

@@ -1,10 +1,5 @@
 # Curvy Rust core
 
-The 7 September follow-up to Fable’s independent review is recorded in
-[FABLE_AUDIT_REMEDIATION.md](FABLE_AUDIT_REMEDIATION.md), including fixes, compatibility changes, validation, and remaining operational work.
-
-Current audit and follow-up results: [security, performance, and organization](SECURITY_PERFORMANCE_AUDIT.md).
-
 [![crates.io](https://img.shields.io/crates/v/curvy-core?logo=rust&logoColor=black&label=crates.io&labelColor=white&color=orange)](https://crates.io/crates/curvy-core)
 [![wasm-bindings](https://img.shields.io/npm/v/@0xcurvy/rs-core-wasm?logo=npm&logoColor=black&label=wasm-bindings&labelColor=white&color=red)](https://www.npmjs.com/package/@0xcurvy/rs-core-wasm)
 [![CI](https://img.shields.io/github/actions/workflow/status/0xCurvy/rs-core/ci.yml?branch=main&logo=github&logoColor=black&label=CI&labelColor=white)](https://github.com/0xCurvy/rs-core/actions/workflows/ci.yml)
@@ -27,6 +22,19 @@ layer you need:
 
 > The crates are release candidates. Pin the exact version until the stable API is
 published.
+
+Repository documentation:
+
+| Document | Contents |
+|---|---|
+| [CHANGELOG.md](CHANGELOG.md) | Release notes, breaking changes and migration steps |
+| [docs/security.md](docs/security.md) | Trust boundaries, constant-time and zeroization scope, audit history, known limitations |
+| [docs/benchmarks.md](docs/benchmarks.md) | Consolidated measurements and how to re-run them |
+| [docs/optimizations.md](docs/optimizations.md) | Performance decisions: kept, opt-in and rejected |
+| [crates/prover/SPARROW.md](crates/prover/SPARROW.md) | Bounded-memory streaming prover integration |
+| [crates/signet/README.md](crates/signet/README.md) | Producing and validating witness-graph artifacts |
+| [bindings/ffi](bindings/ffi/README.md), [bindings/node](bindings/node/README.md), [bindings/wasm](bindings/wasm/README.md) | C ABI, native Node and npm WASM contracts |
+| [tools/artifacts/README.md](tools/artifacts/README.md) | Release bundle validation |
 
 ## Install
 
@@ -139,9 +147,9 @@ the matching pair supplied by the Curvy deployment you are interacting with;
 they are not bundled into these crates. Native file-backed callers should use
 `ResidentProver::from_artifacts_reader` to avoid retaining a complete zkey byte
 buffer beside the parsed proving key. See
-[PRODUCTION_BENCHMARKS.md](PRODUCTION_BENCHMARKS.md) for the production-key
-whole/stream comparison and [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for the full
-cross-target audit.
+[docs/benchmarks.md](docs/benchmarks.md) for the production-key
+whole/stream comparison and [docs/optimizations.md](docs/optimizations.md) for
+the performance decisions behind the defaults.
 
 ## Build targets
 
@@ -288,7 +296,7 @@ application builds. Compact matrices are available with `--compact-matrix`.
 Optimized Poseidon is the default; the compatible `--poseidon-optimized` flag
 may still be supplied explicitly. Neither changes the generated JavaScript API.
 Production-key results and size tradeoffs are recorded in
-[`PRODUCTION_BENCHMARKS.md`](PRODUCTION_BENCHMARKS.md).
+[docs/benchmarks.md](docs/benchmarks.md).
 
 #### Node.js target
 
@@ -427,6 +435,42 @@ cross-origin isolation.
 - `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a
   cross-origin-isolated page.
 
+## Maintaining
+
+- Plain `cargo build` and `cargo test` cover only the default members,
+  `curvy-core` and `curvy-witness`. Use `cargo test --workspace --all-targets
+  --locked`, and the per-feature runs in `.github/workflows/ci.yml`: feature
+  unification in a workspace build can hide regressions in a crate's default or
+  serial configuration.
+- Committed golden vectors (`crates/*/testdata`) are cross-language protocol
+  oracles. Change one only together with a documented upstream reference change.
+- Four crates are published: `curvy-core`, `curvy-witness`, `curvy-prover` and
+  `curvy-wasm`. The SIGNET producer, bindings, benchmarks and debug CLI are not
+  crates.io packages. `crates/signet/generator` is outside the workspace; after
+  changing it, run `crates/signet/scripts/smoke-generator.sh` (needs `circom`).
+
+### Releasing
+
+Nothing publishes automatically. The npm WASM workflow is
+`.github/workflows/release.yml.disabled`, crates.io publishing is manual, and the
+native Node packages are staged with `npm run build:release` in `bindings/node`
+(see its README). Pushing a tag alone does nothing.
+
+1. Bump `[workspace.package].version` in `Cargo.toml` and the exact internal
+   dependency versions in `crates/prover`, `crates/wasm`, `bindings/ffi` and
+   `bindings/node` (`Cargo.toml`).
+2. In `bindings/node`, run `npm version <version> --no-git-tag-version`, rebuild,
+   and update the version assertion in `test/binding.test.mjs`.
+3. Regenerate `Cargo.lock` and `fuzz/Cargo.lock` through Cargo and update the
+   exact-version snippets in the READMEs and `crates/prover/SPARROW.md`;
+   `git grep -n '<old version>'` should then match only `CHANGELOG.md`.
+4. Date the `CHANGELOG.md` entry, run the full CI-equivalent gates, and inspect
+   `cargo package -p <crate> --list` for each published crate.
+5. Publish `curvy-core`, then `curvy-witness`; once both resolve on crates.io,
+   publish `curvy-prover` and `curvy-wasm`. For Node, publish the platform
+   packages before the root loader.
+6. Tag the clean release commit with an annotated `v<version>` tag.
+
 ## License
 
 [MIT](LICENSE) © Curvy Protocol d.o.o.
@@ -434,5 +478,3 @@ cross-origin isolation.
 Portions of this software are ported from permissively licensed third-party
 projects. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full
 attribution list.
-
-Resident performance work and current measurements: [RESIDENT_OPTIMIZATIONS.md](RESIDENT_OPTIMIZATIONS.md).

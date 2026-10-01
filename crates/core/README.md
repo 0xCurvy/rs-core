@@ -70,8 +70,9 @@ workloads benefit most. Those tables are authenticated and decoded per arity on
 first use, so a caller that only hashes pairs pays for the arity-2 block rather
 than all sixteen; first-hash latency is tens of microseconds. Consumers that explicitly prefer the smaller compressed
 browser artifact can select the direct reference schedule with
-`default-features = false`; see the workspace `OPTIMIZATIONS.md` for measured
-native/WASM tradeoffs.
+`default-features = false`; see the workspace
+[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#7-poseidon)
+for measured native/WASM tradeoffs.
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for complete
 native and WASM build targets.

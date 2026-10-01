@@ -153,9 +153,9 @@ by compiler semantics and is evicted if its metadata, digest, source binding, or
 decoder validation fails.
 
 See [SPARROW.md](SPARROW.md) for artifact publication, native and browser flows,
-the SAGE cache protocol, tuning, and the security boundary. See
-[BENCHMARKS.md](BENCHMARKS.md) for concise whole-key, SPARROW, and SAGE cache
-measurements.
+the SAGE cache protocol, tuning, and the security boundary. See the workspace
+[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md)
+for whole-key, SPARROW, and SAGE cache measurements.
 
 ## Published examples
 
@@ -201,15 +201,17 @@ inside dependencies are outside this guarantee. MSM bucket reuse is not enabled.
 Default APIs retain no workspaces between proofs. They still wipe, on a best
 effort basis, the QAP and MSM-scalar buffers this crate allocates for a proof;
 copies inside arkworks (including the stock serial assembly's own scalar
-conversions) are not reached, so neither path claims complete erasure. See
-[measurements and promotion decisions](../../RESIDENT_OPTIMIZATIONS.md).
+conversions) are not reached, so neither path claims complete erasure. See the
+workspace [measurements](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md)
+and [promotion decisions](https://github.com/0xCurvy/rs-core/blob/main/docs/optimizations.md).
 
 The complete `prove_assignment`, `prove_json`, and `prove_wtns` APIs self-verify.
 Low-level `Prover::prove` and `prove_with_workspace` return a proof without
 verification; their callers must verify it. Direct assignments must begin with
 the constant one signal.
 
-The source repository's [current audit](../../SECURITY_PERFORMANCE_AUDIT.md)
-describes the QAP/MSM arithmetic checks, parser fuzzing, and release gates.
+The source repository's
+[security model and audit history](https://github.com/0xCurvy/rs-core/blob/main/docs/security.md)
+summarizes the QAP/MSM arithmetic review, parser fuzzing, and release gates.
 [Release validation tooling](../../tools/artifacts/README.md) stages and validates
 the exact bundle against its independently pinned PTAU and reference witness.

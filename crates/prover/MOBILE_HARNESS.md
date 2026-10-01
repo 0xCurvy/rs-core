@@ -199,5 +199,5 @@ reused pool.
 Window width and MSM chunk size affect performance and memory, not proof
 semantics or artifact digests. Pin them only after repeated self-verifying runs
 on the intended devices. Native measurements provide a starting point, not a
-mobile policy. See [BENCHMARKS.md](BENCHMARKS.md) for the benchmark method and
-representative reference values.
+mobile policy. See [docs/benchmarks.md](../../docs/benchmarks.md) for the
+benchmark method and representative reference values.
