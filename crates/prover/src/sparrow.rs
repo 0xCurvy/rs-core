@@ -15,8 +15,6 @@ pub mod manifest;
 #[doc(hidden)]
 pub mod phase_bench;
 
-#[cfg(feature = "bench")]
-use std::ops::{AddAssign, SubAssign};
 use std::{
     io::{Read, Seek, SeekFrom},
     sync::Arc,
@@ -1201,38 +1199,7 @@ impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
         if self.pairs.is_empty() {
             return;
         }
-        let pairs = &self.pairs;
-        let window_bits = self.window_bits;
-        #[cfg(feature = "parallel")]
-        self.buckets
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(window, buckets)| {
-                for (base, scalar) in pairs {
-                    buckets.add_digit(signed_window_digit(scalar, window_bits, window), base);
-                }
-                buckets.finish();
-                buckets.release_scratch();
-            });
-        #[cfg(not(feature = "parallel"))]
-        {
-            let windows = self.buckets.len();
-            let mut signed_digits = (0..windows)
-                .map(|_| Vec::with_capacity(pairs.len()))
-                .collect::<Vec<_>>();
-            for (_, scalar) in pairs {
-                for_each_signed_window(scalar, window_bits, windows, |window, digit| {
-                    signed_digits[window].push(digit);
-                });
-            }
-            for (buckets, digits) in self.buckets.iter_mut().zip(&signed_digits) {
-                for ((base, _), &digit) in pairs.iter().zip(digits) {
-                    buckets.add_digit(digit, base);
-                }
-                buckets.finish();
-                buckets.release_scratch();
-            }
-        }
+        accumulate_affine_windows(&mut self.buckets, &self.pairs, self.window_bits);
         self.pairs.clear();
     }
 
@@ -1317,49 +1284,52 @@ fn bench_stream_query<P: SWCurveConfig<ScalarField = Fr>>(
     query.finish()
 }
 
+/// Fold one chunk of `(base, scalar)` pairs into every signed window's affine
+/// buckets, leaving only the buckets resident. Shared by the streaming prover
+/// and `phase_bench`, so the benchmark times the production kernel.
+fn accumulate_affine_windows<P: SWCurveConfig<ScalarField = Fr>>(
+    buckets: &mut [AffineBuckets<P>],
+    pairs: &[(Affine<P>, BigInt<4>)],
+    window_bits: usize,
+) {
+    #[cfg(feature = "parallel")]
+    buckets
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(window, buckets)| {
+            for (base, scalar) in pairs {
+                buckets.add_digit(signed_window_digit(scalar, window_bits, window), base);
+            }
+            buckets.finish();
+            buckets.release_scratch();
+        });
+    #[cfg(not(feature = "parallel"))]
+    {
+        let windows = buckets.len();
+        let mut signed_digits = (0..windows)
+            .map(|_| Vec::with_capacity(pairs.len()))
+            .collect::<Vec<_>>();
+        for (_, scalar) in pairs {
+            for_each_signed_window(scalar, window_bits, windows, |window, digit| {
+                signed_digits[window].push(digit);
+            });
+        }
+        for (buckets, digits) in buckets.iter_mut().zip(&signed_digits) {
+            for ((base, _), &digit) in pairs.iter().zip(digits) {
+                buckets.add_digit(digit, base);
+            }
+            buckets.finish();
+            buckets.release_scratch();
+        }
+    }
+}
+
 fn resolve_window_bits(configured: usize, points: usize) -> usize {
     if configured != StreamingConfig::ADAPTIVE_WINDOW_BITS {
         return configured;
     }
 
     crate::msm::adaptive_window_bits(points)
-}
-
-// Projective-bucket kernels retained for `phase_bench`'s native/WASM kernel
-// comparisons; the streaming prover uses affine buckets.
-#[cfg(all(feature = "bench", not(feature = "parallel")))]
-fn accumulate_signed_digits<G>(buckets: &mut [G::Group], pairs: &[(G, BigInt<4>)], digits: &[i16])
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G>,
-{
-    for ((base, _), digit) in pairs.iter().zip(digits) {
-        match digit.cmp(&0) {
-            std::cmp::Ordering::Greater => buckets[*digit as usize - 1] += base,
-            std::cmp::Ordering::Less => buckets[digit.unsigned_abs() as usize - 1] -= base,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-}
-
-#[cfg(all(feature = "bench", feature = "parallel"))]
-fn accumulate_signed_window<G>(
-    buckets: &mut [G::Group],
-    pairs: &[(G, BigInt<4>)],
-    width: usize,
-    window: usize,
-) where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G>,
-{
-    for (base, scalar) in pairs {
-        let digit = signed_window_digit(scalar, width, window);
-        match digit.cmp(&0) {
-            std::cmp::Ordering::Greater => buckets[digit as usize - 1] += base,
-            std::cmp::Ordering::Less => buckets[digit.unsigned_abs() as usize - 1] -= base,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
 }
 
 #[cfg(any(not(feature = "parallel"), test))]
@@ -1375,15 +1345,6 @@ fn for_each_signed_window(
 #[cfg(any(feature = "parallel", test))]
 fn signed_window_digit(scalar: &BigInt<4>, width: usize, window: usize) -> i16 {
     crate::msm::signed_window_digit(scalar, width, window)
-}
-
-#[cfg(feature = "bench")]
-fn reduce_windows<G>(buckets: &[Vec<G::Group>], width: usize) -> G::Group
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G::Group>,
-{
-    crate::msm::reduce_bucket_windows::<G>(buckets, width)
 }
 
 fn valid_g1(point: &G1Affine) -> bool {

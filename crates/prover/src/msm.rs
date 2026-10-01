@@ -35,8 +35,6 @@ use ark_ec::{
 #[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 use ark_ff::PrimeField;
 use ark_ff::{AdditiveGroup, BigInt, Field, Zero};
-#[cfg(all(feature = "sparrow", feature = "bench"))]
-use std::ops::AddAssign;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -763,53 +761,11 @@ where
     reduce_msm_window_sums::<Projective<P>>(&window_sums, width)
 }
 
-/// Projective-bucket reduction kept for `sparrow::phase_bench`'s kernels.
-#[cfg(all(feature = "sparrow", feature = "bench"))]
-pub(crate) fn reduce_bucket_windows<G>(buckets: &[Vec<G::Group>], width: usize) -> G::Group
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G::Group>,
-{
-    let reduce = |window: &Vec<G::Group>| {
-        let mut sum = G::Group::zero();
-        let mut running = G::Group::zero();
-        for bucket in window.iter().rev() {
-            running += bucket;
-            sum += &running;
-        }
-        sum
-    };
-    // Each window's running-sum reduction is independent. Spreading them over
-    // the pool measured 3-7x faster than the serial loop; the phase is only
-    // ~1-5% of bucket accumulation, about 0.2-0.3 s per proof.
-    #[cfg(feature = "parallel")]
-    let window_sums = buckets.par_iter().map(reduce).collect::<Vec<_>>();
-    #[cfg(not(feature = "parallel"))]
-    let window_sums = buckets.iter().map(reduce).collect::<Vec<_>>();
-    reduce_group_window_sums::<G>(&window_sums, width)
-}
-
 fn reduce_msm_window_sums<V>(window_sums: &[V], width: usize) -> V
 where
     V: VariableBaseMSM<ScalarField = Fr>,
 {
     let mut total = V::zero();
-    for sum in window_sums.iter().rev() {
-        for _ in 0..width {
-            total.double_in_place();
-        }
-        total += sum;
-    }
-    total
-}
-
-#[cfg(all(feature = "sparrow", feature = "bench"))]
-fn reduce_group_window_sums<G>(window_sums: &[G::Group], width: usize) -> G::Group
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G::Group>,
-{
-    let mut total = G::Group::zero();
     for sum in window_sums.iter().rev() {
         for _ in 0..width {
             total.double_in_place();
