@@ -28,7 +28,20 @@ if (existsSync(local)) {
 if (binding.rsCoreVersion() !== version) {
   throw new Error("rs-core native binary version mismatch; rebuild or reinstall dependencies");
 }
+const { ResidentProver } = binding;
+// Explicit resource management: `await using` waits for close() to release
+// the key; `using` starts the same release without waiting for it.
+if (typeof Symbol.asyncDispose === "symbol") {
+  ResidentProver.prototype[Symbol.asyncDispose] = function asyncDispose() {
+    return this.close();
+  };
+}
+if (typeof Symbol.dispose === "symbol") {
+  ResidentProver.prototype[Symbol.dispose] = function dispose() {
+    void this.close();
+  };
+}
 module.exports = binding;
-module.exports.ResidentProver = binding.ResidentProver;
+module.exports.ResidentProver = ResidentProver;
 module.exports.IndexedMerkleTree = binding.IndexedMerkleTree;
 module.exports.rsCoreVersion = binding.rsCoreVersion;

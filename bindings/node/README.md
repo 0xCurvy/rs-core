@@ -33,6 +33,26 @@ synchronous startup path.
 Every instance reports `mode === "resident"` and `profile === "HAWK"`; include
 these fields in service metrics alongside the phase timings.
 
+## Closing
+
+A prover keeps its parsed key (often gigabytes) and its Rayon pool until it is
+closed or garbage-collected. Call `await prover.close()` to release them
+deterministically, for example before loading a replacement key:
+
+- proofs accepted before `close()` still settle normally; later `prove()` calls
+  reject with `prover is closed` (`code: "Closing"`), while metadata getters
+  (`numConstraints`, `verifyingKeyDigest`, …) keep returning the values captured
+  at load;
+- the promise resolves once the last accepted proof has finished and the key and
+  worker pool have been freed;
+- repeated calls are no-ops that resolve at the same point.
+
+The loader also installs `Symbol.asyncDispose` (awaits `close()`) and
+`Symbol.dispose` (starts it), so `await using` works on runtimes with explicit
+resource management. Each prover reports its zkey size to V8 as external memory
+so garbage-collection pressure reflects the native key; `close()` returns that
+accounting immediately.
+
 ## Threads
 
 `threads` defaults to `1`. Every prover owns a fixed Rayon pool, and concurrent
@@ -83,11 +103,14 @@ C, and WASM package defaults remain separate. Measurements and their scope are
 in [the resident benchmark report](../../RESIDENT_OPTIMIZATIONS.md).
 
 For one-pass key loading, supply `zkeyManifestPath` and
-`zkeyManifestSha256` together, alongside the existing `zkeySha256`. The manifest
-is authenticated in full, and every key chunk is checked before parsing. Publish
-both pins through trusted deployment metadata; the existing
-`zkey_chunk_manifest` release tool verifies whole-file and chunk consistency.
-Without a manifest, the authenticated seekable reader remains available.
+`zkeyManifestSha256` together. On this path the manifest pin is the sole trust
+root: the manifest is authenticated against it, and every key chunk is checked
+against the manifest's chunk digests before parsing. `zkeySha256` is still
+required but is only compared with the whole-file digest the manifest claims;
+the key is not rehashed, so it adds no independent check. Publish the manifest
+pin through trusted deployment metadata; the `zkey_chunk_manifest` release tool
+verifies whole-file and chunk consistency when the manifest is produced. Without
+a manifest, `zkeySha256` authenticates the key through the seekable reader.
 
 Set `useSage: true` to compile the authenticated graph into SAGE during startup.
 For faster subsequent startup, derive a cache with `derive_sage_cache`, then
@@ -115,3 +138,17 @@ script (`napi --no-js`) to preserve this loader. Queued proof JSON and calculate
 assignments are cleared when their Rust ownership ends; caller JavaScript copies
 remain caller-owned. Proof timings depend on the private witness and should not
 be sent to untrusted telemetry.
+
+## Releasing
+
+`npm run build:release` runs on an Apple Silicon host with Docker Buildx. It
+builds and tests macOS arm64 natively and both Linux targets in containers, then
+stages every package under `release/`. Before publishing:
+
+1. Smoke-test the Windows binary on a Windows x64 host. It is cross-compiled
+   with a pinned `cargo-xwin` in a Linux container and is never loaded or tested
+   there. From a checkout of the release commit, copy the staged
+   `release/npm/win32-x64-msvc/curvy_rs_core_node.win32-x64-msvc.node` into
+   `bindings/node/` and run `npm ci --ignore-scripts && npm test`.
+2. Publish the platform packages first, then the root package, using the
+   commands the script prints.

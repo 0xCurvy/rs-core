@@ -13,14 +13,14 @@ use curvy_prover::{
 use curvy_witness::{Limits, WitnessGraph, sage::SageGraph};
 use napi::{
     Env, Error, JsDeferred, Result, Status, Task,
-    bindgen_prelude::{AsyncTask, Buffer, Object},
+    bindgen_prelude::{AsyncTask, Buffer, Object, ObjectFinalize},
 };
 use napi_derive::napi;
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use zeroize::Zeroizing;
 
 mod queue;
-use queue::SerialQueue;
+use queue::{Rejection, SerialQueue};
 
 /// Resource ceiling for the pending-commitment adapter (including zero padding).
 const MAX_PENDING_BATCH_SIZE: u32 = 4096;
@@ -71,20 +71,41 @@ pub struct ProofResult {
 /// HAWK resident prover. Circuit identity and dimensions come only from the
 /// authenticated witness graph and zkey, so the same API serves every Circom
 /// circuit accepted by `curvy-prover`.
-#[napi]
+#[napi(custom_finalize)]
 pub struct ResidentProver {
-    prover: Arc<RustResidentProver>,
-    thread_pool: Arc<ThreadPool>,
+    /// `None` after `close()`. Accepted proofs hold their own references, so
+    /// the key is freed when the last of them completes.
+    prover: Option<Arc<RustResidentProver>>,
+    /// Owns the Rayon pool and releases it once closed and idle.
     proof_queue: Arc<SerialQueue<ProofJob>>,
+    threads: u32,
+    /// Approximate resident key size: the authenticated zkey's length.
+    key_bytes: i64,
+    /// Bytes currently reported to V8 as external memory.
+    reported_external_memory: i64,
+    /// Snapshotted at load so metadata stays readable after `close()`.
+    info: ProverInfo,
+}
+
+struct ProverInfo {
     artifact_load_ms: f64,
     artifact_initialization_ms: f64,
+    num_constraints: u32,
+    num_public: u32,
+    mode: String,
+    profile: String,
+    witness_backend: String,
+    verifying_key_digest: String,
+    r1cs_sha256: String,
 }
 
 #[napi]
 impl ResidentProver {
     #[napi(constructor, catch_unwind)]
-    pub fn new(options: ResidentProverOptions) -> Result<Self> {
-        Self::initialize(options)
+    pub fn new(env: Env, options: ResidentProverOptions) -> Result<Self> {
+        let mut prover = Self::initialize(options)?;
+        prover.report_external_memory(&env);
+        Ok(prover)
     }
 
     /// Authenticate and parse both artifacts on a native task instead of the
@@ -121,16 +142,16 @@ impl ResidentProver {
         let load_started = Instant::now();
         let zkey =
             File::open(&options.zkey_path).map_err(|error| native_error("open zkey", error))?;
-        if !zkey
+        let zkey_metadata = zkey
             .metadata()
-            .map_err(|error| native_error("stat zkey", error))?
-            .is_file()
-        {
+            .map_err(|error| native_error("stat zkey", error))?;
+        if !zkey_metadata.is_file() {
             return Err(Error::new(
                 Status::InvalidArg,
                 "zkey must be a regular file",
             ));
         }
+        let key_bytes = i64::try_from(zkey_metadata.len()).unwrap_or(i64::MAX);
         let mut zkey = BufReader::new(
             BoundedReader::new(zkey, 4 * 1024 * 1024 * 1024)
                 .map_err(|error| native_error("bound zkey", error))?,
@@ -212,81 +233,122 @@ impl ResidentProver {
         })?;
         let artifact_initialization_ms = elapsed_ms(initialization_started);
 
-        let thread_pool = Arc::new(thread_pool);
-        let proof_queue = SerialQueue::new(
-            Arc::clone(&thread_pool),
-            queue_capacity as usize,
-            ProofJob::run,
-        );
-        Ok(Self {
-            prover: Arc::new(prover),
-            thread_pool,
-            proof_queue,
+        let info = ProverInfo {
             artifact_load_ms,
             artifact_initialization_ms,
+            num_constraints: prover.num_constraints() as u32,
+            num_public: prover.num_public() as u32,
+            mode: prover.mode().as_str().to_owned(),
+            profile: prover.profile().to_owned(),
+            witness_backend: prover.witness_backend().to_owned(),
+            verifying_key_digest: prover.verifying_key_digest(),
+            r1cs_sha256: prover
+                .r1cs_sha256()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+        };
+        let threads = thread_pool.current_num_threads() as u32;
+        let proof_queue = SerialQueue::new(thread_pool, queue_capacity as usize, ProofJob::run);
+        Ok(Self {
+            prover: Some(Arc::new(prover)),
+            proof_queue,
+            threads,
+            key_bytes,
+            reported_external_memory: 0,
+            info,
         })
     }
 
-    #[napi(getter, catch_unwind)]
+    /// Tell V8 about the resident key so its GC pressure reflects the native
+    /// allocation. Advisory: a failed adjustment leaves nothing to undo.
+    fn report_external_memory(&mut self, env: &Env) {
+        if self.reported_external_memory == 0 && env.adjust_external_memory(self.key_bytes).is_ok()
+        {
+            self.reported_external_memory = self.key_bytes;
+        }
+    }
+
+    fn release_external_memory(&mut self, env: &Env) {
+        let reported = std::mem::take(&mut self.reported_external_memory);
+        if reported != 0 {
+            let _ = env.adjust_external_memory(-reported);
+        }
+    }
+
+    fn open(&self) -> Result<&Arc<RustResidentProver>> {
+        self.prover.as_ref().ok_or_else(closed_error)
+    }
+
+    #[napi(getter)]
     pub fn artifact_load_ms(&self) -> f64 {
-        self.artifact_load_ms
+        self.info.artifact_load_ms
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn artifact_initialization_ms(&self) -> f64 {
-        self.artifact_initialization_ms
+        self.info.artifact_initialization_ms
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn num_constraints(&self) -> u32 {
-        self.prover.num_constraints() as u32
+        self.info.num_constraints
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn num_public(&self) -> u32 {
-        self.prover.num_public() as u32
+        self.info.num_public
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn threads(&self) -> u32 {
-        self.thread_pool.current_num_threads() as u32
+        self.threads
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn mode(&self) -> String {
-        self.prover.mode().as_str().to_owned()
+        self.info.mode.clone()
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn profile(&self) -> String {
-        self.prover.profile().to_owned()
+        self.info.profile.clone()
     }
 
-    #[napi(getter, catch_unwind)]
+    #[napi(getter)]
     pub fn witness_backend(&self) -> String {
-        self.prover.witness_backend().to_owned()
+        self.info.witness_backend.clone()
     }
 
     /// SHA-256 of the loaded key's verifying key. Compare it against the
     /// deployed verifier before submitting proofs.
-    #[napi(getter, js_name = "verifyingKeyDigest", catch_unwind)]
+    #[napi(getter, js_name = "verifyingKeyDigest")]
     pub fn verifying_key_digest(&self) -> String {
-        self.prover.verifying_key_digest()
+        self.info.verifying_key_digest.clone()
     }
 
-    #[napi(getter, js_name = "r1csSha256", catch_unwind)]
+    #[napi(getter, js_name = "r1csSha256")]
     pub fn r1cs_sha256(&self) -> String {
-        self.prover
-            .r1cs_sha256()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        self.info.r1cs_sha256.clone()
+    }
+
+    /// True once `close()` has been called.
+    #[napi(getter, catch_unwind)]
+    pub fn closed(&self) -> bool {
+        self.prover.is_none()
     }
 
     #[napi(ts_return_type = "Promise<ProofResult>", catch_unwind)]
     pub fn prove<'env>(&self, env: &'env Env, input_json: String) -> Result<Object<'env>> {
         let input_json = Zeroizing::new(input_json);
         let (deferred, promise) = env.create_deferred::<ProofResult, ProofResolver>()?;
+        let prover = match self.open() {
+            Ok(prover) => Arc::clone(prover),
+            Err(error) => {
+                deferred.reject(error);
+                return Ok(promise);
+            }
+        };
         if input_json.len() > Limits::client().input_json_bytes {
             deferred.reject(Error::new(
                 Status::InvalidArg,
@@ -295,17 +357,44 @@ impl ResidentProver {
             return Ok(promise);
         }
         let job = ProofJob {
-            prover: Arc::clone(&self.prover),
+            prover,
             input_json,
             deferred,
         };
-        if let Err(job) = self.proof_queue.submit(job) {
-            job.deferred.reject(Error::new(
-                Status::QueueFull,
-                "resident prover queue is full",
-            ));
+        if let Err((job, rejection)) = self.proof_queue.submit(job) {
+            job.deferred.reject(match rejection {
+                Rejection::Full => Error::new(Status::QueueFull, "resident prover queue is full"),
+                Rejection::Closed => closed_error(),
+            });
         }
         Ok(promise)
+    }
+
+    /// Stop accepting proofs and release the native key and worker pool.
+    /// Proofs accepted before `close()` still settle normally; the promise
+    /// resolves once the last of them has finished and both are freed. Later
+    /// `prove()` calls reject with `prover is closed`; metadata getters keep
+    /// returning the values captured at load. Repeated calls are no-ops that
+    /// resolve at the same point.
+    #[napi(ts_return_type = "Promise<void>", catch_unwind)]
+    pub fn close<'env>(&mut self, env: &'env Env) -> Result<Object<'env>> {
+        let (deferred, promise) = env.create_deferred::<(), fn(Env) -> Result<()>>()?;
+        // An idle prover's key is freed here; otherwise the last running
+        // proof frees it on its worker before the queue releases the pool.
+        self.prover = None;
+        self.release_external_memory(env);
+        self.proof_queue
+            .close(Box::new(move || deferred.resolve(|_| Ok(()))));
+        Ok(promise)
+    }
+}
+
+impl ObjectFinalize for ResidentProver {
+    /// Without `close()`, accepted proofs still run to completion; only the
+    /// V8 accounting is returned here.
+    fn finalize(mut self, env: Env) -> Result<()> {
+        self.release_external_memory(&env);
+        Ok(())
     }
 }
 
@@ -317,15 +406,26 @@ impl Task for InitializeTask {
     type Output = ResidentProver;
     type JsValue = ResidentProver;
 
+    /// Runs inside napi's `extern "C"` execute callback, where an unwind
+    /// would abort the process, so panics become a rejection here.
     fn compute(&mut self) -> Result<Self::Output> {
-        let options = self
-            .options
-            .take()
-            .expect("N-API initialization task is computed only once");
-        ResidentProver::initialize(options)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let options = self
+                .options
+                .take()
+                .expect("N-API initialization task is computed only once");
+            ResidentProver::initialize(options)
+        }))
+        .unwrap_or_else(|_| {
+            Err(Error::new(
+                Status::GenericFailure,
+                "native prover initialization panicked",
+            ))
+        })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, env: Env, mut output: Self::Output) -> Result<Self::JsValue> {
+        output.report_external_memory(&env);
         Ok(output)
     }
 }
@@ -340,18 +440,22 @@ struct ProofJob {
 
 impl ProofJob {
     fn run(self) -> queue::Completion {
+        let Self {
+            prover,
+            input_json,
+            deferred,
+        } = self;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let witness_started = Instant::now();
             let assignment = Zeroizing::new(
-                self.prover
-                    .calculate_witness_json(&self.input_json)
+                prover
+                    .calculate_witness_json(&input_json)
                     .map_err(|error| native_error("calculate witness", error))?,
             );
             let witness_calculation_ms = elapsed_ms(witness_started);
 
             let proof_started = Instant::now();
-            let proof = self
-                .prover
+            let proof = prover
                 .prove_assignment(&assignment)
                 .map_err(|error| native_error("generate proof", error))?;
             let proof_generation_ms = elapsed_ms(proof_started);
@@ -369,9 +473,13 @@ impl ProofJob {
                 "proof computation panicked",
             ))
         });
+        // Free the private input and this job's key reference on the worker,
+        // before the queue can report a closed prover as released.
+        drop(input_json);
+        drop(prover);
         Box::new(move || match result {
-            Ok(output) => self.deferred.resolve(Box::new(move |_| Ok(output))),
-            Err(error) => self.deferred.reject(error),
+            Ok(output) => deferred.resolve(Box::new(move |_| Ok(output))),
+            Err(error) => deferred.reject(error),
         })
     }
 }
@@ -555,6 +663,10 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1_000.0
 }
 
+fn closed_error() -> Error {
+    Error::new(Status::Closing, "prover is closed")
+}
+
 fn native_error(context: &str, error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, format!("{context}: {error}"))
 }
@@ -641,7 +753,7 @@ mod tests {
         });
         fs::remove_file(path).unwrap();
         let prover = result.expect("fixture must initialize");
-        assert_eq!(prover.thread_pool.install(rayon::current_num_threads), 1);
+        assert_eq!(prover.threads, 1);
         // Rayon only allows this once. If key parsing escaped the private pool,
         // its parallel iterators would already have initialized the global one.
         ThreadPoolBuilder::new()

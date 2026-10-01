@@ -20,12 +20,21 @@ RUN apt-get update \
       pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+ARG NODE_RELEASE_TARGET
+# `napi build --cross-compile` otherwise runs an unpinned, unlocked
+# `cargo install cargo-xwin` on every build. Preinstall a pinned release before
+# copying the source so this layer stays cached; napi detects and reuses it.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    if [ "${NODE_RELEASE_TARGET}" = windows-x64 ]; then \
+      cargo install --locked cargo-xwin --version 0.23.1; \
+    fi
+
 WORKDIR /src
 COPY . .
 
 RUN cd bindings/node && npm ci --ignore-scripts
 
-ARG NODE_RELEASE_TARGET
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/target \
@@ -45,6 +54,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
         rust_target=x86_64-pc-windows-msvc; \
         output=curvy_rs_core_node.win32-x64-msvc.node; \
         cross_flag=--cross-compile; \
+        command -v cargo-xwin; \
         ;; \
       *) \
         echo "unsupported NODE_RELEASE_TARGET=${NODE_RELEASE_TARGET}" >&2; \

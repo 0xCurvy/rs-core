@@ -51,6 +51,8 @@ const targets = [
     dockerTarget: "windows-x64",
     npmDirectory: "win32-x64-msvc",
     packageName: "@0xcurvy/rs-core-node-win32-x64-msvc",
+    // Cross-compiled in a Linux container, where it can be neither loaded nor tested.
+    untested: true,
   },
 ];
 
@@ -108,6 +110,7 @@ try {
     const destination = join(artifactsDir, target.filename);
     copyFileSync(built, destination);
     verifyBinary(target, destination);
+    if (target.untested) warnUntested(target);
   }
 
   run("npm", ["run", "package:metadata"], packageDir);
@@ -196,6 +199,7 @@ try {
   console.log(`  root packed size: ${formatBytes(packed.size)}`);
   console.log(`  staged at: ${releaseDir}`);
   console.log("  npm packages to publish: 5 (users install only the root package)");
+  for (const target of targets.filter((candidate) => candidate.untested)) warnUntested(target);
   console.log("\nPublish manually from the staging directory, platform packages first:");
   console.log(`  cd ${releaseDir}`);
   for (const target of targets) {
@@ -206,6 +210,16 @@ try {
   console.log("  npm publish . --ignore-scripts --access public --tag next --provenance=false");
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+function warnUntested(target) {
+  console.warn(
+    `\nWARNING: ${target.filename} was cross-compiled in a Linux container and has NOT been ` +
+      "loaded or tested. Smoke-test it on a Windows x64 host before publishing " +
+      `${target.packageName}: copy bindings/node/release/npm/${target.npmDirectory}/` +
+      `${target.filename} into bindings/node of this checkout and run ` +
+      "`npm ci --ignore-scripts && npm test` (see the package README, \"Releasing\").",
+  );
 }
 
 function run(command, args, cwd, extraEnv = {}, timeout) {

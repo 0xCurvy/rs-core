@@ -299,12 +299,93 @@ function packFields(values) {
 
 test("pending batches reject resource-exhausting sizes without changing the tree", () => {
   const tree = new binding.IndexedMerkleTree(30, "[]");
-  const before = tree.root;
+  const before = tree.root();
   for (const count of [0,4097,200000,0xffffffff]) {
     assert.throws(()=>tree.buildPendingCommitment(count,'["1"]'), /batchSize must be between/);
     assert.throws(()=>tree.buildPendingCommitmentPacked(count,Buffer.alloc(32)), /batchSize must be between/);
-    assert.equal(tree.root,before);
+    assert.equal(tree.root(),before);
+    assert.equal(tree.leafCount,0);
   }
+});
+
+test("pending batches that fail mid-insert leave the live tree unchanged", () => {
+  // Depth 2 holds four leaves. Each failing batch inserts at least one note
+  // into the working copy before the error, so only clone-and-swap keeps the
+  // live tree intact.
+  const tree = new binding.IndexedMerkleTree(2, JSON.stringify(["5"]));
+  const before = tree.root();
+  for (const [build, error] of [
+    [() => tree.buildPendingCommitment(4, JSON.stringify(["7", "5"])), /leaf already exists/],
+    [() => tree.buildPendingCommitment(4, JSON.stringify(["7", "7"])), /leaf already exists/],
+    [() => tree.buildPendingCommitment(4, JSON.stringify(["6", "7", "8", "9"])), /tree is full/],
+    [() => tree.buildPendingCommitmentPacked(4, packFields([7n, 5n])), /leaf already exists/],
+    [() => tree.buildPendingCommitmentPacked(4, packFields([6n, 7n, 8n, 9n])), /tree is full/],
+  ]) {
+    assert.throws(build, error);
+    assert.equal(tree.root(), before);
+    assert.equal(tree.leafCount, 1);
+  }
+  const result = tree.buildPendingCommitment(4, JSON.stringify(["6", "7"]));
+  const input = JSON.parse(result.circuitInputJson);
+  assert.equal(input.currentNotesRoot, before);
+  assert.equal(input.currentNoteIndex, "1");
+  assert.equal(tree.leafCount, 3);
+  assert.equal(tree.root(), result.newNotesRoot);
+});
+
+test("close lets accepted proofs settle, then rejects new work", async () => {
+  const prover = new binding.ResidentProver({ ...(await fixtureOptions()), maxPendingProofs: 4 });
+  assert.equal(prover.closed, false);
+  const accepted = [
+    prover.prove('{"a":"3","b":"11"}'),
+    prover.prove('{"a":"7","b":"5"}'),
+    prover.prove("{"),
+  ];
+  const closing = prover.close();
+  assert.equal(prover.closed, true);
+  await assert.rejects(prover.prove('{"a":"3","b":"11"}'), /prover is closed/);
+  assert.equal(typeof prover.numConstraints, "number");
+
+  // Accepted before close(): each settles exactly as it would have otherwise.
+  const [first, second, invalid] = await Promise.allSettled(accepted);
+  assert.deepEqual(JSON.parse(first.value.publicSignalsJson), ["33"]);
+  assert.deepEqual(JSON.parse(second.value.publicSignalsJson), ["35"]);
+  assert.equal(invalid.status, "rejected");
+  assert.doesNotMatch(invalid.reason.message, /closed/);
+  assert.equal(await closing, undefined);
+  assert.equal(await prover.close(), undefined);
+  assert.equal(prover.closed, true);
+});
+
+test("an idle prover closes immediately; proving fails but metadata stays readable", async () => {
+  const prover = await binding.ResidentProver.create(await fixtureOptions());
+  const getters = [
+    "artifactLoadMs", "artifactInitializationMs", "numConstraints", "numPublic", "threads",
+    "mode", "profile", "witnessBackend", "verifyingKeyDigest", "r1csSha256",
+  ];
+  const before = Object.fromEntries(getters.map((getter) => [getter, prover[getter]]));
+  await prover.close();
+  await assert.rejects(
+    prover.prove('{"a":"3","b":"11"}'),
+    (error) => error.code === "Closing" && error.message === "prover is closed",
+  );
+  for (const getter of getters) {
+    assert.equal(prover[getter], before[getter], getter);
+  }
+  await Promise.all([prover.close(), prover.close()]);
+  assert.equal(prover.closed, true);
+});
+
+test("explicit resource management closes the prover", async () => {
+  const options = await fixtureOptions();
+  const awaited = new binding.ResidentProver(options);
+  assert.equal(await awaited[Symbol.asyncDispose](), undefined);
+  assert.equal(awaited.closed, true);
+
+  const synchronous = new binding.ResidentProver(options);
+  assert.equal(synchronous[Symbol.dispose](), undefined);
+  assert.equal(synchronous.closed, true);
+  await synchronous.close();
 });
 
 

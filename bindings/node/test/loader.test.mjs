@@ -6,9 +6,9 @@ import test from "node:test";
 const source = readFileSync(new URL("../index.js", import.meta.url), "utf8");
 function load({ local = true, packageVersion = "1", binaryVersion = "1", glibc = "2.36" } = {}) {
   const loaded = [];
-  const binding = { rsCoreVersion: () => binaryVersion };
+  const binding = { rsCoreVersion: () => binaryVersion, ResidentProver: class {} };
   const context = {
-    __dirname: "/package", module: { exports: {} },
+    __dirname: "/package", module: { exports: {} }, Symbol,
     process: { platform: "linux", arch: "x64", env: { NAPI_RS_NATIVE_LIBRARY_PATH: "/untrusted/evil.node" }, report: { getReport: () => ({ header: { glibcVersionRuntime: glibc } }) } },
     require(name) {
       loaded.push(name);
@@ -21,6 +21,7 @@ function load({ local = true, packageVersion = "1", binaryVersion = "1", glibc =
     },
   };
   runInNewContext(source, context);
+  loaded.exports = context.module.exports;
   return loaded;
 }
 test("loader ignores environment library overrides and never invokes a subprocess", () => {
@@ -34,4 +35,16 @@ test("loader always checks package and compiled binary versions", () => {
 });
 test("loader explicitly rejects unpublished musl targets", () => {
   assert.throws(() => load({ glibc: "" }), /requires glibc/);
+});
+test("loader makes ResidentProver disposable through close()", async () => {
+  const { ResidentProver } = load().exports;
+  const calls = [];
+  ResidentProver.prototype.close = function close() {
+    calls.push(this);
+    return Promise.resolve();
+  };
+  const prover = new ResidentProver();
+  assert.equal(await prover[Symbol.asyncDispose](), undefined);
+  assert.equal(prover[Symbol.dispose](), undefined);
+  assert.deepEqual(calls, [prover, prover]);
 });
