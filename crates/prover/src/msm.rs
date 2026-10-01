@@ -245,9 +245,10 @@ pub(crate) fn batch_size(width: usize) -> usize {
 /// Measured on BN254 G1/G2 with 4-13 Rayon workers (`msm_accumulation sweep`,
 /// `sparrow_query_msm`) for uniform scalars and for witness-like ones (many
 /// 0/1/64-bit values, so most windows see fewer points). Witness-like inputs
-/// prefer a bit or two less below 2^17 points; these widths favor uniform
-/// scalars (the costlier MSMs) except where that regressed small witness-like
-/// MSMs.
+/// prefer a bit or two less below 2^17 points. On the production 2/5/10-note
+/// keys (150k-520k-point queries, `native_window_sweep` and whole resident
+/// proofs), 12 bits beat 13 by 2-5% at 8 workers and tied at 13, so 12 covers
+/// every query up to 524,288 points.
 #[cfg(any(feature = "parallel", feature = "sparrow", test))]
 pub(crate) fn adaptive_window_bits(points: usize) -> usize {
     match points {
@@ -256,8 +257,7 @@ pub(crate) fn adaptive_window_bits(points: usize) -> usize {
         256..=1_023 => 7,
         1_024..=4_095 => 8,
         4_096..=16_383 => 10,
-        16_384..=65_536 => 12,
-        65_537..=524_288 => 13,
+        16_384..=524_288 => 12,
         _ => 14,
     }
 }

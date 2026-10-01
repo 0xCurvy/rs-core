@@ -1767,8 +1767,8 @@ mod tests {
         assert_eq!(resolve_window_bits(adaptive, 4_096), 10);
         assert_eq!(resolve_window_bits(adaptive, 16_384), 12);
         assert_eq!(resolve_window_bits(adaptive, 65_536), 12);
-        assert_eq!(resolve_window_bits(adaptive, 65_537), 13);
-        assert_eq!(resolve_window_bits(adaptive, 524_288), 13);
+        assert_eq!(resolve_window_bits(adaptive, 65_537), 12);
+        assert_eq!(resolve_window_bits(adaptive, 524_288), 12);
         assert_eq!(resolve_window_bits(adaptive, 524_289), 14);
         assert_eq!(resolve_window_bits(adaptive, usize::MAX), 14);
         assert_eq!(resolve_window_bits(7, usize::MAX), 7);

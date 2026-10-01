@@ -653,7 +653,7 @@ adaptive windows were retuned (`adaptive_window_bits`):
 |---:|---:|---:|
 | 4,096–16,383 | 8 | 10 |
 | 16,384–65,536 | 8–9 | 12 |
-| 65,537–524,288 | 10–11 | 13 |
+| 65,537–524,288 | 10–11 | 12 (13 on synthetic data; see the real-key sweep below) |
 | > 524,288 | 12–13 | 14 |
 
 Host: reference Apple M-series, 14 cores, loaded by parallel builds (load
@@ -711,10 +711,33 @@ times unchanged within noise):
 `CURVY_PROVER_NUM_THREADS` selects the pool size (default 1). Builds without
 `parallel` or `compact-matrix` use stock ark-groth16 and are unaffected.
 
-**Caveats.** SPARROW adaptive widths were tuned on synthetic inputs; re-check
-with `native_window_sweep` on real artifacts. `sparrow::phase_bench` still
-times the old projective kernels (kept under `bench`), so `phase_kernels` no
-longer reflects production SPARROW accumulation.
+**Real-key window check.** The table above was first tuned on synthetic
+scalars, which put 65,537–524,288 points at 13 bits. Production witnesses have
+many small values and favor narrower windows, so it was re-checked on the
+2/5/10-note keys (queries of 150k–520k points). SPARROW: `native_window_sweep`
+(chunk manifests at 1 MiB, snarkjs witnesses, 7 samples, median ms of one
+self-verified proof; `adaptive` was 13 bits at the time):
+
+| Notes | Threads | 11 | 12 | 13 | 14 | 16 | adaptive (13) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 8 | 266.1 | **264.7** | 273.2 | 291.5 | 325.9 | 274.1 |
+| 5 | 8 | 362.3 | **340.0** | 362.9 | 375.5 | 395.0 | 358.2 |
+| 10 | 8 | 696.1 | **649.4** | 675.4 | 674.5 | 650.9 | 680.0 |
+| 2 | 13 | 243.6 | **235.8** | 243.2 | 249.0 | 349.2 | 249.4 |
+| 5 | 13 | 328.2 | 327.2 | 341.2 | 330.7 | 411.6 | **320.1** |
+| 10 | 13 | 590.6 | 560.1 | 545.0 | **526.5** | 583.9 | 555.1 |
+
+Whole resident proofs (`curvy-native-prover --features parallel`, 9 rounds
+alternating) with the band at 12 instead of 13: 8 threads −5.5% / −4.5% /
+−2.5% (2/5/10 notes); 13 threads +2.5% / −2.0% / −2.4%. Twelve wins or ties in
+10 of 12 comparisons, so 16,384–524,288 points now use 12 bits. Host load was
+8–13 during these runs.
+
+`sparrow::phase_bench` (`phase_kernels`, and the browser phase page) times the
+production SPARROW kernel (`accumulate_affine_windows`, affine buckets) on one
+chunk of synthetic pairs. 1 Oct, 8 threads: G1 2^17 w13 17.96 ms, G2 2^16 w13
+23.80 ms. Earlier `phase_kernels` numbers timed projective buckets and are not
+comparable.
 
 ```sh
 cargo run --release --locked -p curvy-benchmarks --bin msm_accumulation -- compare g1 12,14,16,18,20 13 9 uniform
@@ -723,6 +746,8 @@ cargo run --release --locked -p curvy-benchmarks --bin msm_accumulation -- profi
 # SPARROW query MSM (see the usage text in the bin for argument order;
 # build with --no-default-features for the serial variant):
 cargo run --release --locked -p curvy-benchmarks --bin sparrow_query_msm -- g1 16 13 0 524288
+# Real keys: manifest from the zkey_chunk_manifest example, witness from snarkjs.
+cargo run --release --locked -p curvy-benchmarks --bin native_window_sweep -- ZKEY ZKEY_SHA256 MANIFEST MANIFEST_SHA256 WTNS 8 524288 11,12,13,14,16,adaptive 7
 ```
 
 ## Recording a new result
