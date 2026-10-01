@@ -515,6 +515,35 @@ chunks, not 524,288). WASM heap peak 85.6 / 90.1 / 121.1 MiB portable, 93.0 /
 96.2 / 129.2 MiB threaded; persistent G2 buckets 3.3 / 6.1 / 11.1 / 21.2 MB for
 w11–w14.
 
+### 6.8 Mobile: Samsung Galaxy Z Fold2 (1 Oct 2026)
+
+First physical-device run. SM-F976B (Snapdragon 865, 8 logical CPUs, 8 GiB),
+Android 10, Chrome 153, over USB (`adb reverse`, `http://localhost`, secure and
+cross-origin isolated), charging at 49%. `crates/prover/js/mobile-harness.html`
+in all-circuits mode: SPARROW threaded build (`build-wasm.sh web --threads --sparrow` at `6598555`),
+8 workers, 13-bit windows, 65,536-point chunks, one-pass manifest proofs
+(1 MiB chunks), trusted SAGE program pins (run 1 compiles and stores the
+program; runs 2–3 load it from Cache API). Every proof self-verified and
+matched `expectedPublics`.
+
+| Notes | Proof + verify ms (runs 1/2/3) | Median | Prover init ms (cold / warm) |
+|---:|---|---:|---:|
+| 2 | 1,565 / 1,509 / 1,557 | 1,557 | 241 / 67–69 |
+| 5 | 2,079 / 2,200 / 2,774 | 2,200 | 242 / 96–123 |
+| 10 | 6,849 / 6,956 / 6,976 | 6,956 | 660 / 275–277 |
+
+Module import + WASM + 8-worker pool startup: 92 ms (once). Peak page JS heap
+209 MiB; origin storage 505 MiB after caching all three circuits.
+
+**Reading.** 2 and 5 notes prove within ~1.2x of the desktop threaded SPARROW
+numbers (6.7, 4 workers on Apple M-series), but 10 notes is ~2.1x slower than
+desktop, so the largest client circuit hits a memory or bandwidth limit on this
+device rather than scaling with points. The third 5-note run (+26%) suggests
+thermal throttling after ~15 s of sustained proving. Not yet covered: the
+portable build, 4- and 7-worker runs (the harness recommends leaving one CPU
+free), longer thermal runs, and iOS/Safari. Raw report kept locally under
+`tools/benchmarks/results/mobile-2026-10-01/` (not tracked).
+
 ### Re-run
 
 ```sh

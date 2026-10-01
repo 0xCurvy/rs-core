@@ -216,8 +216,10 @@ Ongoing evidence:
 
 ## Known limitations and open items
 
-- No formal external audit; no constant-time proof; native x86-64 and mobile
-  timing and performance unmeasured.
+- No formal external audit; no constant-time proof; native x86-64 timing and
+  performance unmeasured. Mobile has one Android device (Galaxy Z Fold2,
+  threaded SPARROW, `docs/benchmarks.md` 6.8); iOS and low-end Android are
+  unmeasured.
 - Production ceremony verification needs the real PTAU/R1CS and reviewed pins.
 - npm trusted-publisher setup and revocation of any existing npm token are
   account-side work. The WASM release workflow is still
