@@ -1,9 +1,10 @@
-//! Curvy's parallel Groth16 proof assembly over arkworks' BN254 arithmetic.
+//! Curvy's Groth16 proof assembly over arkworks' BN254 arithmetic.
 //!
 //! This module is adapted from `ark-groth16` 0.6.0's `src/prover.rs` and keeps
-//! its proof equations. It replaces only the large-MSM scheduling boundary so
-//! [`crate::msm`] can use the Rayon pool already initialized by the host, which
-//! is required by `wasm-bindgen-rayon`. The upstream code is available from
+//! its proof equations. It replaces only the MSM boundary: [`crate::msm`] uses
+//! batch-affine buckets for large BN254 queries in every build, and under
+//! `parallel` runs on the Rayon pool already initialized by the host, which is
+//! required by `wasm-bindgen-rayon`. The upstream code is available from
 //! <https://github.com/arkworks-rs/groth16> under MIT OR Apache-2.0; Curvy uses
 //! it under MIT. See `THIRD-PARTY-NOTICES.md`.
 

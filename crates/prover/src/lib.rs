@@ -55,12 +55,14 @@
 //! [`zkey::validate_crs_consistency`], and on `snarkjs zkey verify` against the
 //! ceremony PTAU and the circuit's R1CS - see `examples/artifact_manifest_check`.
 //!
-//! Native builds enable `std` and use stock serial ark-groth16 by default.
-//! The opt-in `parallel` feature uses Curvy's global-pool proof path. Portable
-//! WASM uses the `wasm` feature; threaded browser builds use `wasm-threads` and
-//! export `initThreadPool(n)` so the host selects the worker count explicitly.
-//! The prototype `compact-matrix` feature also uses Curvy's proof assembly so
-//! its CSR constraints never need conversion to arkworks' nested matrix type.
+//! Every build uses Curvy's ark-groth16 0.6-compatible proof assembly and its
+//! batch-affine MSM. Native builds enable `std` and prove on one thread by
+//! default; the opt-in `parallel` feature schedules the same proof on the
+//! host's global Rayon pool. Portable WASM uses the `wasm` feature; threaded
+//! browser builds use `wasm-threads` and export `initThreadPool(n)` so the host
+//! selects the worker count explicitly. The prototype `compact-matrix` feature
+//! keeps CSR constraints, which never need conversion to arkworks' nested
+//! matrix type.
 
 pub mod artifacts;
 #[cfg(all(feature = "bench", feature = "parallel"))]
@@ -80,9 +82,7 @@ pub mod wtns;
 pub mod zkey;
 
 mod authenticated_reader;
-#[cfg(any(feature = "parallel", feature = "compact-matrix"))]
 mod groth16_prover;
-#[cfg(any(feature = "parallel", feature = "compact-matrix", feature = "sparrow"))]
 mod msm;
 
 use std::io::{Cursor, Read, Seek};
@@ -328,7 +328,7 @@ impl Prover {
             full_assignment,
         );
 
-        #[cfg(all(not(feature = "compact-matrix"), feature = "parallel"))]
+        #[cfg(not(feature = "compact-matrix"))]
         let proof = groth16_prover::create_proof_with_matrices(
             &self.pk,
             r,
@@ -338,18 +338,6 @@ impl Prover {
             self.matrices.num_constraints,
             full_assignment,
         );
-
-        #[cfg(not(any(feature = "compact-matrix", feature = "parallel")))]
-        let proof =
-            Groth16::<Bn254, qap::CircomReduction>::create_proof_with_reduction_and_matrices(
-                &self.pk,
-                r,
-                s,
-                &self.matrices.matrices,
-                self.matrices.num_instance_variables,
-                self.matrices.num_constraints,
-                full_assignment,
-            );
 
         proof.map_err(ProverError::ProofGeneration)
     }

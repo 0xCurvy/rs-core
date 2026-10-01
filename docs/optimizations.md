@@ -48,6 +48,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | SPARROW `native_adaptive()`: window from each query's point count, 524,288-point chunks (25 Aug) | Validated with `native_window_sweep`; window width is deployment metadata, not part of any digest | `crates/prover/src/sparrow.rs` (`StreamingConfig`) |
 | Parallel SPARROW bucket window reduction (1 Oct) | Independent per-window running sums; 3–7x for that phase per the code comment, no end-to-end re-measurement | `crates/prover/src/msm.rs` |
 | Batch-affine MSM bucket accumulation, wider parallel/SPARROW windows (1 Oct; 16,384–524,288-point band settled at 12 bits on production keys) | Resident G1 −21 to −37%, G2 −34 to −50%, SPARROW query −37 to −53%; whole production proofs −18 to −32%. XYZZ kept below 4,096 points and as the overflow for repeatedly hit buckets | `crates/prover/src/msm.rs` (`AffineBuckets`, `adaptive_window_bits`, `BATCH_AFFINE_MIN_POINTS`), `crates/prover/src/sparrow.rs` |
+| Curvy proof assembly and batch-affine MSM in the default serial build (1 Oct) | Previously stock `ark-groth16`. Native serial proofs −16 to −22% and −19 to −24% peak RSS; portable browser −14 to −23%, browser memory unchanged, module −3% (benchmarks 6.5) | `crates/prover/src/lib.rs`, `crates/prover/src/msm.rs` (`serial_window_bits`) |
 | Manifest-authenticated resident loading (5 Sep) | 10-note load 389.9 -> 134.9 ms, −30% RSS | `crates/prover/src/artifacts/manifest.rs` (`zkey-manifest`), `Prover::from_zkey_manifest_reader` |
 | Node: compact matrices and a bounded FIFO queue on the prover's private pool (5 Sep) | Same parallel latency, ~22% less RSS; waiting proofs hold no libuv worker | `bindings/node/Cargo.toml` (`default = ["compact-matrix"]`), `bindings/node/src/queue.rs` |
 | Node `ResidentProver.create()` on a native task (25 Aug) | Event-loop delay 117.9 -> 1.5 ms during load | `bindings/node/src/lib.rs` |
@@ -83,7 +84,6 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | Setting | Reason | Code |
 |---|---|---|
 | `ark-ec/parallel`, `ark-groth16/parallel` | arkworks 0.6 builds private Rayon pools inside large MSMs, which wasm-bindgen-rayon workers cannot spawn. Curvy schedules MSMs on the host's existing pool; `ark-ff`/`ark-poly`/`ark-std` parallel stay on | `crates/prover/Cargo.toml` (`parallel` feature comment) |
-| Curvy proof assembly in the default serial build | Without `parallel` or `compact-matrix` the prover delegates to stock `ark-groth16` 0.6 | `crates/prover/src/lib.rs` |
 | `curvy-core/parallel` in the Node binding | Tree work stays serial so one service cannot fan out across all cores by accident | `bindings/node/Cargo.toml` |
 | Thread counts above one by default | Native CLI (`CURVY_PROVER_NUM_THREADS`) and Node (`threads`) default to 1 to respect container quotas | `crates/prover/src/bin/curvy-native-prover.rs`, `bindings/node/src/lib.rs` |
 

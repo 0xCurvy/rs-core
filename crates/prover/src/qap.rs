@@ -20,8 +20,7 @@ use zeroize::Zeroize;
 /// which measured about 18x slower than this single pass over the elements.
 /// Every buffer wrapped here is allocated at its final length, so that pass
 /// covers the allocation. This is best effort: copies made inside arkworks
-/// (FFT and MSM temporaries, the stock serial assembly's own scalar
-/// conversions) and the caller's assignment are out of reach.
+/// (FFT and MSM temporaries) and the caller's assignment are out of reach.
 pub(crate) struct WipeOnDrop<T: Zeroize>(pub(crate) Vec<T>);
 
 impl<T: Zeroize> WipeOnDrop<T> {

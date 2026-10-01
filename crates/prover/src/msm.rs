@@ -22,7 +22,6 @@
 //! Neither validates bases; for points off the curve both return meaningless
 //! (and different) sums, but batch-affine never divides by zero.
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
 
@@ -32,7 +31,6 @@ use ark_ec::{
     AffineRepr,
     short_weierstrass::{Affine, Bucket, Projective, SWCurveConfig},
 };
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 use ark_ff::PrimeField;
 use ark_ff::{AdditiveGroup, BigInt, Field, Zero};
 
@@ -41,7 +39,6 @@ use rayon::prelude::*;
 
 /// How one window folds its points into buckets. Either choice produces the
 /// same group element; only the cost differs.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Accumulation {
     /// Arkworks' XYZZ buckets: one mixed addition per point.
@@ -53,7 +50,6 @@ pub(crate) enum Accumulation {
 
 /// Smallest MSM that uses batch-affine buckets. Below it, an inversion per
 /// batch and the scheduling bookkeeping cost more than they save.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 const BATCH_AFFINE_MIN_POINTS: usize = 1 << 12;
 
 /// Compute a signed-Pippenger MSM without constructing a Rayon pool.
@@ -65,7 +61,6 @@ const BATCH_AFFINE_MIN_POINTS: usize = 1 << 12;
 /// Scalars must be canonical BN254 Fr integers (`Fr::into_bigint()`); the
 /// 254-bit window count is not an API for arbitrary 256-bit integers. Bucket
 /// indices depend on the witness: this routine is variable-time.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 pub(crate) fn msm_bigint<V>(bases: &[V::MulBase], scalars: &[BigInt<4>]) -> V
 where
     V: VariableBaseMSM<ScalarField = Fr>,
@@ -78,7 +73,6 @@ where
     msm_bigint_with_window::<V>(bases, scalars, resident_window_bits(size))
 }
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 fn resident_window_bits(points: usize) -> usize {
     #[cfg(feature = "parallel")]
     {
@@ -91,10 +85,7 @@ fn resident_window_bits(points: usize) -> usize {
 }
 
 /// Window policy for builds without `parallel`.
-#[cfg(any(
-    all(feature = "bench", feature = "parallel"),
-    all(not(feature = "parallel"), any(feature = "compact-matrix", test))
-))]
+#[cfg(any(not(feature = "parallel"), feature = "bench"))]
 pub(crate) fn serial_window_bits(points: usize) -> usize {
     // Serial execution benefits from fewer scans of the query. Approximate
     // ln(points) + 2, as in arkworks, while retaining the proven width cap.
@@ -105,7 +96,6 @@ pub(crate) fn serial_window_bits(points: usize) -> usize {
     }
 }
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 pub(crate) fn msm_bigint_with_window<V>(
     bases: &[V::MulBase],
     scalars: &[BigInt<4>],
@@ -125,7 +115,6 @@ where
 
 /// [`msm_bigint_with_window`] with an explicit accumulator. `batch` overrides
 /// the batch-affine batch size (benchmarks only; `None` is the production size).
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 pub(crate) fn msm_bigint_with_accumulation<V>(
     bases: &[V::MulBase],
     scalars: &[BigInt<4>],
@@ -179,7 +168,6 @@ where
 /// not expose affine coordinates. `V` is `'static` (every arkworks group is),
 /// so its concrete type can be identified safely; `None` selects the generic
 /// XYZZ path for any other group.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 fn batch_affine_msm<V, P>(
     bases: &[V::MulBase],
     scalars: &[BigInt<4>],
@@ -220,7 +208,6 @@ where
 
 /// Reinterpret a value whose concrete type the caller has already matched.
 /// `Any` repeats the check, a comparison of two type ids known at compile time.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 #[inline(always)]
 fn same_type<T: 'static, U: 'static>(value: &T) -> &U {
     (value as &dyn Any)
@@ -262,7 +249,6 @@ pub(crate) fn adaptive_window_bits(points: usize) -> usize {
     }
 }
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 fn signed_window_sum<V>(
     bases: &[V::MulBase],
     scalars: &[BigInt<4>],
@@ -282,7 +268,6 @@ where
     xyzz_window_sum::<V>(&buckets)
 }
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 fn xyzz_buckets<V>(
     bases: &[V::MulBase],
     digits: impl Iterator<Item = i16>,
@@ -305,7 +290,6 @@ where
     buckets
 }
 
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 fn xyzz_window_sum<V>(buckets: &[V::Bucket]) -> V
 where
     V: VariableBaseMSM<ScalarField = Fr>,
@@ -372,7 +356,6 @@ const HOT: u8 = 2;
 const MIN_RETRY_BATCH: usize = 8;
 
 impl<P: SWCurveConfig> AffineBuckets<P> {
-    #[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
     pub(crate) fn with_batch_size(width: usize, batch_size: usize) -> Self {
         let count = 1_usize << (width - 1);
         let batch_size = batch_size.max(1);
@@ -686,7 +669,6 @@ where
 /// Carry normally depends on every lower window. Walking backward across the
 /// only ambiguous raw digit (`midpoint - 1`) makes it random-access, allowing
 /// separate windows to be evaluated by separate workers on the existing pool.
-#[cfg(any(feature = "parallel", feature = "compact-matrix", test))]
 pub(crate) fn signed_window_digit(scalar: &BigInt<4>, width: usize, window: usize) -> i16 {
     let radix = 1_i32 << width;
     let midpoint = radix >> 1;

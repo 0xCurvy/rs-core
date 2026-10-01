@@ -107,7 +107,7 @@ claimed.**
 | Wiped | Not covered |
 |---|---|
 | Signing keys, nonces and intermediates; BLAKE-512 state; cipher state; Poseidon state buffers | Caller and JavaScript copies of inputs and outputs |
-| Witness input and evaluation buffers; QAP and MSM-scalar buffers this crate allocates on the default proof path; `scratch` workspaces on success, error, unwind and drop | Copies inside arkworks, including the stock serial assembly's own scalar conversions |
+| Witness input and evaluation buffers; QAP and MSM-scalar buffers this crate allocates on the default proof path; `scratch` workspaces on success, error, unwind and drop | Copies inside arkworks (FFT and field temporaries) |
 | Node queued proof JSON and assignments; owned WASM input strings | Exposed legacy `BigUint` values, compiler/register spills, third-party temporaries |
 | C: strings and byte buffers wiped by `curvy_string_free` / `curvy_bytes_free`; secret-bearing outputs built in exact-size buffers; signer handles erase key storage on free | wasm-bindgen output conversion; intermediate strings built inside the core before the C boundary |
 

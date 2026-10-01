@@ -220,9 +220,10 @@ Merkle parent construction, proving-key point conversion, and parallel-enabled
 arkworks proving operations. Witness-graph evaluation itself remains
 deterministic and single-threaded.
 
-For Cargo consumers, both crates keep parallelism opt-in. The ordinary prover
-uses stock serial `ark-groth16` by default. Enable `parallel` for Curvy's
-ark-groth16-compatible proof path scheduled on the host's existing Rayon pool:
+For Cargo consumers, both crates keep parallelism opt-in. The prover always
+uses Curvy's ark-groth16-compatible proof path with batch-affine MSMs; by
+default it runs on one thread. Enable `parallel` to schedule it on the host's
+existing Rayon pool:
 
 ```toml
 [dependencies]
@@ -237,7 +238,7 @@ cargo install --locked curvy-prover --version 0.1.0-rc.6 \
   --bin curvy-native-prover
 ```
 
-That command installs the stock serial prover. Add `--features parallel` to
+That command installs the single-threaded prover. Add `--features parallel` to
 install the global-pool multithreaded build used by `scripts/build-native.sh`.
 
 `cargo install` places the executable at
@@ -428,8 +429,8 @@ cross-origin isolation.
 - `curvy-core/parallel` enables Rayon for independent stealth scans and bulk
   Merkle-tree construction. It is disabled by default for direct Cargo users;
   `scripts/build-native.sh` enables it.
-- `curvy-prover` enables only native `std` by default and therefore uses stock
-  serial `ark-groth16`. Its `parallel`, `signet-v2`, `sparrow`, `bench`, `wasm`,
+- `curvy-prover` enables only native `std` by default and proves on one
+  thread. Its `parallel`, `signet-v2`, `sparrow`, `bench`, `wasm`,
   and `wasm-threads` features are explicit opt-ins; `sparrow` and the
   development-only `bench` feature enable SAGE.
 - `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a

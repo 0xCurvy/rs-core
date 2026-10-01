@@ -61,10 +61,10 @@ canonical 32-byte big-endian field elements and avoid decimal JSON output.
 ## Cryptographic and audit boundary
 
 The prover intentionally keeps BN254 field arithmetic, curve operations, and
-final verification in arkworks. The default serial path delegates proof
-assembly directly to stock `ark-groth16` 0.6. The opt-in `parallel` and
-`compact-matrix` paths use a small Curvy assembly layer with the same equations;
-the former schedules large MSMs on the host's Rayon pool, while the latter
+final verification in arkworks. Proof assembly is a small Curvy layer with
+the same equations as stock `ark-groth16` 0.6 (tests compare the two with fixed
+randomizers) and batch-affine BN254 MSMs. The opt-in `parallel` feature
+schedules large MSMs on the host's Rayon pool, while `compact-matrix`
 retains CSR constraints through QAP evaluation. Neither implements separate
 field or curve formulas. SPARROW additionally changes evaluation order, batching,
 and memory ownership while using the same scalar recoder and arkworks group
@@ -110,7 +110,7 @@ security audit. The arithmetic layer remains in arkworks.
 | `wasm` | Portable wasm-bindgen prover API |
 | `wasm-threads` | Shared-memory browser prover with `initThreadPool(n)` |
 
-Without `parallel`, the ordinary prover calls stock serial arkworks. With
+Without `parallel`, the prover runs Curvy's proof path on one thread. With
 `parallel`, the native executable accepts `CURVY_PROVER_NUM_THREADS=1..64` and
 defaults to one thread; library consumers can configure Rayon globally.
 Threaded WASM hosts choose the worker count by awaiting the generated module's
@@ -200,8 +200,8 @@ success, error, panic unwinding, and drop; caller inputs and temporary copies
 inside dependencies are outside this guarantee. MSM bucket reuse is not enabled.
 Default APIs retain no workspaces between proofs. They still wipe, on a best
 effort basis, the QAP and MSM-scalar buffers this crate allocates for a proof;
-copies inside arkworks (including the stock serial assembly's own scalar
-conversions) are not reached, so neither path claims complete erasure. See the
+copies inside arkworks (FFT and field temporaries) are not reached, so no
+path claims complete erasure. See the
 workspace [measurements](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md)
 and [promotion decisions](https://github.com/0xCurvy/rs-core/blob/main/docs/optimizations.md).
 

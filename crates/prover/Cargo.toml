@@ -70,12 +70,12 @@ std = [
   "ark-std/getrandom",
   "ark-std/std",
 ]
-# Opt into Curvy's ark-groth16 0.6-compatible proof assembly and MSM scheduler.
-# Do not enable ark-ec/parallel or ark-groth16/parallel: ark-ec 0.6 constructs
-# private Rayon pools inside large MSMs, which wasm-bindgen-rayon cannot spawn.
-# Curvy schedules those MSMs on the host's existing pool; FFT and field work
-# stay parallel. Without this feature, the ordinary prover calls stock serial
-# ark-groth16 directly.
+# Run Curvy's ark-groth16 0.6-compatible proof assembly and MSM scheduler on
+# the host's Rayon pool. Do not enable ark-ec/parallel or ark-groth16/parallel:
+# ark-ec 0.6 constructs private Rayon pools inside large MSMs, which
+# wasm-bindgen-rayon cannot spawn. Curvy schedules those MSMs on the host's
+# existing pool; FFT and field work stay parallel. Without this feature, the
+# same proof assembly and batch-affine MSM run serially.
 parallel = [
   "dep:rayon",
   "ark-ff/parallel",
