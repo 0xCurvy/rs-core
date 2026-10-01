@@ -31,7 +31,9 @@ use curvy_core::note;
 use curvy_core::poseidon::poseidon as core_poseidon;
 use curvy_core::stealth;
 
-use abi::{guard, guard_result, str_in, str_vec_in, str_vec_out, string_out};
+use abi::{
+    failed, guard, guard_result, invalid, null_output, str_in, str_vec_in, str_vec_out, string_out,
+};
 
 pub use abi::{CurvyBytes, CurvyStatus, curvy_bytes_free, curvy_last_error, curvy_string_free};
 
@@ -233,9 +235,8 @@ pub unsafe extern "C" fn curvy_pub_from_scalar(
 ) -> CurvyStatus {
     guard_result(
         || {
-            let scalar =
-                unsafe { str_in(scalar) }.map_err(|_| "invalid scalar string".to_string())?;
-            let key = ScalarSigningKey::from_decimal(scalar).map_err(|e| e.to_string())?;
+            let scalar = unsafe { str_in(scalar) }.map_err(|_| invalid("invalid scalar string"))?;
+            let key = ScalarSigningKey::from_decimal(scalar).map_err(invalid)?;
             let public = key.verifying_key();
             Ok(vec![fr_to_dec(&public.x()), fr_to_dec(&public.y())])
         },
@@ -309,11 +310,11 @@ pub unsafe extern "C" fn curvy_sign_with_scalar(
     guard_result(
         || {
             let (message, scalar) = unsafe { (str_in(message), str_in(scalar)) };
-            let message = message.map_err(|_| "invalid message string".to_string())?;
-            let scalar = scalar.map_err(|_| "invalid scalar string".to_string())?;
-            let message = Bn254Fr::try_from_dec(message).map_err(|e| e.to_string())?;
-            let key = ScalarSigningKey::from_decimal(scalar).map_err(|e| e.to_string())?;
-            let signature = key.sign_curvy_v1(message).map_err(|e| e.to_string())?;
+            let message = message.map_err(|_| invalid("invalid message string"))?;
+            let scalar = scalar.map_err(|_| invalid("invalid scalar string"))?;
+            let message = Bn254Fr::try_from_dec(message).map_err(invalid)?;
+            let key = ScalarSigningKey::from_decimal(scalar).map_err(invalid)?;
+            let signature = key.sign_curvy_v1(message).map_err(failed)?;
             Ok(vec![
                 fr_to_dec(&signature.r8.x()),
                 fr_to_dec(&signature.r8.y()),
@@ -344,13 +345,12 @@ pub unsafe extern "C" fn curvy_verify_scalar_signature(
 ) -> CurvyStatus {
     guard_result(
         || {
-            let read = |ptr| unsafe { str_in(ptr) }.map_err(|_| "invalid string".to_string());
-            let message = Bn254Fr::try_from_dec(read(message)?).map_err(|e| e.to_string())?;
-            let public = BabyJubPoint::try_from_dec(read(public_x)?, read(public_y)?)
-                .map_err(|e| e.to_string())?;
-            let r8 =
-                BabyJubPoint::try_from_dec(read(r8_x)?, read(r8_y)?).map_err(|e| e.to_string())?;
-            let s = BabyJubScalar::try_from_dec(read(s)?).map_err(|e| e.to_string())?;
+            let read = |ptr| unsafe { str_in(ptr) }.map_err(|_| invalid("invalid string"));
+            let message = Bn254Fr::try_from_dec(read(message)?).map_err(invalid)?;
+            let public =
+                BabyJubPoint::try_from_dec(read(public_x)?, read(public_y)?).map_err(invalid)?;
+            let r8 = BabyJubPoint::try_from_dec(read(r8_x)?, read(r8_y)?).map_err(invalid)?;
+            let s = BabyJubScalar::try_from_dec(read(s)?).map_err(invalid)?;
             Ok(verify_scalar_compat(
                 message,
                 &public,
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn curvy_verify_scalar_signature(
         },
         |valid| {
             if out.is_null() {
-                return CurvyStatus::InvalidArgument;
+                return null_output();
             }
             unsafe { std::ptr::write_unaligned(out, c_int::from(valid)) };
             CurvyStatus::Ok
@@ -456,7 +456,7 @@ pub unsafe extern "C" fn curvy_decrypt_amount_token(
 pub extern "C" fn curvy_new_meta(out: *mut *mut c_char) -> CurvyStatus {
     guard_result(
         || {
-            let (k, v, big_k, big_v) = stealth::new_meta().map_err(|e| e.to_string())?;
+            let (k, v, big_k, big_v) = stealth::new_meta().map_err(failed)?;
             Ok(vec![k, v, big_k, big_v])
         },
         |values| str_vec_out(values, out),
@@ -476,9 +476,9 @@ pub unsafe extern "C" fn curvy_get_meta(
     guard_result(
         || {
             let (k, v) = unsafe { (str_in(k), str_in(v)) };
-            let k = k.map_err(|_| "invalid spend key".to_string())?;
-            let v = v.map_err(|_| "invalid view key".to_string())?;
-            let (big_k, big_v) = stealth::get_meta(k, v).map_err(|e| e.to_string())?;
+            let k = k.map_err(|_| invalid("invalid spend key"))?;
+            let v = v.map_err(|_| invalid("invalid view key"))?;
+            let (big_k, big_v) = stealth::get_meta(k, v).map_err(invalid)?;
             Ok(vec![k.to_string(), v.to_string(), big_k, big_v])
         },
         |values| str_vec_out(values, out),
@@ -498,9 +498,17 @@ pub unsafe extern "C" fn curvy_send(
     guard_result(
         || {
             let (big_k, big_v) = unsafe { (str_in(big_k), str_in(big_v)) };
-            let big_k = big_k.map_err(|_| "invalid spend pub key".to_string())?;
-            let big_v = big_v.map_err(|_| "invalid view pub key".to_string())?;
-            let (r, out) = stealth::send(big_k, big_v).map_err(|e| e.to_string())?;
+            let big_k = big_k.map_err(|_| invalid("invalid spend pub key"))?;
+            let big_v = big_v.map_err(|_| invalid("invalid view pub key"))?;
+            let (r, out) = stealth::send(big_k, big_v).map_err(|error| {
+                // With both recipient keys valid, only randomness can have failed.
+                if stealth::is_valid_secp256k1_point(big_k) && stealth::is_valid_bn254_point(big_v)
+                {
+                    failed(error)
+                } else {
+                    invalid(error)
+                }
+            })?;
             Ok(vec![r, out.big_r, out.view_tag, out.spending_pub_key])
         },
         |values| str_vec_out(values, out),
@@ -525,12 +533,13 @@ pub unsafe extern "C" fn curvy_scan(
     guard_result(
         || {
             let (k, v) = unsafe { (str_in(k), str_in(v)) };
-            let k = k.map_err(|_| "invalid spend key".to_string())?;
-            let v = v.map_err(|_| "invalid view key".to_string())?;
-            let rs = unsafe { str_vec_in(rs_json) }.map_err(|_| "invalid rs array".to_string())?;
+            let k = k.map_err(|_| invalid("invalid spend key"))?;
+            let v = v.map_err(|_| invalid("invalid view key"))?;
+            let rs = unsafe { str_vec_in(rs_json) }.map_err(|_| invalid("invalid rs array"))?;
             let view_tags = unsafe { str_vec_in(view_tags_json) }
-                .map_err(|_| "invalid viewTags array".to_string())?;
-            let matches = stealth::scan(k, v, &rs, &view_tags).map_err(|e| e.to_string())?;
+                .map_err(|_| invalid("invalid viewTags array"))?;
+            // Malformed announcements are skipped; errors are the caller's own inputs.
+            let matches = stealth::scan(k, v, &rs, &view_tags).map_err(invalid)?;
             let mut flat = Vec::with_capacity(matches.len() * 3);
             for found in matches {
                 flat.push(found.index.to_string());
@@ -558,13 +567,12 @@ pub unsafe extern "C" fn curvy_viewer_scan(
     guard_result(
         || {
             let (v, big_k) = unsafe { (str_in(v), str_in(big_k)) };
-            let v = v.map_err(|_| "invalid view key".to_string())?;
-            let big_k = big_k.map_err(|_| "invalid spend pub key".to_string())?;
-            let rs = unsafe { str_vec_in(rs_json) }.map_err(|_| "invalid rs array".to_string())?;
+            let v = v.map_err(|_| invalid("invalid view key"))?;
+            let big_k = big_k.map_err(|_| invalid("invalid spend pub key"))?;
+            let rs = unsafe { str_vec_in(rs_json) }.map_err(|_| invalid("invalid rs array"))?;
             let view_tags = unsafe { str_vec_in(view_tags_json) }
-                .map_err(|_| "invalid viewTags array".to_string())?;
-            let matches =
-                stealth::viewer_scan(v, big_k, &rs, &view_tags).map_err(|e| e.to_string())?;
+                .map_err(|_| invalid("invalid viewTags array"))?;
+            let matches = stealth::viewer_scan(v, big_k, &rs, &view_tags).map_err(invalid)?;
             let mut flat = Vec::with_capacity(matches.len() * 2);
             for found in matches {
                 flat.push(found.index.to_string());

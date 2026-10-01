@@ -20,7 +20,7 @@ use curvy_core::hash_utils::sha256_bigint as core_sha256_bigint;
 use curvy_core::imt::{
     CompletedShard, FrontierAppend, InclusionProof, IndexedMerkleTree,
     NotesFrontier as CoreNotesFrontier, OrderedMerkleTree, OwnedNoteWitness,
-    ShardedNotesTree as CoreShardedNotesTree, TreeError, verify_proof,
+    ShardedNotesTree as CoreShardedNotesTree, TreeError, verify_proof_at_depth,
 };
 use curvy_core::note;
 use curvy_core::poseidon::poseidon as core_poseidon;
@@ -404,21 +404,28 @@ impl WasmOrderedMerkleTree {
     }
 }
 
-/// Verify a packed conventional inclusion proof without reimplementing
-/// Poseidon/path ordering in JavaScript.
+/// Verify a packed conventional inclusion proof against a tree of the
+/// expected `depth` without reimplementing Poseidon/path ordering in JavaScript.
+///
+/// Returns `true` only when `packedSiblings` holds exactly `depth` fields and
+/// the path from `leaf` at `index` reaches `root`. A proof for another depth,
+/// including a truncated proof whose `leaf` is an internal node, returns
+/// `false`. Throws for malformed field encodings.
 #[wasm_bindgen(js_name = verifyMerkleProof)]
 pub fn verify_merkle_proof(
+    depth: u32,
     leaf: &[u8],
     index: u32,
     packed_siblings: &[u8],
     root: &[u8],
 ) -> Result<bool, JsError> {
-    Ok(verify_proof(&InclusionProof {
+    let proof = InclusionProof {
         leaf: decode_field(leaf, "leaf")?,
         index: index as usize,
         siblings: decode_fields(packed_siblings, "siblings")?,
         root: decode_field(root, "root")?,
-    }))
+    };
+    Ok(verify_proof_at_depth(&proof, depth as usize))
 }
 
 /// Constant-space append frontier. It retains no

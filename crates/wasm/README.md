@@ -51,6 +51,13 @@ outside that guarantee. The compatibility `get_meta` result includes both privat
 keys; treat it, `new_meta`, `scan`, and full-witness exports as secret data.
 Unexpected `WebAssembly.RuntimeError` still requires discarding that instance;
 checked input errors are ordinary `Error` values and the instance remains usable.
+
+`verifyMerkleProof(depth, leaf, index, packedSiblings, root)` takes the
+verifier's expected tree depth first. It returns `true` only for a proof with
+exactly `depth` siblings that reaches `root`, so a truncated proof whose leaf is
+an internal node, or a zero-sibling proof with `leaf == root`, returns `false`.
+With the generated bindings, calls still using the earlier four-argument form
+throw instead of verifying.
 ## Byte-based signing keys
 
 `SeedSigner` imports a 32-byte seed. `ScalarSigner` imports a canonical nonzero

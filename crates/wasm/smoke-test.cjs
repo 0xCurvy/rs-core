@@ -96,15 +96,37 @@ eq(generic.leafCount, leaves.length, "generic Merkle leaf count");
 eq(generic.getIndex(be32(leaves[9])), 9, "generic Merkle reverse index");
 const genericProof = generic.proof(be32(leaves[9]));
 assert.equal(
-  wasm.verifyMerkleProof(genericProof.leaf, genericProof.index, genericProof.siblings, genericProof.root),
+  wasm.verifyMerkleProof(generic.depth, genericProof.leaf, genericProof.index, genericProof.siblings, genericProof.root),
   true,
 );
 checks++;
 eq(
-  wasm.verifyMerkleProof(genericProof.leaf, genericProof.index + 2 ** generic.depth, genericProof.siblings, genericProof.root),
+  wasm.verifyMerkleProof(generic.depth, genericProof.leaf, genericProof.index + 2 ** generic.depth, genericProof.siblings, genericProof.root),
   false,
   "Merkle proof rejects index above its capacity",
 );
+// The expected depth, not the sibling count, fixes the tree height.
+for (const depth of [generic.depth - 1, generic.depth + 1]) {
+  eq(
+    wasm.verifyMerkleProof(depth, genericProof.leaf, genericProof.index, genericProof.siblings, genericProof.root),
+    false,
+    `Merkle proof rejects expected depth ${depth}`,
+  );
+}
+const firstPair = [field(genericProof.leaf), field(genericProof.siblings.slice(0, 32))].map(String);
+if (genericProof.index % 2 === 1) firstPair.reverse();
+const internalNode = be32(BigInt(wasm.poseidon(firstPair)));
+const truncated = [internalNode, genericProof.index >> 1, genericProof.siblings.slice(32), genericProof.root];
+eq(wasm.verifyMerkleProof(generic.depth - 1, ...truncated), true, "truncated proof is a valid shallower proof");
+eq(wasm.verifyMerkleProof(generic.depth, ...truncated), false, "Merkle proof rejects an internal node posing as a leaf");
+eq(
+  wasm.verifyMerkleProof(generic.depth, genericProof.root, 0, new Uint8Array(0), genericProof.root),
+  false,
+  "Merkle proof rejects the root posing as a zero-sibling leaf",
+);
+// Positional misuse of the old four-argument form throws instead of passing.
+assert.throws(() => wasm.verifyMerkleProof(genericProof.leaf, genericProof.index, genericProof.siblings, genericProof.root));
+checks++;
 genericProof.free();
 generic.free();
 
@@ -114,8 +136,8 @@ eq(field(singleton.root()), 0n, "empty depth-zero root");
 eq(singleton.insert(be32(7n)), 0, "depth-zero first insertion");
 const singletonProof = singleton.proofAt(0);
 eq(singletonProof.siblings.length, 0, "depth-zero proof has no siblings");
-eq(wasm.verifyMerkleProof(singletonProof.leaf, 0, singletonProof.siblings, singletonProof.root), true, "depth-zero proof verifies");
-eq(wasm.verifyMerkleProof(singletonProof.leaf, 1, singletonProof.siblings, singletonProof.root), false, "depth-zero proof rejects nonzero index");
+eq(wasm.verifyMerkleProof(0, singletonProof.leaf, 0, singletonProof.siblings, singletonProof.root), true, "depth-zero proof verifies");
+eq(wasm.verifyMerkleProof(0, singletonProof.leaf, 1, singletonProof.siblings, singletonProof.root), false, "depth-zero proof rejects nonzero index");
 assert.throws(() => singleton.insert(be32(8n)), /full/);
 checks++;
 singleton.truncate(0);
@@ -278,3 +300,19 @@ assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32)), ["0", "1"]);
 assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32).fill(255)), wasm.ephemeralPubKey(((1n << 256n) - 1n).toString()));
 assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
 console.log("Byte-input and signer lifecycle regressions passed");
+
+// The point at infinity ("0.0") is never a key or announcement: scans skip it,
+// sends throw an ordinary Error, and the validators refuse it.
+const [metaK, metaV, metaBigK, metaBigV] = wasm.get_meta(
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+);
+assert.equal(wasm.dbg_isValidBN254Point("0.0"), false);
+assert.equal(wasm.dbg_isValidSECP256k1Point("0.0"), false);
+assert.deepEqual(wasm.scan(metaK, metaV, ["0.0"], ["00"]), []);
+assert.deepEqual(wasm.viewerScan(metaV, metaBigK, ["0.0"], ["00"]), []);
+assertBoundaryError(() => wasm.send("0.0", metaBigV));
+assertBoundaryError(() => wasm.send(metaBigK, "0.0"));
+assertBoundaryError(() => wasm.viewerScan(metaV, "0.0", [], []));
+assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
+console.log("Identity-point regressions passed");

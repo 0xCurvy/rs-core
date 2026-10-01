@@ -9,7 +9,8 @@ use curvy_prover::{Prover, ResidentProver};
 use curvy_witness::{Limits, WitnessGraph, sage::SageGraph};
 
 use crate::abi::{
-    CurvyBytes, CurvyStatus, bytes_in, bytes_out, guard, set_last_error, str_in, string_out,
+    CurvyBytes, CurvyStatus, Failure, bytes_in, bytes_out, failed, free_status, guard, invalid,
+    null_output, set_last_error, str_in, string_out,
 };
 use crate::registry::Registry;
 
@@ -19,7 +20,7 @@ static RESIDENT_PROVERS: Registry<ResidentProver> = Registry::new();
 
 fn handle_out(handle: u64, out: *mut u64) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     unsafe { std::ptr::write_unaligned(out, handle) };
     CurvyStatus::Ok
@@ -27,7 +28,7 @@ fn handle_out(handle: u64, out: *mut u64) -> CurvyStatus {
 
 fn usize_out(value: usize, out: *mut u32) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     unsafe { std::ptr::write_unaligned(out, value as u32) };
     CurvyStatus::Ok
@@ -36,17 +37,16 @@ fn usize_out(value: usize, out: *mut u32) -> CurvyStatus {
 /// Validates the out-pointer before allocating or registering a handle.
 fn construct<T>(
     registry: &'static Registry<T>,
-    build: impl FnOnce() -> Result<T, String>,
+    build: impl FnOnce() -> Result<T, Failure>,
     out: *mut u64,
 ) -> CurvyStatus {
-    if out.is_null() {
-        return CurvyStatus::InvalidArgument;
-    }
-    guard(|| match build() {
-        Ok(value) => handle_out(registry.insert(value), out),
-        Err(message) => {
-            set_last_error(message);
-            CurvyStatus::Error
+    guard(|| {
+        if out.is_null() {
+            return null_output();
+        }
+        match build() {
+            Ok(value) => handle_out(registry.insert(value), out),
+            Err(failure) => failure.report(),
         }
     })
 }
@@ -54,7 +54,7 @@ fn construct<T>(
 fn with_handle<T, R>(
     registry: &Registry<T>,
     handle: u64,
-    body: impl FnOnce(&T) -> Result<R, String>,
+    body: impl FnOnce(&T) -> Result<R, Failure>,
     finish: impl FnOnce(R) -> CurvyStatus,
 ) -> CurvyStatus {
     guard(|| match registry.with(handle, body) {
@@ -63,10 +63,7 @@ fn with_handle<T, R>(
             CurvyStatus::InvalidHandle
         }
         Some(Ok(value)) => finish(value),
-        Some(Err(message)) => {
-            set_last_error(message);
-            CurvyStatus::Error
-        }
+        Some(Err(failure)) => failure.report(),
     })
 }
 
@@ -97,15 +94,15 @@ pub unsafe extern "C" fn curvy_witness_graph_new(
         &GRAPHS,
         || {
             let bytes =
-                unsafe { bytes_in(graph, len) }.map_err(|_| "invalid graph buffer".to_string())?;
+                unsafe { bytes_in(graph, len) }.map_err(|_| invalid("invalid graph buffer"))?;
             let expected = unsafe { str_in(expected_sha256) }
-                .map_err(|_| "invalid expected graph sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected graph sha256"))?;
             let limits = if batch_profile {
                 curvy_witness::Limits::batch_prover()
             } else {
                 curvy_witness::Limits::client()
             };
-            WitnessGraph::from_bytes_with_limits(bytes, expected, limits).map_err(|e| e.to_string())
+            WitnessGraph::from_bytes_with_limits(bytes, expected, limits).map_err(failed)
         },
         out,
     )
@@ -113,14 +110,7 @@ pub unsafe extern "C" fn curvy_witness_graph_new(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_witness_graph_free(handle: u64) -> CurvyStatus {
-    crate::abi::guard(|| {
-        if GRAPHS.remove(handle) {
-            CurvyStatus::Ok
-        } else {
-            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
-            CurvyStatus::InvalidArgument
-        }
-    })
+    guard(|| free_status(GRAPHS.remove(handle)))
 }
 
 #[unsafe(no_mangle)]
@@ -148,9 +138,8 @@ pub unsafe extern "C" fn curvy_witness_graph_calculate(
         &GRAPHS,
         handle,
         |graph| {
-            let input =
-                unsafe { str_in(input_json) }.map_err(|_| "invalid input json".to_string())?;
-            let assignment = graph.calculate_json(input).map_err(|e| e.to_string())?;
+            let input = unsafe { str_in(input_json) }.map_err(|_| invalid("invalid input json"))?;
+            let assignment = graph.calculate_json(input).map_err(failed)?;
             Ok(curvy_prover::publics_to_json(&assignment))
         },
         |json| string_out(json, out),
@@ -172,9 +161,8 @@ pub unsafe extern "C" fn curvy_witness_graph_calculate_packed(
         &GRAPHS,
         handle,
         |graph| {
-            let input =
-                unsafe { str_in(input_json) }.map_err(|_| "invalid input json".to_string())?;
-            let assignment = graph.calculate_json(input).map_err(|e| e.to_string())?;
+            let input = unsafe { str_in(input_json) }.map_err(|_| invalid("invalid input json"))?;
+            let assignment = graph.calculate_json(input).map_err(failed)?;
             Ok(curvy_prover::assignment_to_packed_be(&assignment))
         },
         |packed| bytes_out(packed, out),
@@ -197,10 +185,10 @@ pub unsafe extern "C" fn curvy_prover_new(
         &PROVERS,
         || {
             let bytes =
-                unsafe { bytes_in(zkey, len) }.map_err(|_| "invalid zkey buffer".to_string())?;
+                unsafe { bytes_in(zkey, len) }.map_err(|_| invalid("invalid zkey buffer"))?;
             let expected = unsafe { str_in(expected_sha256) }
-                .map_err(|_| "invalid expected zkey sha256".to_string())?;
-            Prover::from_zkey_bytes(bytes, expected).map_err(|e| e.to_string())
+                .map_err(|_| invalid("invalid expected zkey sha256"))?;
+            Prover::from_zkey_bytes(bytes, expected).map_err(failed)
         },
         out,
     )
@@ -208,14 +196,7 @@ pub unsafe extern "C" fn curvy_prover_new(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_prover_free(handle: u64) -> CurvyStatus {
-    crate::abi::guard(|| {
-        if PROVERS.remove(handle) {
-            CurvyStatus::Ok
-        } else {
-            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
-            CurvyStatus::InvalidArgument
-        }
-    })
+    guard(|| free_status(PROVERS.remove(handle)))
 }
 
 #[unsafe(no_mangle)]
@@ -254,8 +235,8 @@ pub unsafe extern "C" fn curvy_prover_prove(
         handle,
         |prover| {
             let bytes =
-                unsafe { bytes_in(wtns, len) }.map_err(|_| "invalid wtns buffer".to_string())?;
-            let bundle = prover.prove_wtns(bytes).map_err(|e| e.to_string())?;
+                unsafe { bytes_in(wtns, len) }.map_err(|_| invalid("invalid wtns buffer"))?;
+            let bundle = prover.prove_wtns(bytes).map_err(failed)?;
             Ok(bundle_json(&bundle))
         },
         |json| string_out(json, out),
@@ -280,16 +261,16 @@ pub unsafe extern "C" fn curvy_resident_prover_new(
     construct(
         &RESIDENT_PROVERS,
         || {
-            let zkey_bytes = unsafe { bytes_in(zkey, zkey_len) }
-                .map_err(|_| "invalid zkey buffer".to_string())?;
+            let zkey_bytes =
+                unsafe { bytes_in(zkey, zkey_len) }.map_err(|_| invalid("invalid zkey buffer"))?;
             let graph_bytes = unsafe { bytes_in(graph, graph_len) }
-                .map_err(|_| "invalid graph buffer".to_string())?;
+                .map_err(|_| invalid("invalid graph buffer"))?;
             let zkey_hash = unsafe { str_in(expected_zkey_sha256) }
-                .map_err(|_| "invalid expected zkey sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected zkey sha256"))?;
             let graph_hash = unsafe { str_in(expected_graph_sha256) }
-                .map_err(|_| "invalid expected graph sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected graph sha256"))?;
             ResidentProver::from_artifacts(zkey_bytes, zkey_hash, graph_bytes, graph_hash)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         out,
     )
@@ -297,14 +278,7 @@ pub unsafe extern "C" fn curvy_resident_prover_new(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_resident_prover_free(handle: u64) -> CurvyStatus {
-    crate::abi::guard(|| {
-        if RESIDENT_PROVERS.remove(handle) {
-            CurvyStatus::Ok
-        } else {
-            crate::abi::set_last_error("invalid, freed, or wrong-type handle");
-            CurvyStatus::InvalidArgument
-        }
-    })
+    guard(|| free_status(RESIDENT_PROVERS.remove(handle)))
 }
 
 /// Compile an authenticated witness graph to SAGE for resident proving.
@@ -325,17 +299,17 @@ pub unsafe extern "C" fn curvy_resident_prover_new_sage(
     construct(
         &RESIDENT_PROVERS,
         || {
-            let zkey = unsafe { bytes_in(zkey, zkey_len) }
-                .map_err(|_| "invalid zkey buffer".to_string())?;
+            let zkey =
+                unsafe { bytes_in(zkey, zkey_len) }.map_err(|_| invalid("invalid zkey buffer"))?;
             let graph = unsafe { bytes_in(graph, graph_len) }
-                .map_err(|_| "invalid graph buffer".to_string())?;
+                .map_err(|_| invalid("invalid graph buffer"))?;
             let zkey_hash = unsafe { str_in(expected_zkey_sha256) }
-                .map_err(|_| "invalid expected zkey sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected zkey sha256"))?;
             let graph_hash = unsafe { str_in(expected_graph_sha256) }
-                .map_err(|_| "invalid expected graph sha256".to_string())?;
-            let prover = Prover::from_zkey_bytes(zkey, zkey_hash).map_err(|e| e.to_string())?;
-            let sage = SageGraph::from_bytes(graph, graph_hash).map_err(|e| e.to_string())?;
-            ResidentProver::with_sage(prover, sage).map_err(|e| e.to_string())
+                .map_err(|_| invalid("invalid expected graph sha256"))?;
+            let prover = Prover::from_zkey_bytes(zkey, zkey_hash).map_err(failed)?;
+            let sage = SageGraph::from_bytes(graph, graph_hash).map_err(failed)?;
+            ResidentProver::with_sage(prover, sage).map_err(failed)
         },
         out,
     )
@@ -361,17 +335,17 @@ pub unsafe extern "C" fn curvy_resident_prover_new_compiled_sage(
     construct(
         &RESIDENT_PROVERS,
         || {
-            let zkey = unsafe { bytes_in(zkey, zkey_len) }
-                .map_err(|_| "invalid zkey buffer".to_string())?;
+            let zkey =
+                unsafe { bytes_in(zkey, zkey_len) }.map_err(|_| invalid("invalid zkey buffer"))?;
             let program = unsafe { bytes_in(program, program_len) }
-                .map_err(|_| "invalid program buffer".to_string())?;
+                .map_err(|_| invalid("invalid program buffer"))?;
             let zkey_hash = unsafe { str_in(expected_zkey_sha256) }
-                .map_err(|_| "invalid expected zkey sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected zkey sha256"))?;
             let program_hash = unsafe { str_in(expected_program_sha256) }
-                .map_err(|_| "invalid expected program sha256".to_string())?;
+                .map_err(|_| invalid("invalid expected program sha256"))?;
             let graph_hash = unsafe { str_in(expected_graph_sha256) }
-                .map_err(|_| "invalid expected graph sha256".to_string())?;
-            let prover = Prover::from_zkey_bytes(zkey, zkey_hash).map_err(|e| e.to_string())?;
+                .map_err(|_| invalid("invalid expected graph sha256"))?;
+            let prover = Prover::from_zkey_bytes(zkey, zkey_hash).map_err(failed)?;
             ResidentProver::from_compiled_sage(
                 prover,
                 program,
@@ -379,7 +353,7 @@ pub unsafe extern "C" fn curvy_resident_prover_new_compiled_sage(
                 graph_hash,
                 Limits::client(),
             )
-            .map_err(|e| e.to_string())
+            .map_err(failed)
         },
         out,
     )
@@ -475,9 +449,8 @@ pub unsafe extern "C" fn curvy_resident_prover_prove(
         &RESIDENT_PROVERS,
         handle,
         |prover| {
-            let input =
-                unsafe { str_in(input_json) }.map_err(|_| "invalid input json".to_string())?;
-            let bundle = prover.prove_json(input).map_err(|e| e.to_string())?;
+            let input = unsafe { str_in(input_json) }.map_err(|_| invalid("invalid input json"))?;
+            let bundle = prover.prove_json(input).map_err(failed)?;
             Ok(bundle_json(&bundle))
         },
         |json| string_out(json, out),

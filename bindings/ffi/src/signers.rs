@@ -9,7 +9,9 @@ use curvy_core::{
 use zeroize::Zeroizing;
 
 use crate::{
-    abi::{CurvyStatus, bytes_in, guard, set_last_error, str_in, str_vec_out},
+    abi::{
+        CurvyStatus, bytes_in, free_status, guard, null_output, set_last_error, str_in, str_vec_out,
+    },
     registry::Registry,
 };
 
@@ -59,7 +61,7 @@ pub unsafe extern "C" fn curvy_seed_signer_new(
 ) -> CurvyStatus {
     guard(|| {
         if out.is_null() {
-            return invalid("null handle output");
+            return null_output();
         }
         let bytes = match unsafe { key_bytes(seed, len) } {
             Ok(bytes) => bytes,
@@ -84,7 +86,7 @@ pub unsafe extern "C" fn curvy_scalar_signer_new(
 ) -> CurvyStatus {
     guard(|| {
         if out.is_null() {
-            return invalid("null handle output");
+            return null_output();
         }
         let bytes = match unsafe { key_bytes(scalar, len) } {
             Ok(bytes) => bytes,
@@ -103,25 +105,13 @@ pub unsafe extern "C" fn curvy_scalar_signer_new(
 /// Erases and frees an owned seed signer after its active operation completes.
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_seed_signer_free(handle: u64) -> CurvyStatus {
-    guard(|| {
-        if SEED_SIGNERS.remove_with(handle, |key| drop(key.take())) {
-            CurvyStatus::Ok
-        } else {
-            invalid("unknown seed signer handle")
-        }
-    })
+    guard(|| free_status(SEED_SIGNERS.remove_with(handle, |key| drop(key.take()))))
 }
 
 /// Erases and frees an owned scalar signer after its active operation completes.
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_scalar_signer_free(handle: u64) -> CurvyStatus {
-    guard(|| {
-        if SCALAR_SIGNERS.remove_with(handle, |key| drop(key.take())) {
-            CurvyStatus::Ok
-        } else {
-            invalid("unknown scalar signer handle")
-        }
-    })
+    guard(|| free_status(SCALAR_SIGNERS.remove_with(handle, |key| drop(key.take()))))
 }
 
 /// Returns `[x, y]` as a JSON array of decimal strings.

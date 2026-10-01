@@ -45,34 +45,133 @@ fn handles_are_not_reused_after_free() {
     curvy_merkle_free(second);
 }
 
+/// Calls `curvy_verify_merkle_proof` with packed fields and returns `out`.
+fn verify_merkle(
+    depth: u32,
+    leaf: &curvy_core::Fr,
+    index: u32,
+    siblings: &[curvy_core::Fr],
+    root: &curvy_core::Fr,
+) -> i32 {
+    use curvy_core::field::fr_to_be_32;
+    let leaf = fr_to_be_32(leaf);
+    let root = fr_to_be_32(root);
+    let siblings: Vec<u8> = siblings.iter().flat_map(fr_to_be_32).collect();
+    let mut valid = -1;
+    let status = unsafe {
+        curvy_ffi::curvy_verify_merkle_proof(
+            depth,
+            leaf.as_ptr(),
+            leaf.len(),
+            index,
+            siblings.as_ptr(),
+            siblings.len(),
+            root.as_ptr(),
+            root.len(),
+            &mut valid,
+        )
+    };
+    assert_eq!(status, CurvyStatus::Ok, "{}", last_error());
+    valid
+}
+
 #[test]
 fn merkle_verification_rejects_indices_above_the_proof_capacity() {
-    use curvy_core::{Fr, field::fr_to_be_32, imt::Imt};
-    use curvy_ffi::curvy_verify_merkle_proof;
+    use curvy_core::{Fr, imt::Imt};
 
     for depth in [0, 2] {
         let proof = Imt::from_leaves(depth, &[Fr::from(7u64)]).create_proof(0);
-        let leaf = fr_to_be_32(&proof.leaf);
-        let root = fr_to_be_32(&proof.root);
-        let siblings: Vec<u8> = proof.siblings.iter().flat_map(fr_to_be_32).collect();
         for (index, expected) in [(0, 1), (1 << depth, 0)] {
-            let mut valid = -1;
-            let status = unsafe {
-                curvy_verify_merkle_proof(
-                    leaf.as_ptr(),
-                    leaf.len(),
+            assert_eq!(
+                verify_merkle(
+                    depth as u32,
+                    &proof.leaf,
                     index,
-                    siblings.as_ptr(),
-                    siblings.len(),
-                    root.as_ptr(),
-                    root.len(),
-                    &mut valid,
-                )
-            };
-            assert_eq!(status, CurvyStatus::Ok);
-            assert_eq!(valid, expected);
+                    &proof.siblings,
+                    &proof.root
+                ),
+                expected
+            );
         }
     }
+}
+
+/// The caller's expected depth, not the proof's sibling count, fixes the tree
+/// height: an internal node or the root itself must not pass as a leaf.
+#[test]
+fn merkle_verification_pins_the_expected_depth() {
+    use curvy_core::{Fr, imt::Imt, poseidon};
+
+    let depth = 6;
+    let leaves: Vec<Fr> = (1u64..=11).map(Fr::from).collect();
+    let tree = Imt::from_leaves(depth, &leaves);
+    let root = tree.root();
+    let full = tree.create_proof(2);
+    assert_eq!(verify_merkle(6, &full.leaf, 2, &full.siblings, &root), 1);
+    for wrong_depth in [0, 5, 7, u32::MAX] {
+        assert_eq!(
+            verify_merkle(wrong_depth, &full.leaf, 2, &full.siblings, &root),
+            0
+        );
+    }
+
+    // The level-1 node over leaves 2 and 3, proven with the top siblings.
+    let internal = poseidon(&[leaves[2], leaves[3]]);
+    assert_eq!(
+        verify_merkle(6, &internal, 1, &full.siblings[1..], &root),
+        0
+    );
+    // A zero-sibling proof that the root is its own leaf.
+    assert_eq!(verify_merkle(6, &root, 0, &[], &root), 0);
+    // ...which is exactly a genuine depth-0 tree.
+    assert_eq!(verify_merkle(0, &root, 0, &[], &root), 1);
+}
+
+#[test]
+fn merkle_verification_rejects_malformed_encodings_as_invalid_arguments() {
+    use curvy_ffi::curvy_verify_merkle_proof;
+
+    let field = field_bytes(7);
+    let noncanonical = [0xff_u8; 32];
+    let mut valid = -1;
+    for (leaf, leaf_len, siblings_len) in [
+        (std::ptr::null(), 32, 0),
+        (field.as_ptr(), 31, 0),
+        (field.as_ptr(), 32, 31),
+        (noncanonical.as_ptr(), 32, 0),
+    ] {
+        let status = unsafe {
+            curvy_verify_merkle_proof(
+                0,
+                leaf,
+                leaf_len,
+                0,
+                field.as_ptr(),
+                siblings_len,
+                field.as_ptr(),
+                field.len(),
+                &mut valid,
+            )
+        };
+        assert_eq!(status, CurvyStatus::InvalidArgument);
+        assert!(!last_error().is_empty());
+    }
+    assert_eq!(valid, -1);
+    let status = unsafe {
+        curvy_verify_merkle_proof(
+            0,
+            field.as_ptr(),
+            field.len(),
+            0,
+            std::ptr::null(),
+            0,
+            field.as_ptr(),
+            field.len(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, CurvyStatus::InvalidArgument);
+    assert_eq!(last_error(), "null output pointer");
 }
 
 #[test]
@@ -566,6 +665,269 @@ fn malformed_secret_boundaries_do_not_panic_or_log_inputs() {
     assert!(!last_error().contains("PRIVATE_SENTINEL"));
 }
 
+/// Malformed pointers, UTF-8, and decimal inputs share one status, whether the
+/// entry point parses them directly or through a fallible core constructor.
+#[test]
+fn malformed_inputs_are_invalid_arguments_with_a_message() {
+    use curvy_ffi::{
+        curvy_get_meta, curvy_pub_from_scalar, curvy_scan, curvy_sign_with_scalar,
+        curvy_verify_scalar_signature,
+    };
+    let abc = CString::new("abc").unwrap();
+    let one = CString::new("1").unwrap();
+    let not_utf8 = [0xff_u8, 0];
+    let mut out: *mut c_char = std::ptr::null_mut();
+    for scalar in [std::ptr::null(), abc.as_ptr(), not_utf8.as_ptr().cast()] {
+        assert_eq!(
+            unsafe { curvy_pub_from_scalar(scalar, &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+        assert!(!last_error().is_empty());
+        assert_eq!(
+            unsafe { curvy_sign_with_scalar(one.as_ptr(), scalar, &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { curvy_sign_with_scalar(scalar, one.as_ptr(), &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+        let mut valid = -1;
+        assert_eq!(
+            unsafe {
+                curvy_verify_scalar_signature(
+                    scalar,
+                    one.as_ptr(),
+                    one.as_ptr(),
+                    one.as_ptr(),
+                    one.as_ptr(),
+                    one.as_ptr(),
+                    &mut valid,
+                )
+            },
+            CurvyStatus::InvalidArgument
+        );
+        assert_eq!(valid, -1);
+        assert_eq!(
+            unsafe { curvy_get_meta(scalar, scalar, &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+    }
+    let empty = CString::new("[]").unwrap();
+    assert_eq!(
+        unsafe {
+            curvy_scan(
+                abc.as_ptr(),
+                abc.as_ptr(),
+                empty.as_ptr(),
+                empty.as_ptr(),
+                &mut out,
+            )
+        },
+        CurvyStatus::InvalidArgument
+    );
+    assert!(out.is_null());
+
+    let mut handle = 0;
+    assert_eq!(
+        unsafe { curvy_witness_graph_new(std::ptr::null(), 64, abc.as_ptr(), false, &mut handle) },
+        CurvyStatus::InvalidArgument
+    );
+    assert_eq!(last_error(), "invalid graph buffer");
+    assert_eq!(handle, 0);
+}
+
+/// Every fallible call replaces the previous message, including early
+/// out-pointer rejections that never reach the call body.
+#[test]
+fn rejected_out_pointers_replace_the_previous_error() {
+    use curvy_ffi::{curvy_merkle_insert, curvy_merkle_proof_at};
+
+    let stale = || {
+        let key = CString::new("0xab").unwrap();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { curvy_pub_from_private_key(key.as_ptr(), &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+        assert!(last_error().contains("remove the leading 0x"));
+    };
+
+    stale();
+    assert_eq!(
+        curvy_merkle_new(8, std::ptr::null_mut()),
+        CurvyStatus::InvalidArgument
+    );
+    assert_eq!(last_error(), "null output pointer");
+
+    let mut tree = 0;
+    assert_eq!(curvy_merkle_new(8, &mut tree), CurvyStatus::Ok);
+    let leaf = field_bytes(1);
+    stale();
+    assert_eq!(
+        unsafe { curvy_merkle_insert(tree, leaf.as_ptr(), leaf.len(), std::ptr::null_mut()) },
+        CurvyStatus::InvalidArgument
+    );
+    assert_eq!(last_error(), "null output pointer");
+    stale();
+    assert_eq!(
+        curvy_merkle_proof_at(tree, 0, std::ptr::null_mut()),
+        CurvyStatus::InvalidArgument
+    );
+    assert_eq!(last_error(), "null output pointer");
+    stale();
+    assert_eq!(curvy_merkle_free(tree), CurvyStatus::Ok);
+    assert!(curvy_last_error().is_null());
+}
+
+/// The point at infinity ("0.0") is never a key or announcement: scans skip it,
+/// sends reject it, and the validator refuses it, all without panicking.
+#[test]
+fn identity_points_are_rejected_or_skipped_without_panicking() {
+    use curvy_ffi::{
+        curvy_get_meta, curvy_is_valid_bn254_point, curvy_is_valid_secp256k1_point, curvy_scan,
+        curvy_send, curvy_viewer_scan,
+    };
+
+    let identity = CString::new("0.0").unwrap();
+    assert_eq!(unsafe { curvy_is_valid_bn254_point(identity.as_ptr()) }, 0);
+    assert_eq!(
+        unsafe { curvy_is_valid_secp256k1_point(identity.as_ptr()) },
+        0
+    );
+
+    let k =
+        CString::new("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+    let v =
+        CString::new("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210").unwrap();
+    let mut out: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { curvy_get_meta(k.as_ptr(), v.as_ptr(), &mut out) },
+        CurvyStatus::Ok
+    );
+    let meta: Vec<String> =
+        serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+    unsafe { curvy_string_free(out) };
+    let (big_k, big_v) = (
+        CString::new(meta[2].as_str()).unwrap(),
+        CString::new(meta[3].as_str()).unwrap(),
+    );
+
+    let rs = CString::new(r#"["0.0"]"#).unwrap();
+    let tags = CString::new(r#"["00"]"#).unwrap();
+    for status in unsafe {
+        [
+            curvy_scan(k.as_ptr(), v.as_ptr(), rs.as_ptr(), tags.as_ptr(), &mut out),
+            curvy_viewer_scan(
+                v.as_ptr(),
+                big_k.as_ptr(),
+                rs.as_ptr(),
+                tags.as_ptr(),
+                &mut out,
+            ),
+        ]
+    } {
+        assert_eq!(status, CurvyStatus::Ok);
+    }
+    // Both calls wrote `[]`; the second overwrote the first pointer.
+    assert_eq!(unsafe { CStr::from_ptr(out) }.to_str().unwrap(), "[]");
+    unsafe { curvy_string_free(out) };
+
+    out = std::ptr::null_mut();
+    for (spend, view) in [
+        (identity.as_ptr(), big_v.as_ptr()),
+        (big_k.as_ptr(), identity.as_ptr()),
+    ] {
+        assert_eq!(
+            unsafe { curvy_send(spend, view, &mut out) },
+            CurvyStatus::InvalidArgument
+        );
+        assert!(last_error().contains("point at infinity"));
+        assert!(out.is_null());
+    }
+    assert_eq!(
+        unsafe {
+            curvy_viewer_scan(
+                v.as_ptr(),
+                identity.as_ptr(),
+                rs.as_ptr(),
+                tags.as_ptr(),
+                &mut out,
+            )
+        },
+        CurvyStatus::InvalidArgument
+    );
+    assert!(out.is_null());
+}
+
+/// Hosts free handles from thread-local destructors (C++ `thread_local` RAII,
+/// Swift teardown) that can run after the library's own thread-locals are gone.
+/// That must not abort the process.
+#[test]
+fn frees_from_thread_local_destructors_do_not_abort() {
+    const TEST: &str = "frees_from_thread_local_destructors_do_not_abort";
+    if std::env::var_os("CURVY_TLS_TEARDOWN_CHILD").is_none() {
+        // An abort takes the whole test binary down, so run in a child process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("CURVY_TLS_TEARDOWN_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static FREED: AtomicI32 = AtomicI32::new(-1);
+    static FREED_AGAIN: AtomicI32 = AtomicI32::new(-1);
+    static FAILED_CALL: AtomicI32 = AtomicI32::new(-1);
+
+    struct FreeOnThreadExit(Cell<u64>);
+    impl Drop for FreeOnThreadExit {
+        fn drop(&mut self) {
+            let handle = self.0.get();
+            FREED.store(curvy_merkle_free(handle) as i32, Ordering::SeqCst);
+            FREED_AGAIN.store(curvy_merkle_free(handle) as i32, Ordering::SeqCst);
+            FAILED_CALL.store(
+                curvy_merkle_new(8, std::ptr::null_mut()) as i32,
+                Ordering::SeqCst,
+            );
+            let _ = curvy_last_error();
+        }
+    }
+    thread_local! {
+        static OWNER: FreeOnThreadExit = const { FreeOnThreadExit(Cell::new(0)) };
+    }
+
+    std::thread::spawn(|| {
+        // Register this destructor before the library first touches its error
+        // slot on this thread, so the slot is destroyed first.
+        OWNER.with(|_| ());
+        let mut handle = 0;
+        assert_eq!(curvy_merkle_new(8, &mut handle), CurvyStatus::Ok);
+        OWNER.with(|owner| owner.0.set(handle));
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(FREED.load(Ordering::SeqCst), CurvyStatus::Ok as i32);
+    assert_eq!(
+        FREED_AGAIN.load(Ordering::SeqCst),
+        CurvyStatus::InvalidHandle as i32
+    );
+    assert_eq!(
+        FAILED_CALL.load(Ordering::SeqCst),
+        CurvyStatus::InvalidArgument as i32
+    );
+}
+
 #[test]
 fn wrong_type_free_cannot_destroy_another_registry_object() {
     let mut tree = 0;
@@ -580,11 +942,12 @@ fn wrong_type_free_cannot_destroy_another_registry_object() {
         CurvyStatus::Ok
     );
     assert_ne!(tree, graph);
-    assert_eq!(curvy_witness_graph_free(tree), CurvyStatus::InvalidArgument);
-    assert_eq!(curvy_merkle_free(graph), CurvyStatus::InvalidArgument);
+    assert_eq!(curvy_witness_graph_free(tree), CurvyStatus::InvalidHandle);
+    assert_eq!(curvy_merkle_free(graph), CurvyStatus::InvalidHandle);
     assert_eq!(curvy_merkle_free(tree), CurvyStatus::Ok);
     assert_eq!(curvy_witness_graph_free(graph), CurvyStatus::Ok);
-    assert_eq!(curvy_merkle_free(tree), CurvyStatus::InvalidArgument);
+    assert_eq!(curvy_merkle_free(tree), CurvyStatus::InvalidHandle);
+    assert!(last_error().contains("unknown, freed, or wrong-type handle"));
 }
 
 #[test]

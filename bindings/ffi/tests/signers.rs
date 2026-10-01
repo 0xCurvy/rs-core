@@ -75,21 +75,21 @@ fn signer_handles_match_string_apis_and_own_their_imports() {
     assert_eq!(unsafe { strings(actual) }, unsafe { strings(expected) });
     assert_eq!(
         curvy_seed_signer_free(scalar_handle),
-        CurvyStatus::InvalidArgument
+        CurvyStatus::InvalidHandle
     );
     assert_eq!(
         curvy_scalar_signer_free(seed_handle),
-        CurvyStatus::InvalidArgument
+        CurvyStatus::InvalidHandle
     );
     assert_eq!(curvy_seed_signer_free(seed_handle), CurvyStatus::Ok);
     assert_eq!(curvy_scalar_signer_free(scalar_handle), CurvyStatus::Ok);
     assert_eq!(
         curvy_seed_signer_free(seed_handle),
-        CurvyStatus::InvalidArgument
+        CurvyStatus::InvalidHandle
     );
     assert_eq!(
         curvy_scalar_signer_free(scalar_handle),
-        CurvyStatus::InvalidArgument
+        CurvyStatus::InvalidHandle
     );
     assert_eq!(
         unsafe { curvy_seed_signer_sign(seed_handle, message.as_ptr(), &mut actual) },

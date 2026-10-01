@@ -20,11 +20,11 @@ typedef enum CurvyStatus {
    */
   CurvyStatus_Error = 1,
   /**
-   * A null pointer or non-UTF-8 string arrived from the caller.
+   * A null pointer, non-UTF-8 string, or malformed value arrived from the caller.
    */
   CurvyStatus_InvalidArgument = 2,
   /**
-   * A handle was unknown or already freed.
+   * A handle was unknown, already freed, or of another object type.
    */
   CurvyStatus_InvalidHandle = 3,
   /**
@@ -486,10 +486,17 @@ uint32_t curvy_notes_shard_height(void);
 uint32_t curvy_notes_shard_size(void);
 
 /**
+ * Verifies a packed inclusion proof against a tree of the expected `depth`.
+ *
+ * Writes `1` only when `siblings` holds exactly `depth` packed fields and the
+ * path from `leaf` at `index` reaches `root`. A proof for another depth,
+ * including a truncated proof whose `leaf` is an internal node, writes `0`.
+ *
  * # Safety
  * All buffer pointers must describe readable regions of the given lengths.
  */
-enum CurvyStatus curvy_verify_merkle_proof(const uint8_t *leaf,
+enum CurvyStatus curvy_verify_merkle_proof(uint32_t depth,
+                                           const uint8_t *leaf,
                                            uintptr_t leaf_len,
                                            uint32_t index,
                                            const uint8_t *siblings,
