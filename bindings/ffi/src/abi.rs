@@ -46,7 +46,17 @@ impl CurvyBytes {
     }
 
     /// Converts a vector to an exact-layout allocation for [`curvy_bytes_free`].
-    pub fn from_vec(vec: Vec<u8>) -> Self {
+    ///
+    /// Outputs can carry private tree data. Boxing a vector with spare capacity
+    /// shrinks it in place or reallocates, which may free an unwiped copy, so
+    /// such vectors are copied into an exact-size buffer and wiped instead.
+    pub fn from_vec(mut vec: Vec<u8>) -> Self {
+        if vec.len() != vec.capacity() {
+            let exact = vec.as_slice().to_vec();
+            vec.zeroize();
+            vec = exact;
+        }
+        debug_assert_eq!(vec.len(), vec.capacity());
         let boxed = vec.into_boxed_slice();
         let len = boxed.len();
         let ptr = Box::into_raw(boxed).cast::<u8>();
@@ -405,5 +415,20 @@ mod tests {
             CurvyStatus::InvalidArgument
         );
         assert_eq!(string_out("a\0b".into(), &mut out), CurvyStatus::Error);
+    }
+
+    #[test]
+    fn byte_outputs_keep_contents_with_or_without_spare_capacity() {
+        for capacity in [0, 3, 64] {
+            let mut value = Vec::with_capacity(capacity);
+            value.extend_from_slice(&[7, 8, 9]);
+            let mut out = CurvyBytes::empty();
+            assert_eq!(bytes_out(value, &mut out), CurvyStatus::Ok);
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(out.ptr, out.len) },
+                [7, 8, 9]
+            );
+            unsafe { curvy_bytes_free(out) };
+        }
     }
 }
