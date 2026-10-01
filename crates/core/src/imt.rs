@@ -873,6 +873,11 @@ impl IndexedMerkleTree {
 }
 
 /// Verify an inclusion proof (bottom→top, `index` bit selects sibling side).
+///
+/// This does NOT pin the tree depth: the proof's own sibling count is trusted,
+/// so a truncated proof whose `leaf` is really an internal node, or a
+/// zero-sibling proof with `leaf == root`, verifies. Untrusted proofs against a
+/// known tree must use [`verify_proof_at_depth`].
 pub fn verify_proof(proof: &InclusionProof) -> bool {
     let mut node = proof.leaf;
     let mut idx = proof.index;
@@ -885,6 +890,14 @@ pub fn verify_proof(proof: &InclusionProof) -> bool {
         idx >>= 1;
     }
     idx == 0 && node == proof.root
+}
+
+/// Verify an inclusion proof for a depth-`depth` tree: the proof must carry
+/// exactly `depth` siblings (one per level), `depth` must be a constructible
+/// tree depth, and the proof must then pass [`verify_proof`]. Pinning the depth
+/// rejects internal-node and zero-sibling `leaf == root` proofs.
+pub fn verify_proof_at_depth(proof: &InclusionProof, depth: usize) -> bool {
+    tree_capacity(depth).is_ok() && proof.siblings.len() == depth && verify_proof(proof)
 }
 
 // ── stateful sharded tree (bounded live shard + mutable cap) ────────────────
@@ -1543,7 +1556,8 @@ impl ShardedNotesTree {
 
     /// Rewind within the mutable live shard. Crossing a completed-shard boundary
     /// requires restoring an earlier checkpoint because completed leaves have
-    /// deliberately been discarded.
+    /// deliberately been discarded. Returns the unmarked owned note ids in
+    /// ascending leaf-index order.
     pub fn rewind_live_to(&mut self, leaf_count: usize) -> Result<Vec<Fr>, TreeError> {
         let completed_leaf_count = self.completed_roots.len() * self.shard_size;
         if leaf_count < completed_leaf_count {
@@ -1560,11 +1574,12 @@ impl ShardedNotesTree {
             });
         }
 
+        // `owned_leaves` mirrors `owned_notes` keyed by leaf index, so this
+        // returns the removed ids in deterministic leaf order.
         let removed: Vec<Fr> = self
-            .owned_notes
-            .values()
-            .filter(|owned| owned.leaf_index >= leaf_count)
-            .map(|owned| owned.note_id)
+            .owned_leaves
+            .range(leaf_count..)
+            .map(|(_, note_id)| *note_id)
             .collect();
         for note_id in &removed {
             self.unmark_owned(*note_id);
@@ -2268,6 +2283,77 @@ mod tests {
                 "index above the proof's capacity must be rejected (leaf {i})"
             );
         }
+    }
+
+    // Depth binding: `verify_proof` trusts the sibling count, so an internal
+    // node (or the root itself) can masquerade as a leaf; the depth-pinned
+    // verifier must reject both.
+    #[test]
+    fn verify_proof_at_depth_rejects_truncated_and_root_proofs() {
+        let leaves: Vec<Fr> = (1u64..=11).map(Fr::from).collect();
+        let depth = 6;
+        let tree = Imt::from_leaves(depth, &leaves);
+        let root = tree.root();
+
+        for i in 0..leaves.len() {
+            let good = tree.create_proof(i);
+            assert!(verify_proof_at_depth(&good, depth), "leaf {i}");
+            assert!(!verify_proof_at_depth(&good, depth - 1), "leaf {i}");
+            assert!(!verify_proof_at_depth(&good, depth + 1), "leaf {i}");
+        }
+
+        // Truncated proof: the level-1 node over leaves 2 and 3, proven with the
+        // top `depth - 1` siblings of leaf 2's proof.
+        let full = tree.create_proof(2);
+        let truncated = InclusionProof {
+            leaf: poseidon(&[leaves[2], leaves[3]]),
+            index: 1,
+            siblings: full.siblings[1..].to_vec(),
+            root,
+        };
+        assert!(
+            verify_proof(&truncated),
+            "the depth-agnostic verifier accepts it"
+        );
+        assert!(!verify_proof_at_depth(&truncated, depth));
+
+        // Zero-sibling proof that the root is its own leaf.
+        let root_as_leaf = InclusionProof {
+            leaf: root,
+            index: 0,
+            siblings: Vec::new(),
+            root,
+        };
+        assert!(
+            verify_proof(&root_as_leaf),
+            "the depth-agnostic verifier accepts it"
+        );
+        assert!(!verify_proof_at_depth(&root_as_leaf, depth));
+        // ...but a genuine depth-0 tree is exactly that shape.
+        assert!(verify_proof_at_depth(&root_as_leaf, 0));
+
+        // Unconstructible depths are rejected outright.
+        assert!(!verify_proof_at_depth(&root_as_leaf, usize::BITS as usize));
+        assert!(!verify_proof_at_depth(&root_as_leaf, usize::MAX));
+    }
+
+    #[test]
+    fn rewind_returns_removed_owned_notes_in_leaf_order() {
+        let mut tree = ShardedNotesTree::new(8, 4).unwrap();
+        let ids: Vec<Fr> = (1u64..=12).map(|n| Fr::from(n * 1_000 + 7)).collect();
+        tree.append_many(&ids).unwrap();
+        // Mark out of leaf order: the result must be sorted by leaf index,
+        // not by marking order or hash-map iteration order.
+        for index in [11, 3, 7, 5, 9, 4, 10, 6, 8] {
+            tree.mark_owned(ids[index], index).unwrap();
+        }
+        let mut again = tree.clone();
+
+        let removed = tree.rewind_live_to(4).unwrap();
+        assert_eq!(removed, ids[4..].to_vec());
+        assert_eq!(again.rewind_live_to(4).unwrap(), removed);
+        assert_eq!(tree.owned_note_count(), 1);
+        assert_eq!(tree.leaf_count(), 4);
     }
 
     #[test]

@@ -109,8 +109,14 @@ Note encryption is an additive field one-time pad, so recipients must recompute
 and validate `noteId` for integrity. Reusing a shared secret and ephemeral key
 reuses the pad and reveals amount differences. Use a fresh ephemeral key for
 every payment. Stealth point coordinates require canonical unsigned
-field decimals. Legacy witness builders reject a stored public key that does
-not match the seed.
+field decimals with no leading zeroes, and the point at infinity (`"0.0"`) is
+rejected as a key and skipped as a scan announcement. `send_with_r` requires
+`r` as a canonical decimal in `[1, p)` of the BN254 scalar field. Legacy
+witness builders reject a stored public key that does not match the seed.
+
+`imt::verify_proof` trusts the proof's sibling count; verify untrusted proofs
+against a known tree with `imt::verify_proof_at_depth`, which also rejects
+truncated internal-node and zero-sibling proofs.
 
 `ephemeral_pub_key` accepts values from zero through `2^256 - 1`, including
 values above the subgroup order. Larger values panic in Rust and return errors

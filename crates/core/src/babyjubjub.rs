@@ -181,8 +181,17 @@ impl BabyJubSecretScalar {
 
     pub fn try_from_le_bytes(mut bytes: [u8; 32]) -> Result<Self, BabyJubError> {
         if !crate::secret_arithmetic::valid_secret(&bytes) {
+            // Rejected input only: classify zero vs out-of-range like
+            // `try_from_dec`, with a branch-free fold over the bytes.
+            let zero = bytes.iter().fold(0u8, |acc, byte| acc | byte) == 0;
+            #[cfg(feature = "leakage")]
+            let zero = crate::leakage::public_flag(zero);
             bytes.zeroize();
-            return Err(BabyJubError::ScalarOutOfRange);
+            return Err(if zero {
+                BabyJubError::ZeroSecretScalar
+            } else {
+                BabyJubError::ScalarOutOfRange
+            });
         }
         Ok(Self(bytes))
     }
@@ -361,6 +370,31 @@ mod tests {
         );
         assert_eq!(
             BabyJubSecretScalar::try_from_dec("1").unwrap().to_dec(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn secret_scalar_byte_import_classifies_zero_like_decimal_import() {
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes([0; 32]).err(),
+            Some(BabyJubError::ZeroSecretScalar)
+        );
+        let order = BabyJubScalar(SUB_ORDER.clone()).to_le_32();
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes(order).err(),
+            Some(BabyJubError::ScalarOutOfRange)
+        );
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes([0xff; 32]).err(),
+            Some(BabyJubError::ScalarOutOfRange)
+        );
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes(one)
+                .unwrap()
+                .to_dec(),
             "1"
         );
     }

@@ -3,7 +3,7 @@
 //! the oracle for both.
 
 use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
-use curvy_core::imt::{Imt, sharded_root, sharded_witness, verify_proof};
+use curvy_core::imt::{Imt, sharded_root, sharded_witness, verify_proof, verify_proof_at_depth};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -86,6 +86,12 @@ fn imt_matches_zk_kit() {
                 v.depth,
                 p.index
             );
+            assert!(
+                verify_proof_at_depth(&proof, v.depth),
+                "proof verifies at its pinned depth (depth {}, leaf {})",
+                v.depth,
+                p.index
+            );
         }
     }
 }
@@ -116,6 +122,11 @@ fn sharded_matches_flat_imt() {
             assert!(
                 verify_proof(&proof),
                 "sharded witness verifies (leaf {})",
+                w.leaf_index
+            );
+            assert!(
+                verify_proof_at_depth(&proof, v.depth),
+                "sharded witness verifies at its pinned depth (leaf {})",
                 w.leaf_index
             );
         }
