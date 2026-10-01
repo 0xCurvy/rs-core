@@ -74,11 +74,7 @@ impl<'de> Visitor<'de> for InputObject<'_> {
                 .enumerate()
                 .find(|(_, m)| m.hash == hash)
             else {
-                *self.failure = Some(WitnessError::UnknownInput(if name.len() <= 128 {
-                    name
-                } else {
-                    "<oversized signal name>".into()
-                }));
+                *self.failure = Some(WitnessError::UnknownInput(bounded_name(name)));
                 return Err(de::Error::custom("unknown input signal"));
             };
             if self.matched[index] {
@@ -95,8 +91,10 @@ impl<'de> Visitor<'de> for InputObject<'_> {
                 count: &mut count,
             })?;
             if count != mapping.signal_size {
+                // The graph stores only name hashes, so this is the caller's key:
+                // an FNV-1a collision can match an arbitrarily long one.
                 *self.failure = Some(WitnessError::InputLength {
-                    name,
+                    name: bounded_name(name),
                     expected: mapping.signal_size,
                     actual: count,
                 });
@@ -106,6 +104,16 @@ impl<'de> Visitor<'de> for InputObject<'_> {
         Ok(())
     }
 }
+/// Echo a signal name into an error only while it is plausibly a name.
+fn bounded_name(name: String) -> String {
+    if name.len() <= MAX_ECHOED_NAME_BYTES {
+        name
+    } else {
+        "<oversized signal name>".into()
+    }
+}
+const MAX_ECHOED_NAME_BYTES: usize = 128;
+
 struct Fields<'a> {
     output: &'a mut [Fr],
     count: &'a mut usize,
@@ -142,9 +150,16 @@ impl<'de> Visitor<'de> for Fields<'_> {
         let field = Fr::from(value.unsigned_abs());
         self.push(if value < 0 { -field } else { field })
     }
-    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<(), E> {
+        // serde_json has no negative-zero integer, so the literal `-0` arrives
+        // here as -0.0. Zero is exact in any representation; every other float
+        // is a fraction, an exponent, or an integer that lost precision.
+        if value == 0.0 {
+            return self.push(Fr::from(0u64));
+        }
         Err(E::custom(
-            "use decimal strings for integers outside the JSON integer range",
+            "JSON numbers must be integers in the 64-bit range without a fraction \
+             or exponent; use decimal strings for larger integers",
         ))
     }
     fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> {
@@ -212,6 +227,65 @@ mod tests {
             build_input_buffer(&mapping, 2, r#"{"a":[[-3]]}"#, &limits).unwrap(),
             vec![Fr::from(1u64), -Fr::from(3u64)]
         );
+    }
+
+    #[test]
+    fn json_integer_literals_cover_the_64_bit_range_including_negative_zero() {
+        let mapping = [InputMapping {
+            hash: fnv1a("a"),
+            signal_id: 1,
+            signal_size: 1,
+        }];
+        let limits = Limits::client();
+        let decode = |json: &str| build_input_buffer(&mapping, 2, json, &limits).map(|v| v[1]);
+        for zero in [r#"{"a":-0}"#, r#"{"a":[-0]}"#, r#"{"a":0}"#] {
+            assert_eq!(decode(zero).unwrap(), Fr::from(0u64), "{zero}");
+        }
+        assert_eq!(
+            decode(r#"{"a":18446744073709551615}"#).unwrap(),
+            Fr::from(u64::MAX)
+        );
+        assert_eq!(
+            decode(r#"{"a":-9223372036854775808}"#).unwrap(),
+            -Fr::from(1u64 << 63)
+        );
+        for rejected in [
+            r#"{"a":1.5}"#,
+            r#"{"a":1e2}"#,
+            r#"{"a":18446744073709551616}"#,
+            r#"{"a":-9223372036854775809}"#,
+        ] {
+            let error = decode(rejected).unwrap_err().to_string();
+            assert!(error.contains("without a fraction or exponent"), "{error}");
+        }
+    }
+
+    #[test]
+    fn length_errors_redact_oversized_keys_matched_by_hash() {
+        // A long key only reaches a mapping through an FNV-1a collision; model
+        // that by pinning the mapping to the long key's own hash.
+        let long = format!("PRIVATE_SENTINEL{}", "x".repeat(128));
+        let mapping = [InputMapping {
+            hash: fnv1a(&long),
+            signal_id: 1,
+            signal_size: 2,
+        }];
+        let json = format!(r#"{{"{long}":1}}"#);
+        let error = build_input_buffer(&mapping, 3, &json, &Limits::client()).unwrap_err();
+        assert!(
+            matches!(&error, WitnessError::InputLength { name, expected: 2, actual: 1 }
+                if name == "<oversized signal name>"),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
+        let short = [InputMapping {
+            hash: fnv1a("a"),
+            ..mapping[0]
+        }];
+        assert!(matches!(
+            build_input_buffer(&short, 3, r#"{"a":1}"#, &Limits::client()),
+            Err(WitnessError::InputLength { name, .. }) if name == "a"
+        ));
     }
 
     #[test]

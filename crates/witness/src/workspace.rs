@@ -45,6 +45,9 @@ impl Drop for Lease<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // This only shows the lease empties the buffers, which `Vec::clear` would
+    // satisfy too. That the retained bytes are zeroed is checked by
+    // `tests/workspace_zeroize.rs`, which can read spare capacity.
     #[test]
     fn lease_clears_on_unwind_and_enforces_retention_limit() {
         let mut workspace = WitnessWorkspace::new(1024);
