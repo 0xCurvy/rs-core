@@ -27,6 +27,8 @@ for tool in circom cargo shasum; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
+# The fresh generator target needs a few hundred MB; set TMPDIR to put it
+# elsewhere.
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signet-smoke.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -45,13 +47,20 @@ CIRCOM
 
 echo "==> building the generator (compiles the circuit through its build script)"
 # The generator writes graph.bin into its working directory, so run it in the
-# scratch dir rather than in the crate.
+# scratch dir rather than in the crate. As in build-graph.sh, use a fresh
+# target dir so the builder's build script always recompiles this circuit (a
+# warm target can silently reuse a previously compiled one), and a writable,
+# checksum-verified vendor copy so the build script never writes generated
+# C++ into the Cargo registry.
+VENDOR_CONFIG="$WORK_DIR/vendor-config.toml"
+cargo vendor --locked --manifest-path "$GENERATOR_MANIFEST" \
+  "$WORK_DIR/vendor" > "$VENDOR_CONFIG" 2>/dev/null
 (
   cd "$WORK_DIR"
   WITNESS_CPP="$WORK_DIR/multiplier.circom" \
-    cargo build --quiet --release --manifest-path "$GENERATOR_MANIFEST"
-  WITNESS_CPP="$WORK_DIR/multiplier.circom" \
-    cargo run --quiet --release --manifest-path "$GENERATOR_MANIFEST" >/dev/null
+    CARGO_TARGET_DIR="$WORK_DIR/generator-target" \
+    cargo run --quiet --release --offline --config "$VENDOR_CONFIG" \
+      --manifest-path "$GENERATOR_MANIFEST" >/dev/null
 )
 
 test -s "$WORK_DIR/graph.bin" || { echo "generator produced no graph.bin" >&2; exit 1; }
