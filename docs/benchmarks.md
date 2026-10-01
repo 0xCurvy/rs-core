@@ -637,9 +637,93 @@ node tools/leakage/wasm.mjs "$OUT/wasm" 30000 chromium firefox --seconds-per-cas
 Linux x86-64 and arm64; no result from it is recorded here.
 
 
-## 9. MSM bucket accumulation (Oct 2026)
+## 9. MSM bucket accumulation (1 Oct 2026)
 
-TODO(coordinator): batch-affine accumulation results.
+Batch-affine accumulation (`AffineBuckets` in `crates/prover/src/msm.rs`):
+affine buckets, additions batched so every bucket in a batch is distinct, one
+shared inversion per batch (Montgomery's trick). Doubling, `P + (-P)` and
+identity bases are classified before the inversion; points whose bucket is
+already scheduled are deferred, and repeatedly hit buckets fall back to XYZZ
+overflow buckets so adversarial digit patterns cost about the old XYZZ price.
+Resident BN254 G1/G2 MSMs use it from 4,096 points (`BATCH_AFFINE_MIN_POINTS`);
+SPARROW keeps affine buckets across chunks at every size. Parallel and SPARROW
+adaptive windows were retuned (`adaptive_window_bits`):
+
+| Points | Before | After |
+|---:|---:|---:|
+| 4,096–16,383 | 8 | 10 |
+| 16,384–65,536 | 8–9 | 12 |
+| 65,537–524,288 | 10–11 | 13 |
+| > 524,288 | 12–13 | 14 |
+
+Host: reference Apple M-series, 14 cores, loaded by parallel builds (load
+5–50); every comparison interleaves before/after samples and checks the two
+results are the same group element. Uniform scalars, median ms, 7–9 samples.
+
+**Resident MSM, 13 Rayon workers** (before = XYZZ with old widths):
+
+| Points | G1 before | G1 after | G2 before | G2 after |
+|---:|---:|---:|---:|---:|
+| 2^12 | 2.52 | 2.17 (−13.9%) | 7.88 | 5.41 (−31.4%) |
+| 2^14 | 9.57 | 6.99 (−26.9%) | 27.45 | 16.36 (−40.4%) |
+| 2^16 | 33.76 | 21.25 (−37.1%) | 107.46 | 54.20 (−49.6%) |
+| 2^18 | 111.93 | 80.80 (−27.8%) | 343.33 | 224.94 (−34.5%) |
+| 2^20 | 416.23 | 317.45 (−23.7%) | 1,462.4 | 921.7 (−37.0%) |
+
+**Resident MSM, 1 worker, same widths before and after:** G1 −12% (2^12) to
+−27% (2^20); G2 −28% to −41%. Below 4,096 points the code is unchanged
+(21-sample reruns within ±2%). Accumulator alone at a fixed width: G1 −20 to
+−27%; the rest of the parallel gain is the wider windows. Witness-like scalars
+(¼ each 0, 1, 64-bit, uniform): G1 parallel +1.0% at 2^12, −21 to −25% from
+2^13. All scalars = 1 (one bucket): +0.3 to +3.2% (≈1 ms at 2^12).
+
+**SPARROW query MSM** (decode + streamed accumulation + reduction; before =
+projective buckets; 14 samples):
+
+| Points | Parallel G1 | Parallel G2 | Serial G1 (w13) | Serial G2 (w13) |
+|---:|---:|---:|---:|---:|
+| 2^12 | 3.81 -> 2.48 (−34.8%) | 9.15 -> 5.72 (−37.5%) | 35.9 -> 27.3 (−24.0%) | 107.3 -> 81.8 (−23.7%) |
+| 2^16 | 50.96 -> 23.81 (−53.3%) | 117.2 -> 60.5 (−48.4%) | 283.0 -> 178.0 (−37.1%) | 773.5 -> 462.7 (−40.2%) |
+| 2^18 | 147.8 -> 92.0 (−37.8%) | 469.3 -> 241.0 (−48.7%) | 1,066.7 -> 659.8 (−38.1%) | — |
+| 2^20 | 524.3 -> 304.1 (−42.0%) | — | — | — |
+
+Profile (single thread, G1 2^20): accumulation is ~95% of MSM time before and
+after; inside batch-affine accumulation, field multiplication ~60%, squaring
+~8%, batch apply ~22%, scheduling ~6%, inversion ~4% (one inversion ≈ 165
+multiplications). Memory (computed): SPARROW browser default (w13) buckets G1
+7.9 -> 5.2 MB, G2 15.7 -> 10.5 MB; native adaptive at 2^20 (w12 -> w14) G1
+4.3 -> 10 MB, G2 8.7 -> 20 MB; resident +≈0.7/1.4 MB per running window.
+
+**Whole proofs, production keys** (`curvy-native-prover`, release, before =
+`b3578e9`, after = this change; 6 rounds alternating, median proof-generation
+ms; every proof self-verified and matched `expectedPublics`; witness and load
+times unchanged within noise):
+
+| Notes | Features | 1 thread | 8 threads |
+|---:|---|---:|---:|
+| 2 | parallel | 2,009.6 -> 1,470.9 (−26.8%) | 328.6 -> 240.5 (−26.8%) |
+| 2 | compact-matrix,parallel | 1,981.0 -> 1,440.2 (−27.3%) | 325.7 -> 237.1 (−27.2%) |
+| 5 | parallel | 2,824.8 -> 1,933.4 (−31.6%) | 456.1 -> 315.6 (−30.8%) |
+| 5 | compact-matrix,parallel | 2,892.5 -> 1,980.6 (−31.5%) | 443.4 -> 307.6 (−30.6%) |
+| 10 | parallel | 5,182.4 -> 3,696.1 (−28.7%) | 739.5 -> 609.7 (−17.6%) |
+| 10 | compact-matrix,parallel | 5,136.9 -> 3,684.3 (−28.3%) | 746.8 -> 607.5 (−18.7%) |
+
+`CURVY_PROVER_NUM_THREADS` selects the pool size (default 1). Builds without
+`parallel` or `compact-matrix` use stock ark-groth16 and are unaffected.
+
+**Caveats.** SPARROW adaptive widths were tuned on synthetic inputs; re-check
+with `native_window_sweep` on real artifacts. `sparrow::phase_bench` still
+times the old projective kernels (kept under `bench`), so `phase_kernels` no
+longer reflects production SPARROW accumulation.
+
+```sh
+cargo run --release --locked -p curvy-benchmarks --bin msm_accumulation -- compare g1 12,14,16,18,20 13 9 uniform
+cargo run --release --locked -p curvy-benchmarks --bin msm_accumulation -- sweep g1 16 13 10,12,13,14 xyzz,affine
+cargo run --release --locked -p curvy-benchmarks --bin msm_accumulation -- profile g1 20 15 affine
+# SPARROW query MSM (see the usage text in the bin for argument order;
+# build with --no-default-features for the serial variant):
+cargo run --release --locked -p curvy-benchmarks --bin sparrow_query_msm -- g1 16 13 0 524288
+```
 
 ## Recording a new result
 

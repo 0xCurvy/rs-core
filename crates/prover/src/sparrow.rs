@@ -15,14 +15,18 @@ pub mod manifest;
 #[doc(hidden)]
 pub mod phase_bench;
 
+#[cfg(feature = "bench")]
+use std::ops::{AddAssign, SubAssign};
 use std::{
     io::{Read, Seek, SeekFrom},
-    ops::{AddAssign, SubAssign},
     sync::Arc,
 };
 
-use ark_bn254::{Bn254, Fq, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+use ark_bn254::{Bn254, Fq, Fr, G1Affine, G1Projective, G2Affine, G2Projective, g1, g2};
+use ark_ec::{
+    AffineRepr, CurveGroup, PrimeGroup,
+    short_weierstrass::{Affine, Projective, SWCurveConfig},
+};
 use ark_ff::{BigInt, PrimeField, UniformRand, Zero};
 use ark_groth16::{Groth16, Proof, VerifyingKey, prepare_verifying_key};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
@@ -32,7 +36,10 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{ProofBundle, ProverMode, SPARROW_PROFILE, proof_to_snarkjs_json, publics_to_json};
+use crate::{
+    ProofBundle, ProverMode, SPARROW_PROFILE, msm::AffineBuckets, proof_to_snarkjs_json,
+    publics_to_json,
+};
 
 const FILE_HEADER_BYTES: usize = 12;
 const SECTION_HEADER_BYTES: usize = 12;
@@ -733,8 +740,8 @@ struct ActiveSection {
 enum SectionProcessor {
     Small(Vec<u8>),
     Coefficients(Box<CoefficientAccumulator>),
-    G1(Box<QueryAccumulator<G1Affine>>),
-    G2(Box<QueryAccumulator<G2Affine>>),
+    G1(Box<QueryAccumulator<g1::Config>>),
+    G2(Box<QueryAccumulator<g2::Config>>),
     Ignore,
 }
 
@@ -1074,36 +1081,34 @@ fn circom_witness_map(
 /// This layer controls batching, scalar recoding, and bucket reduction. Field
 /// arithmetic, curve addition/doubling, and the final Groth16 verification stay
 /// in `ark-bn254`/`ark-groth16`; this is not a separate BN254 implementation.
-struct QueryAccumulator<G: AffineRepr<ScalarField = Fr>> {
+/// Buckets persist across chunks in affine form; each chunk's additions are
+/// applied in batch-affine form (see `crate::msm`), so every bucket is final
+/// before the next chunk starts.
+struct QueryAccumulator<P: SWCurveConfig<ScalarField = Fr>> {
     scalars: Arc<[Fr]>,
     scalar_offset: usize,
     expected: usize,
     seen: usize,
     record_bytes: usize,
-    decode: fn(&[u8]) -> Result<G, StreamingError>,
-    validate: fn(&G) -> bool,
+    decode: fn(&[u8]) -> Result<Affine<P>, StreamingError>,
+    validate: fn(&Affine<P>) -> bool,
     carry: Vec<u8>,
-    pairs: Vec<(G, BigInt<4>)>,
-    buckets: Vec<Vec<G::Group>>,
+    pairs: Vec<(Affine<P>, BigInt<4>)>,
+    buckets: Vec<AffineBuckets<P>>,
     window_bits: usize,
     chunk_points: usize,
-    first: Option<G>,
-    last: Option<G>,
+    first: Option<Affine<P>>,
+    last: Option<Affine<P>>,
 }
 
-impl<G> QueryAccumulator<G>
-where
-    G: AffineRepr<ScalarField = Fr> + Send + Sync,
-    G::Group: Send + Sync,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G> + AddAssign<&'a G::Group>,
-{
+impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
     fn new(
         scalars: Arc<[Fr]>,
         scalar_offset: usize,
         expected: usize,
         record_bytes: usize,
-        decode: fn(&[u8]) -> Result<G, StreamingError>,
-        validate: fn(&G) -> bool,
+        decode: fn(&[u8]) -> Result<Affine<P>, StreamingError>,
+        validate: fn(&Affine<P>) -> bool,
         config: StreamingConfig,
     ) -> Result<Self, StreamingError> {
         let scalar_end = scalar_offset
@@ -1120,23 +1125,19 @@ where
         // A padded top bit is necessary for signed recoding, but is not by
         // itself a field-generic proof that the final carry vanishes. SPARROW is
         // fixed to BN254 Fr; its modulus and every width it can select (explicit
-        // 4..=16, or 3..=13 from the adaptive policy) satisfy that stronger
+        // 4..=16, or 3..=14 from the adaptive policy) satisfy that stronger
         // invariant, which the recoder tests exercise directly for 3..=16.
         if recoding_bits <= Fr::MODULUS_BIT_SIZE as usize {
             return invalid("signed-window recoding needs a carry bit");
         }
-        let bucket_count = 1_usize << (window_bits - 1);
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(windows)
             .map_err(|_| StreamingError::InvalidZkey("cannot allocate MSM windows".into()))?;
         for _ in 0..windows {
-            let mut window = Vec::new();
-            window
-                .try_reserve_exact(bucket_count)
-                .map_err(|_| StreamingError::InvalidZkey("cannot allocate MSM buckets".into()))?;
-            window.resize(bucket_count, G::Group::zero());
-            buckets.push(window);
+            buckets.push(AffineBuckets::try_new(window_bits).ok_or_else(|| {
+                StreamingError::InvalidZkey("cannot allocate MSM buckets".into())
+            })?);
         }
         Ok(Self {
             scalars,
@@ -1207,7 +1208,11 @@ where
             .par_iter_mut()
             .enumerate()
             .for_each(|(window, buckets)| {
-                accumulate_signed_window(buckets, pairs, window_bits, window)
+                for (base, scalar) in pairs {
+                    buckets.add_digit(signed_window_digit(scalar, window_bits, window), base);
+                }
+                buckets.finish();
+                buckets.release_scratch();
             });
         #[cfg(not(feature = "parallel"))]
         {
@@ -1220,15 +1225,18 @@ where
                     signed_digits[window].push(digit);
                 });
             }
-            self.buckets
-                .iter_mut()
-                .zip(&signed_digits)
-                .for_each(|(buckets, digits)| accumulate_signed_digits(buckets, pairs, digits));
+            for (buckets, digits) in self.buckets.iter_mut().zip(&signed_digits) {
+                for ((base, _), &digit) in pairs.iter().zip(digits) {
+                    buckets.add_digit(digit, base);
+                }
+                buckets.finish();
+                buckets.release_scratch();
+            }
         }
         self.pairs.clear();
     }
 
-    fn finish(mut self) -> Result<G::Group, StreamingError> {
+    fn finish(mut self) -> Result<Projective<P>, StreamingError> {
         if !self.carry.is_empty() || self.seen != self.expected {
             return invalid("query point count mismatch");
         }
@@ -1244,8 +1252,69 @@ where
             return invalid("invalid query endpoint");
         }
         self.flush();
-        Ok(reduce_windows::<G>(&self.buckets, self.window_bits))
+        Ok(crate::msm::reduce_affine_windows(
+            &self.buckets,
+            self.window_bits,
+        ))
     }
+}
+
+/// Stream a zkey-encoded G1 query section through SPARROW's bucket
+/// accumulator, `push_bytes` at a time, exactly as `StreamingProofBuilder`
+/// does. Benchmark support only.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub fn bench_query_msm_g1(
+    section: &[u8],
+    scalars: Arc<[Fr]>,
+    config: StreamingConfig,
+    push_bytes: usize,
+) -> Result<G1Projective, StreamingError> {
+    let count = section.len() / G1_BYTES;
+    let query = QueryAccumulator::new(
+        scalars,
+        0,
+        count,
+        G1_BYTES,
+        decode_g1,
+        valid_g1,
+        config.validate()?,
+    )?;
+    bench_stream_query(query, section, push_bytes)
+}
+
+/// G2 counterpart of [`bench_query_msm_g1`].
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub fn bench_query_msm_g2(
+    section: &[u8],
+    scalars: Arc<[Fr]>,
+    config: StreamingConfig,
+    push_bytes: usize,
+) -> Result<G2Projective, StreamingError> {
+    let count = section.len() / G2_BYTES;
+    let query = QueryAccumulator::new(
+        scalars,
+        0,
+        count,
+        G2_BYTES,
+        decode_g2,
+        valid_g2,
+        config.validate()?,
+    )?;
+    bench_stream_query(query, section, push_bytes)
+}
+
+#[cfg(feature = "bench")]
+fn bench_stream_query<P: SWCurveConfig<ScalarField = Fr>>(
+    mut query: QueryAccumulator<P>,
+    section: &[u8],
+    push_bytes: usize,
+) -> Result<Projective<P>, StreamingError> {
+    for chunk in section.chunks(push_bytes.max(1)) {
+        query.push(chunk)?;
+    }
+    query.finish()
 }
 
 fn resolve_window_bits(configured: usize, points: usize) -> usize {
@@ -1256,7 +1325,9 @@ fn resolve_window_bits(configured: usize, points: usize) -> usize {
     crate::msm::adaptive_window_bits(points)
 }
 
-#[cfg(not(feature = "parallel"))]
+// Projective-bucket kernels retained for `phase_bench`'s native/WASM kernel
+// comparisons; the streaming prover uses affine buckets.
+#[cfg(all(feature = "bench", not(feature = "parallel")))]
 fn accumulate_signed_digits<G>(buckets: &mut [G::Group], pairs: &[(G, BigInt<4>)], digits: &[i16])
 where
     G: AffineRepr<ScalarField = Fr>,
@@ -1271,7 +1342,7 @@ where
     }
 }
 
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "bench", feature = "parallel"))]
 fn accumulate_signed_window<G>(
     buckets: &mut [G::Group],
     pairs: &[(G, BigInt<4>)],
@@ -1306,6 +1377,7 @@ fn signed_window_digit(scalar: &BigInt<4>, width: usize, window: usize) -> i16 {
     crate::msm::signed_window_digit(scalar, width, window)
 }
 
+#[cfg(feature = "bench")]
 fn reduce_windows<G>(buckets: &[Vec<G::Group>], width: usize) -> G::Group
 where
     G: AffineRepr<ScalarField = Fr>,
@@ -1616,15 +1688,128 @@ mod tests {
         panic!("missing fixture header");
     }
 
+    /// Streamed affine buckets equal arkworks' MSM across chunk boundaries,
+    /// with record-splitting push sizes, a scalar offset, repeated bases,
+    /// P and -P, identity bases, zero scalars, and repeated scalars.
+    #[test]
+    fn streamed_query_msm_matches_arkworks_for_g1_and_g2() {
+        use std::sync::Arc;
+
+        use ark_bn254::{G1Projective, G2Projective};
+        use ark_ec::{
+            CurveGroup, VariableBaseMSM,
+            short_weierstrass::{Affine, SWCurveConfig},
+        };
+
+        use super::{
+            G1_BYTES, G2_BYTES, QueryAccumulator, decode_g1, decode_g2, valid_g1, valid_g2,
+        };
+
+        fn adversarial_bases<P: SWCurveConfig<ScalarField = Fr>>(
+            size: usize,
+            rng: &mut impl ark_std::rand::Rng,
+        ) -> Vec<Affine<P>> {
+            let p = Affine::<P>::rand(rng);
+            let double = (p + p).into_affine();
+            (0..size)
+                .map(|index| match index % 7 {
+                    0 | 4 => p,
+                    1 => -p,
+                    3 => Affine::identity(),
+                    6 => double,
+                    _ => Affine::rand(rng),
+                })
+                .collect()
+        }
+
+        let mut rng = ark_std::test_rng();
+        let (offset, size) = (3, 240);
+        let mut scalars = (0..offset + size)
+            .map(|_| Fr::rand(&mut rng))
+            .collect::<Vec<_>>();
+        for index in offset..offset + size {
+            match index % 5 {
+                0 => scalars[index] = Fr::from(0_u64),
+                1 => scalars[index] = Fr::from(1_u64),
+                2 => scalars[index] = scalars[index - 1],
+                _ => {}
+            }
+        }
+        let bigints = scalars[offset..]
+            .iter()
+            .map(|scalar| scalar.into_bigint())
+            .collect::<Vec<_>>();
+        let scalars: Arc<[Fr]> = scalars.into();
+
+        let g1 = adversarial_bases::<ark_bn254::g1::Config>(size, &mut rng);
+        let g2 = adversarial_bases::<ark_bn254::g2::Config>(size, &mut rng);
+        let g1_bytes = g1
+            .iter()
+            .flat_map(|point| point.x.0.0.into_iter().chain(point.y.0.0))
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let g2_bytes = g2
+            .iter()
+            .flat_map(|point| [point.x.c0, point.x.c1, point.y.c0, point.y.c1])
+            .flat_map(|coordinate| coordinate.0.0)
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let expected_g1 = G1Projective::msm_bigint(&g1, &bigints);
+        let expected_g2 = G2Projective::msm_bigint(&g2, &bigints);
+        assert!(expected_g1 != G1Projective::default() && expected_g2 != G2Projective::default());
+
+        let adaptive = StreamingConfig::ADAPTIVE_WINDOW_BITS;
+        for (window_bits, msm_chunk_points) in
+            [(4, 7), (8, 64), (13, 1_000), (16, 33), (adaptive, 5)]
+        {
+            let config = StreamingConfig {
+                window_bits,
+                msm_chunk_points,
+                ..StreamingConfig::default()
+            };
+            let mut query = QueryAccumulator::new(
+                Arc::clone(&scalars),
+                offset,
+                size,
+                G1_BYTES,
+                decode_g1,
+                valid_g1,
+                config,
+            )
+            .unwrap();
+            for chunk in g1_bytes.chunks(97) {
+                query.push(chunk).unwrap();
+            }
+            assert_eq!(query.finish().unwrap(), expected_g1, "G1 {config:?}");
+
+            let mut query = QueryAccumulator::new(
+                Arc::clone(&scalars),
+                offset,
+                size,
+                G2_BYTES,
+                decode_g2,
+                valid_g2,
+                config,
+            )
+            .unwrap();
+            for chunk in g2_bytes.chunks(201) {
+                query.push(chunk).unwrap();
+            }
+            assert_eq!(query.finish().unwrap(), expected_g2, "G2 {config:?}");
+        }
+    }
+
     #[test]
     fn adaptive_window_tracks_query_size() {
         let adaptive = StreamingConfig::ADAPTIVE_WINDOW_BITS;
-        assert_eq!(resolve_window_bits(adaptive, 32_768), 8);
-        assert_eq!(resolve_window_bits(adaptive, 32_769), 9);
-        assert_eq!(resolve_window_bits(adaptive, 65_537), 10);
-        assert_eq!(resolve_window_bits(adaptive, 262_145), 11);
-        assert_eq!(resolve_window_bits(adaptive, 524_289), 12);
-        assert_eq!(resolve_window_bits(adaptive, 2_097_153), 13);
+        assert_eq!(resolve_window_bits(adaptive, 4_095), 8);
+        assert_eq!(resolve_window_bits(adaptive, 4_096), 10);
+        assert_eq!(resolve_window_bits(adaptive, 16_384), 12);
+        assert_eq!(resolve_window_bits(adaptive, 65_536), 12);
+        assert_eq!(resolve_window_bits(adaptive, 65_537), 13);
+        assert_eq!(resolve_window_bits(adaptive, 524_288), 13);
+        assert_eq!(resolve_window_bits(adaptive, 524_289), 14);
+        assert_eq!(resolve_window_bits(adaptive, usize::MAX), 14);
         assert_eq!(resolve_window_bits(7, usize::MAX), 7);
 
         let native = StreamingConfig::native_adaptive();

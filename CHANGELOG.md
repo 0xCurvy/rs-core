@@ -93,10 +93,12 @@ Changes since `v0.1.0-rc.5` (`e17b711`, 17 August 2026). Background:
 - `curvy-core`: `ShardedNotesTree::rewind_live_to` returns unmarked owned ids in ascending leaf order.
 - `curvy-prover`: serial MSM windows follow ln(points) + 2, capped at 16.
 - `curvy-prover`: with `parallel`, SPARROW bucket window reduction runs on the Rayon pool.
+- `curvy-prover`: BN254 MSMs from 4,096 points (and every SPARROW query) accumulate batch-affine buckets with one shared inversion per batch; parallel and SPARROW adaptive windows widened. Resident G1 21–37% and G2 34–50% faster, SPARROW query MSM 37–53% faster; whole production proofs 18–32% faster (`docs/benchmarks.md` §9).
 - `curvy-prover`: shared artifact authentication lives in `artifacts`; WASM bindings moved to `wasm_api.rs`.
 - Node: compact matrices are the default; tree operations remain serial.
 - CI builds and proves the shipped threaded and portable WASM packages and runs browser proofs.
 - CI lints and tests serial, parallel and default-only feature sets separately.
+- CI runs Rust checks as parallel matrix jobs, tests the Node binding natively on Windows, and fuzzes the nested-matrix zkey parser.
 - Release workflow (still disabled) derives the npm dist-tag, waits for CI, runs the 160k Poseidon gate and publishes the smoke-tested tarball.
 - Node release staging pins `cargo-xwin` and flags the Windows binary as untested.
 - Documentation moved to `docs/`; the handover document was removed and raw benchmark results are no longer tracked.

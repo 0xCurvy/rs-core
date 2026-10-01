@@ -37,3 +37,7 @@ required-features = ["parallel"]
 [[bin]]
 name = "matrix_evaluation"
 required-features = ["parallel"]
+
+[[bin]]
+name = "msm_accumulation"
+required-features = ["parallel"]

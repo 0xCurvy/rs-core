@@ -5,8 +5,13 @@
 //! excluding zkey I/O and witness-map FFTs. The module only exists with both
 //! `bench` and `parallel`, so it has no serial fallbacks.
 
+use std::time::Duration;
+
 use ark_bn254::{Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::CurveGroup;
+use ark_ec::{
+    CurveGroup,
+    short_weierstrass::{Affine, Projective, SWCurveConfig},
+};
 use ark_ff::{BigInt, PrimeField};
 #[cfg(feature = "compact-matrix")]
 use ark_groth16::r1cs_to_qap::evaluate_constraint;
@@ -15,7 +20,10 @@ use ark_relations::utils::matrix::Matrix;
 
 use rayon::prelude::*;
 
-use crate::msm::{adaptive_window_bits, msm_bigint, msm_bigint_with_window};
+use crate::msm::{
+    Accumulation, adaptive_window_bits, batch_size, msm_bigint, msm_bigint_with_accumulation,
+    msm_bigint_with_window, profile_msm_phases, serial_window_bits,
+};
 #[cfg(feature = "compact-matrix")]
 use crate::qap::CompactMatrix;
 
@@ -149,6 +157,163 @@ impl ProofMsmFixture {
                 msm_bigint_with_window::<G2Projective>(&self.b2[start..end], &scalars, width);
         }
         output
+    }
+}
+
+/// Bucket accumulator selected by [`MsmFixture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MsmAccumulator {
+    /// Arkworks' XYZZ buckets, the accumulator used before batch-affine.
+    Xyzz,
+    /// Batch-affine buckets, optionally with a batch-size override.
+    BatchAffine(Option<usize>),
+    /// Whatever the resident MSM selects for this size and width.
+    Production,
+}
+
+/// Scalar distribution of an [`MsmFixture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MsmScalars {
+    /// Uniform canonical Fr integers.
+    Uniform,
+    /// Witness-like: a quarter each of 0, 1, a random `u64`, and uniform Fr.
+    Witness,
+    /// Every scalar is 1, so every point lands in one bucket of window 0.
+    Ones,
+}
+
+/// Time spent in each MSM phase by a serial profiling run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MsmPhases {
+    pub recoding: Duration,
+    pub accumulation: Duration,
+    pub reduction: Duration,
+    pub combination: Duration,
+}
+
+/// Distinct G1 and G2 bases with one shared scalar vector.
+pub struct MsmFixture {
+    g1: Vec<G1Affine>,
+    g2: Vec<G2Affine>,
+    scalars: Vec<BigInt<4>>,
+}
+
+impl MsmFixture {
+    /// `with_g2 = false` skips the (slower) G2 base generation.
+    pub fn new(log_size: u32, scalars: MsmScalars, with_g2: bool) -> Self {
+        let size = 1usize
+            .checked_shl(log_size)
+            .expect("benchmark log size must fit usize");
+        let uniform = deterministic_scalars(size, 0x6d73_6d2d_6163_6331);
+        let scalars = match scalars {
+            MsmScalars::Uniform => uniform,
+            MsmScalars::Ones => vec![Fr::from(1_u64); size],
+            MsmScalars::Witness => uniform
+                .into_iter()
+                .enumerate()
+                .map(|(index, scalar)| match index % 4 {
+                    0 => Fr::from(0_u64),
+                    1 => Fr::from(1_u64),
+                    2 => Fr::from(scalar.into_bigint().0[0]),
+                    _ => scalar,
+                })
+                .collect(),
+        };
+        Self {
+            g1: distinct_bases::<G1Projective>(1, size),
+            g2: if with_g2 {
+                distinct_bases::<G2Projective>(1, size)
+            } else {
+                Vec::new()
+            },
+            scalars: to_bigints(&scalars),
+        }
+    }
+
+    pub fn points(&self) -> usize {
+        self.scalars.len()
+    }
+
+    pub fn g1(&self, accumulator: MsmAccumulator, width: usize) -> G1Projective {
+        run_msm::<G1Projective>(&self.g1, &self.scalars, accumulator, width)
+    }
+
+    /// Panics if the fixture was built without G2 bases.
+    pub fn g2(&self, accumulator: MsmAccumulator, width: usize) -> G2Projective {
+        assert_eq!(self.g2.len(), self.scalars.len(), "fixture has no G2 bases");
+        run_msm::<G2Projective>(&self.g2, &self.scalars, accumulator, width)
+    }
+
+    pub fn profile_g1(&self, accumulator: MsmAccumulator, width: usize) -> MsmPhases {
+        profile(&self.g1, &self.scalars, accumulator, width)
+    }
+
+    pub fn profile_g2(&self, accumulator: MsmAccumulator, width: usize) -> MsmPhases {
+        assert_eq!(self.g2.len(), self.scalars.len(), "fixture has no G2 bases");
+        profile(&self.g2, &self.scalars, accumulator, width)
+    }
+}
+
+/// Window width the resident MSM selects with `parallel`.
+pub fn parallel_window_bits(points: usize) -> usize {
+    adaptive_window_bits(points)
+}
+
+/// Window width the resident MSM selects without `parallel`.
+pub fn serial_msm_window_bits(points: usize) -> usize {
+    serial_window_bits(points)
+}
+
+/// Production batch-affine batch size for a window width.
+pub fn batch_affine_batch_size(width: usize) -> usize {
+    batch_size(width)
+}
+
+fn run_msm<V>(
+    bases: &[V::MulBase],
+    scalars: &[BigInt<4>],
+    accumulator: MsmAccumulator,
+    width: usize,
+) -> V
+where
+    V: ark_ec::VariableBaseMSM<ScalarField = Fr>,
+{
+    match accumulator {
+        MsmAccumulator::Xyzz => {
+            msm_bigint_with_accumulation::<V>(bases, scalars, width, Accumulation::Xyzz, None)
+        }
+        MsmAccumulator::BatchAffine(batch) => msm_bigint_with_accumulation::<V>(
+            bases,
+            scalars,
+            width,
+            Accumulation::BatchAffine,
+            batch,
+        ),
+        MsmAccumulator::Production => msm_bigint_with_window::<V>(bases, scalars, width),
+    }
+}
+
+fn profile<P>(
+    bases: &[Affine<P>],
+    scalars: &[BigInt<4>],
+    accumulator: MsmAccumulator,
+    width: usize,
+) -> MsmPhases
+where
+    P: SWCurveConfig<ScalarField = Fr>,
+{
+    let accumulation = match accumulator {
+        MsmAccumulator::Xyzz => Accumulation::Xyzz,
+        MsmAccumulator::BatchAffine(_) | MsmAccumulator::Production => Accumulation::BatchAffine,
+    };
+    let (sum, [recoding, accumulation, reduction, combination]) =
+        profile_msm_phases::<P>(bases, scalars, width, accumulation);
+    let _: Projective<P> = std::hint::black_box(sum);
+    MsmPhases {
+        recoding,
+        accumulation,
+        reduction,
+        combination,
     }
 }
 
