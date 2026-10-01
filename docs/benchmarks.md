@@ -466,6 +466,50 @@ node tools/browser/measure.mjs "$OUT/browser.json" 2,5,10   # header comment doc
 node tools/benchmarks/signing-boundary.cjs BEFORE_PKG_DIR crates/wasm/pkg-node
 ```
 
+### 6.4 Nested vs compact matrices in Chromium (1 Oct 2026)
+
+Question: should the shipped threaded and portable browser builds use
+`--compact-matrix`? Rule: switch only if peak memory drops at least 15% and
+median proof time is no more than 3% worse.
+
+Chromium 143 (Playwright 1.57), headless, fresh browser per run, builds
+alternated ABBA. Production 2/5/10-note keys (pins as above), cases from the
+6 Sep fixtures. Threaded: 4 workers, 7 runs × (1 warm-up + 5 proofs). Portable:
+7 runs × (1 warm-up + 3 proofs). Host heavily loaded by parallel builds
+(load 9–49 on 14 cores), so absolute times run 5–15% slower than 6.1; the
+ABBA deltas are the result. RSS is the browser process tree; "above base"
+subtracts the ~269 MiB idle browser; WASM heap is the memory high-water mark.
+
+| Notes | Build | Proof ms | Parse ms | Peak RSS MiB | Above base MiB | WASM heap MiB |
+|---:|---|---:|---:|---:|---:|---:|
+| 2 | threaded nested | 1,635.2 | 1,193.3 | 785.2 | 516.1 | 275.7 |
+| 2 | threaded compact | 1,659.8 (+1.5%) | 1,173.5 | 746.7 (−4.9%) | 477.6 (−7.5%) | 236.2 (−14.3%) |
+| 5 | threaded nested | 2,290.9 | 1,693.5 | 976.7 | 708.6 | 390.3 |
+| 5 | threaded compact | 2,258.5 (−1.4%) | 1,661.4 | 920.5 (−5.8%) | 651.5 (−8.1%) | 334.1 (−14.4%) |
+| 10 | threaded nested | 4,193.3 | 3,000.1 | 1,428.7 | 1,161.0 | 665.2 |
+| 10 | threaded compact | 4,080.0 (−2.7%) | 2,914.4 | 1,356.9 (−5.0%) | 1,087.9 (−6.3%) | 580.2 (−12.8%) |
+| 2 | portable nested | 4,797.8 | 1,230.3 | 775.0 | 505.7 | 267.6 |
+| 2 | portable compact | 5,077.9 (+5.8%) | 1,174.0 | 735.4 (−5.1%) | 467.3 (−7.6%) | 228.4 (−14.6%) |
+| 5 | portable nested | 6,758.6 | 1,759.1 | 965.6 | 696.8 | 382.2 |
+| 5 | portable compact | 6,774.0 (+0.2%) | 1,656.6 | 908.6 (−5.9%) | 640.2 (−8.1%) | 326.5 (−14.6%) |
+| 10 | portable nested | 12,612.2 | 3,128.7 | 1,418.4 | 1,149.1 | 657.1 |
+| 10 | portable compact | 12,523.3 (−0.7%) | 2,860.9 | 1,318.0 (−7.1%) | 1,050.0 (−8.6%) | 558.0 (−15.1%) |
+
+**Conclusion.** Neither shipped browser build switches. Compact saves 39–99 MiB,
+but browser peak RSS falls only 5–7%: the WASM heap peaks during authenticated
+parse, when it holds the raw zkey copy plus the parsed key (matrices are a small
+share), and the page also keeps the fetched zkey. Portable compact is also
+5.8% slower at 2 notes (slower in all 7 rounds). The native ~1014 -> 350 MiB
+figure is a 2^24-domain projection and does not transfer to these keys.
+
+```sh
+# Builds outside the in-tree pkg-* dirs, then an ABBA comparison:
+CURVY_WASM_OUT_DIR="$OUT/nested"  scripts/build-wasm.sh web --threads
+CURVY_WASM_OUT_DIR="$OUT/compact" scripts/build-wasm.sh web --threads --compact-matrix
+CURVY_BROWSER_BUILDS="$OUT/nested,$OUT/compact" node tools/browser/measure.mjs "$OUT/threaded.json" 2,5,10
+# See the header of tools/browser/measure.mjs for portable mode and options.
+```
+
 ## 7. Poseidon
 
 ### 7.1 Direct vs optimized schedule (25 Aug 2026)
@@ -592,10 +636,10 @@ node tools/leakage/wasm.mjs "$OUT/wasm" 30000 chromium firefox --seconds-per-cas
 `.github/workflows/leakage.yml` runs dudect and timecop weekly on GitHub-hosted
 Linux x86-64 and arm64; no result from it is recorded here.
 
-## Pending: MSM batch-affine and compact threaded WASM (2026-10)
 
-TODO(coordinator): add the batch-affine MSM and compact threaded WASM results
-(host, date, medians, memory, conclusion, re-run commands).
+## 9. MSM bucket accumulation (Oct 2026)
+
+TODO(coordinator): batch-affine accumulation results.
 
 ## Recording a new result
 

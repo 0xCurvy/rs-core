@@ -20,6 +20,9 @@
 #   CURVY_WASM_CODEGEN_UNITS     release codegen units (default: 1)
 #   CURVY_WASM_THREADS_TOOLCHAIN pinned nightly for --threads
 #   CURVY_WASM_OPT               set to 0 to skip wasm-opt (default: 1)
+#   CURVY_WASM_OUT_DIR           package root, relative to the repository root
+#                                (default: crates); writes <root>/wasm/pkg-<suffix>
+#                                and <root>/prover/pkg-<suffix>
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -162,8 +165,9 @@ case "$thread_mode" in
 esac
 
 wasm_target_dir="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release"
-core_output="crates/wasm/pkg-${output_suffix}"
-prover_output="crates/prover/pkg-${output_suffix}"
+output_root="${CURVY_WASM_OUT_DIR:-crates}"
+core_output="$output_root/wasm/pkg-${output_suffix}"
+prover_output="$output_root/prover/pkg-${output_suffix}"
 
 wasm-bindgen --target "$binding_target" --out-dir "$core_output" \
   "$wasm_target_dir/curvy_wasm.wasm"

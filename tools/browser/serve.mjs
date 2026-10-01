@@ -8,6 +8,15 @@ const port = Number(process.env.PORT || 8127);
 const artifactFile = process.argv[2];
 const cases = artifactFile ? JSON.parse(await readFile(artifactFile, 'utf8')) : [];
 const artifacts = new Map(cases.flatMap(c => [[c.zkeyUrl, c.zkeyPath], [c.graphUrl, c.graphPath]]));
+// The page always imports the prover from these URLs. CURVY_BROWSER_PKG_WEB and
+// CURVY_BROWSER_PKG_WEB_THREADS serve a prover package directory built
+// elsewhere (scripts/build-wasm.sh with CURVY_WASM_OUT_DIR) in their place.
+const sources = await Promise.all([
+  ['/crates/prover/pkg-web/', process.env.CURVY_BROWSER_PKG_WEB || resolve(root, 'crates/prover/pkg-web')],
+  ['/crates/prover/pkg-web-threads/', process.env.CURVY_BROWSER_PKG_WEB_THREADS || resolve(root, 'crates/prover/pkg-web-threads')],
+  ['/tools/browser/', resolve(root, 'tools/browser')],
+  ['/crates/prover/testdata/', resolve(root, 'crates/prover/testdata')],
+].map(async ([prefix, dir]) => [prefix, await realpath(resolve(dir)).catch(() => resolve(dir))]));
 const types = {'.html':'text/html', '.js':'text/javascript', '.mjs':'text/javascript', '.wasm':'application/wasm', '.json':'application/json'};
 export const server = http.createServer(async (request, response) => {
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
@@ -28,10 +37,14 @@ export const server = http.createServer(async (request, response) => {
       response.end(JSON.stringify(cases.map(({zkeyPath, graphPath, ...config}) => config)));
       return;
     }
-    const allowed = ['/tools/browser/', '/crates/prover/pkg-web/', '/crates/prover/pkg-web-threads/', '/crates/prover/testdata/'];
-    const path = await realpath(artifacts.get(pathname) || resolve(root, '.' + pathname));
-    if (!artifacts.has(pathname) && (!path.startsWith(root + sep) || !allowed.some(prefix => path.startsWith(resolve(root, '.' + prefix) + sep)) || pathname.split('/').some(p => p.startsWith('.')))) {
-      response.writeHead(404).end(); return;
+    let path;
+    if (artifacts.has(pathname)) path = await realpath(artifacts.get(pathname));
+    else {
+      const source = sources.find(([prefix]) => pathname.startsWith(prefix));
+      if (!source || pathname.split('/').some(p => p.startsWith('.'))) { response.writeHead(404).end(); return; }
+      const [prefix, dir] = source;
+      path = await realpath(resolve(dir, '.' + sep + pathname.slice(prefix.length)));
+      if (!path.startsWith(dir + sep)) { response.writeHead(404).end(); return; }
     }
     const info = await stat(path);
     if (!info.isFile()) { response.writeHead(404).end(); return; }

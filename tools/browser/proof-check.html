@@ -25,11 +25,13 @@ document.querySelector('#run').onclick = async () => {
     const wasm = await import(`/crates/prover/pkg-web${mode === 'threaded' ? '-threads' : ''}/curvy_prover.js`);
     check((typeof wasm.initThreadPool === 'function') === (mode === 'threaded'), `${mode} mode loaded the wrong package build`);
     result.textContent = 'Initializing WASM';
-    await wasm.default();
+    const initStarted = performance.now();
+    const {memory} = await wasm.default();
     const threads = mode === 'threaded' ? Number(query.get('threads') || 2) : 1;
     check(Number.isInteger(threads) && threads >= 1 && threads <= 16, 'invalid thread count');
     result.textContent = 'Initializing workers';
     if (mode === 'threaded') await wasm.initThreadPool(threads);
+    const initMs = performance.now() - initStarted;
     result.textContent = 'Loading artifacts';
     let data;
     if (query.has('scenario')) {
@@ -45,9 +47,13 @@ document.querySelector('#run').onclick = async () => {
     const loadStarted = performance.now();
     const zkey = await fetchBytes(data.zkeyUrl);
     const graph = data.graphUrl ? await fetchBytes(data.graphUrl) : Uint8Array.from(atob(fixture.graph), c => c.charCodeAt(0));
+    const parseStarted = performance.now();
     const prover = new wasm.WasmResidentProver(zkey, data.zkeySha256, graph, data.graphSha256);
     result.textContent = 'Proving';
+    const parseMs = performance.now() - parseStarted;
     const loadMs = performance.now() - loadStarted;
+    // Linear memory never shrinks, so its size is the WASM heap high-water mark.
+    const wasmMemoryAfterParseBytes = memory.buffer.byteLength;
     const samples = Number(query.get('samples') || 5);
     check(Number.isInteger(samples) && samples >= 1 && samples <= 30, 'invalid sample count');
     const times = [];
@@ -73,7 +79,8 @@ document.querySelector('#run').onclick = async () => {
     const sorted = [...times].sort((a,b) => a-b);
     const report = { passed: true, mode, threads, crossOriginIsolated, userAgent: navigator.userAgent,
       scenario: query.get('scenario') || 'multiplier', selfVerified: true, publicSignals: publics,
-      loadMs, proofMs: times, medianMs: sorted[Math.floor(sorted.length / 2)],
+      initMs, loadMs, fetchMs: loadMs - parseMs, parseMs, proofMs: times,
+      wasmMemoryAfterParseBytes, wasmMemoryPeakBytes: memory.buffer.byteLength, medianMs: sorted[Math.floor(sorted.length / 2)],
       p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1] };
     result.textContent = JSON.stringify(report, null, 2);
     result.dataset.state = 'passed';

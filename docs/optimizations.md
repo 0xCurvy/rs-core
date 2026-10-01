@@ -58,7 +58,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 
 | Decision (date) | Why not default | Code |
 |---|---|---|
-| `compact-matrix` for Rust, C and WASM (25 Aug – 6 Sep) | Serial compact was 15–17% slower (5 Sep), still ~5% slower at 2 notes after window tuning (6 Sep). Portable WASM: −41 to −101 MiB at −4.5% to +1% time. Threaded-browser and mobile gates outstanding. Default only in Node | `crates/prover/Cargo.toml`, `bindings/ffi/Cargo.toml`, `scripts/build-wasm.sh --compact-matrix` |
+| `compact-matrix` for Rust, C and WASM (25 Aug – 6 Sep) | Serial compact was 15–17% slower (5 Sep), still ~5% slower at 2 notes after window tuning (6 Sep). Browser (1 Oct): peak RSS only −5 to −7% in threaded and portable builds, portable +5.8% slower at 2 notes; below the 15% memory bar (benchmarks 6.4). Mobile gate outstanding. Default only in Node | `crates/prover/Cargo.toml`, `bindings/ffi/Cargo.toml`, `scripts/build-wasm.sh --compact-matrix` |
 | `zkey-single-pass` forward parser (prototype) | Since 7 Sep (audit L4) it sits behind `AuthenticatedReader`, so it no longer saves an I/O pass; requires the Groth16 header before the query sections. Old timings are stale | `crates/prover/src/zkey.rs` (`read_zkey_sequential`) |
 | `scratch` retained witness/FFT/MSM-scalar buffers (5 Sep) | 10 notes: +3.5% latency, +29 MiB. MSM buckets and arkworks FFT temporaries are not pooled | `crates/prover/src/workspace.rs`, `crates/witness/src/workspace.rs` |
 | SAGE for resident proving and compiled caches (5 Sep) | −22% RSS and 27 ms warm load, but adds a derived artifact with its own trusted pin and cache lifecycle | `crates/witness/src/sage.rs`, `ResidentProver::with_sage` / `from_compiled_sage` |

@@ -5,7 +5,8 @@
 // `threaded` proves with crates/prover/pkg-web-threads (scripts/build.sh
 // wasm-web-threads) on two Rayon workers; `portable` proves with
 // crates/prover/pkg-web (scripts/build.sh wasm-web). With no argument both run,
-// so both packages must already be built.
+// so both packages must already be built. CURVY_BROWSER_PKG_WEB and
+// CURVY_BROWSER_PKG_WEB_THREADS substitute other prover package directories.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { request } from 'node:http';
