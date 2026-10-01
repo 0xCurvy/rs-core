@@ -223,10 +223,12 @@ Ongoing evidence:
   account-side work. The WASM release workflow is still
   `.github/workflows/release.yml.disabled`; native Node and crates.io releases are
   manual.
-- The Windows x64 Node binary is cross-compiled and never executed in CI or the
-  release container; smoke-test it on Windows before publishing.
-- Native Node CI covers Linux x64 only. The SIGNET generator smoke
-  (`crates/signet/scripts/smoke-generator.sh`, needs `circom`) is not in CI.
+- CI builds and tests the Node binding natively on Linux x64 and Windows x64,
+  but the published Windows binary is cross-compiled with cargo-xwin and never
+  executed in CI or the release container; smoke-test it on Windows before
+  publishing. macOS Node builds are not covered by CI.
+- The SIGNET generator smoke (`crates/signet/scripts/smoke-generator.sh`, needs
+  `circom`) is not in CI.
 - SPARROW and SAGE are opt-in and less stable than the resident path; run their
   feature-specific native, WASM and browser gates before distribution.
 - Low-level APIs (`read_zkey`, `StreamingProofBuilder`, raw WASM framing,
