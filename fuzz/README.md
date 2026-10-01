@@ -9,9 +9,15 @@ CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build
 CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run graph -- -max_total_time=120 -timeout=10 -rss_limit_mb=1024 -max_len=65536
 CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run sage -- -max_total_time=120 -timeout=10 -rss_limit_mb=1024 -max_len=65536
 CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run prover_formats -- -max_total_time=180 -timeout=10 -rss_limit_mb=1024 -max_len=65536
+CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run input_json -- -max_total_time=120 -timeout=10 -rss_limit_mb=1024 -max_len=65536
 ```
 
-Graph/SAGE targets cap nodes, signals, input mappings, buffers, compressed bytes, and decompression windows. The proving-format target caps bytes and selects WTNS, zkey, or manifest parsing with its first byte. Seeds include valid formats and the saved noncanonical-G2 reproducer. Default cargo-fuzz enables AddressSanitizer, overflow checks, and debug assertions. These short runs are regression coverage, not exhaustive evidence of parser correctness.
+Graph/SAGE targets cap nodes, signals, input mappings, buffers, compressed bytes, and decompression windows. `graph` builds both evaluators from every input and asserts they accept the same artifacts and produce the same assignment, directly and through a `WitnessWorkspace` reused across runs, and that the compiled SAGE program round-trips. `sage` reads raw and zstd-compressed programs (a compressed program's source pin is recovered from the decompressed header) and asserts that accepted programs re-encode canonically.
 
-`input_json` fuzzes the streaming JSON/decimal boundary using a fixed authenticated
-multiplier graph. Run it with the same sanitizer and byte/time limits above.
+The proving-format target caps bytes and selects a parser with its first byte modulo 5: WTNS, zkey, a mutated manifest over the fixture key, the one-pass resident parsers (`read_zkey_sequential`, `Prover::from_zkey_reader` with `zkey-single-pass`, and a manifest generated from the mutated key), or SPARROW streaming proofs over the mutated key (seekable and manifest-fed). Seeds include valid formats for each branch and the saved noncanonical-G2 reproducer. The compact and nested matrix backends are a compile-time choice (`compact-matrix`), so this build fuzzes only the compact one. Default cargo-fuzz enables AddressSanitizer, overflow checks, and debug assertions. These short runs are regression coverage, not exhaustive evidence of parser correctness.
+
+`input_json` fuzzes the streaming JSON/decimal boundary against the authenticated
+multiplier graph and a built-in graph with scalar, one- and two-dimensional array
+inputs. It asserts that errors never repeat an object input or a planted
+`PRIVATE` sentinel outside an echoed signal name, and that echoed names stay within
+128 bytes. Run it with the same sanitizer and byte/time limits above.

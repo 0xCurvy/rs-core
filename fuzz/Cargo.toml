@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-curvy-prover = { path = "../crates/prover", features = ["compact-matrix", "zkey-manifest"] }
+curvy-prover = { path = "../crates/prover", features = ["compact-matrix", "zkey-manifest", "zkey-single-pass", "sparrow"] }
 curvy-witness = { path = "../crates/witness", features = ["sage", "signet-v2"] }
 sha2 = "=0.11.0"
 
