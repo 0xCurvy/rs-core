@@ -40,7 +40,9 @@ secure, cross-origin-isolated page and top-level Web Workers.
 Copy `crates/prover/js/mobile-harness.config.example.json` and add one profile
 per circuit. Paths may be absolute or relative to the configuration file. Each
 profile must provide pinned SHA-256 values for its graph, zkey, manifest, and
-input.
+input. A profile may also set `sageProgramSha256`, the trusted digest of the
+SAGE program derived from its graph; leave it `null` to recompile on every run
+(see [SAGE cache behavior](#sage-cache-behavior)).
 
 Keep the initial matrix small. A medium circuit and the largest supported client
 circuit are usually enough to reveal initialization overhead, peak-memory risk,
@@ -128,17 +130,48 @@ size and worker count. Record the failure as a process-limit result rather than
 discarding it. Browser JavaScript does not expose a reliable cross-platform peak
 process-memory counter.
 
+## Artifact reads
+
+The runner reads the manifest, input, and source graph from Cache API under
+fixed size ceilings that mirror the Rust limits: 4 MiB for a manifest, 16 MiB
+for input JSON, and 64 MiB (client) or 96 MiB (batch) for a SIGNET graph. A
+declared or streamed length above the ceiling is rejected before it is
+buffered. The manifest and input are checked against their pinned digests, and
+the graph is authenticated by SIGNET. A cached copy that fails its check is
+evicted and fetched once from the harness server; a network copy is stored only
+after it passes. The zkey is never buffered: every chunk is authenticated
+against the pinned manifest before Rust parses it.
+
 ## SAGE cache behavior
 
-On a cold run, the harness authenticates the source SIGNET graph, compiles it,
-serializes the SAGE program, hashes it, releases the compiler instance, reloads
-the bytes through the validated decoder, and stores them in Cache API.
+The derived SAGE cache is used only for profiles with a trusted
+`sageProgramSha256`. Hashing a cache entry and using that hash as its own pin
+does not authenticate it, so without a pin the harness compiles the
+authenticated SIGNET graph on every run and neither reads nor writes the derived
+entry. Such runs report `sageCacheStored: false` and `sageProgramPinned: false`.
 
-On a warm run, it hashes the cached program and Rust validates the program
-digest, embedded source digest, format, dimensions, indices, and exact length.
-Any failure evicts the entry and recompiles from the authenticated source graph.
-The cache digest detects local storage corruption; the pinned SIGNET digest
-remains the deployment trust anchor.
+Obtain the pin from the trusted artifact pipeline, not from the device being
+measured. `derive_sage_cache` prints it as `program_sha256`:
+
+```bash
+cargo run -p curvy-prover --features sage --example derive_sage_cache -- \
+  path/to/circuit.signet SOURCE_SIGNET_SHA256 target/circuit.sage batch
+```
+
+The digest is specific to the source graph and the SAGE compiler version
+(`sageCacheVersion()`); regenerate it when either changes. A wrong pin fails
+the run rather than falling back.
+
+On a cold pinned run, the harness authenticates the source SIGNET graph,
+compiles it, serializes the SAGE program, checks it against the pin, releases
+the compiler instance, reloads the bytes through the validated decoder, and
+stores them in Cache API.
+
+On a warm pinned run, it hashes the cached program and Rust validates the
+program digest, embedded source digest, format, dimensions, indices, and exact
+length. Any failure evicts the entry and recompiles from the authenticated
+source graph. The cache digest detects local storage corruption; the pinned
+SIGNET and program digests remain the deployment trust anchors.
 
 First use has a higher transient memory requirement because compilation and
 serialization overlap briefly. Test one profile at a time when device quota or
@@ -153,7 +186,7 @@ Retain these fields with each result:
 - browser, OS, device, and architecture;
 - portable or threaded runtime;
 - worker count, window bits, MSM chunk points, and manifest chunk bytes;
-- cache hit or miss;
+- SAGE program pin status and cache hit or miss;
 - module import, WASM initialization, Rayon initialization, SAGE startup, and
   proof timings; and
 - proof self-verification status.

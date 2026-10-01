@@ -144,7 +144,10 @@ pinned per-chunk manifest and feeds one `Cache.match()` response body without
 calling `arrayBuffer()`; the original whole-digest/two-response protocol remains
 available. On first use, the browser compiles the authenticated SIGNET graph to
 `SAGEPC01`, round-trip validates it, and stores it as origin-local derived data.
-Warm runs authenticate and load that cache instead of repeating slot allocation.
+Warm runs authenticate and load that cache instead of repeating slot allocation,
+but only when the host supplies a trusted `expectedSageProgramSha256`. Without
+one, every run recompiles and the derived entry is neither read nor written
+(the result reports `cacheStored: false` and `programPinned: false`).
 The source graph digest remains the trust anchor; the derived entry is versioned
 by compiler semantics and is evicted if its metadata, digest, source binding, or
 decoder validation fails.

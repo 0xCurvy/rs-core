@@ -154,7 +154,8 @@ and using its own hash as the expected digest does not authenticate it. The
 source digest inside a compiled blob also does not prove correct compilation.
 Publish program digests through the trusted artifact channel. The JavaScript
 adapter accepts `expectedSageProgramSha256`; without it, it recompiles the
-authenticated source graph each session instead of reading compiled cache entries.
+authenticated source graph each session and neither reads nor writes the derived
+entry.
 Delete and rebuild an entry after any digest, metadata, format, dimension, index,
 or source-binding failure.
 
@@ -198,6 +199,20 @@ For one proof on a memory-constrained host, use the one-shot WASM methods. They
 release the compiled SAGE program after successful witness calculation so its
 allocation can be reused by the QAP and MSM phases. Invalid input leaves the
 prover reusable.
+
+`WasmStreamingProver` also exposes recovery for interrupted streams:
+
+- `abortProof()` clears an active proof after a failed or aborted stream; it is
+  idempotent;
+- `resetZkeyAuthentication()` restarts whole-file authentication from byte 0
+  and is refused while a proof is active;
+- a failed `finishZkeyAuthentication()` recreates the authenticator, so the
+  caller can retry; and
+- after an aborted one-shot proof the graph has been released, so construct a
+  new prover.
+
+The read-only `zkeyAuthenticated`, `proofActive`, and `graphReleased` getters
+report that state.
 
 For repeated proofs of the same circuit, keep the validated SAGE evaluator and
 use the reusable path. Release the instance when the circuit or account session

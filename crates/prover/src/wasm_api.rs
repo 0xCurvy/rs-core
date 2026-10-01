@@ -169,6 +169,11 @@ impl WasmResidentProver {
 /// response through the checked browser adapter, then frame its headers.
 /// Raw framing methods require pre-authenticated bytes; a final digest alone
 /// does not prevent malformed input from reaching arithmetic or allocations.
+///
+/// A failed digest check restarts the authentication pass, and
+/// `resetZkeyAuthentication` discards a partial one. A failed proof stream
+/// must call `abortProof` before the next begin; a reusable prover can then
+/// prove again, while a one-shot begin has already released its graph.
 #[cfg(feature = "sparrow")]
 #[wasm_bindgen]
 pub struct WasmStreamingProver {
@@ -351,48 +356,98 @@ impl WasmStreamingProver {
     pub fn compiled_sage_program(&self) -> Result<Vec<u8>, JsError> {
         self.prover
             .as_ref()
-            .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+            .ok_or_else(|| JsError::new(GRAPH_RELEASED))?
             .compiled_sage_bytes()
             .map_err(js_error)
+    }
+
+    /// Whether a whole-file zkey authentication pass has completed and has not
+    /// been reset since.
+    #[wasm_bindgen(getter, js_name = zkeyAuthenticated)]
+    pub fn zkey_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
+    /// Whether a framed or manifest-authenticated proof is in progress.
+    #[wasm_bindgen(getter, js_name = proofActive)]
+    pub fn proof_active(&self) -> bool {
+        self.proof.is_some() || self.manifest_proof.is_some()
+    }
+
+    /// Whether a one-shot proof has released the compiled SAGE graph. A
+    /// released prover cannot begin another proof; construct a new one.
+    #[wasm_bindgen(getter, js_name = graphReleased)]
+    pub fn graph_released(&self) -> bool {
+        self.prover.is_none()
     }
 
     #[wasm_bindgen(js_name = authenticateZkeyChunk)]
     pub fn authenticate_zkey_chunk(&mut self, bytes: &[u8]) -> Result<(), JsError> {
         self.authenticator
             .as_mut()
-            .ok_or_else(|| JsError::new("zkey authentication pass is already complete"))?
+            .ok_or_else(|| JsError::new(AUTHENTICATION_COMPLETE))?
             .update(bytes)
             .map_err(js_error)
     }
 
+    /// Finish the whole-file authentication pass. On a digest mismatch the
+    /// pass restarts: feed the complete zkey again from byte 0.
     #[wasm_bindgen(js_name = finishZkeyAuthentication)]
     pub fn finish_zkey_authentication(&mut self) -> Result<u64, JsError> {
-        let bytes = self
+        let authenticator = self
             .authenticator
             .take()
-            .ok_or_else(|| JsError::new("zkey authentication pass is already complete"))?
-            .finish()
-            .map_err(js_error)?;
-        self.authenticated = true;
-        self.authenticated_bytes = bytes;
-        Ok(bytes)
+            .ok_or_else(|| JsError::new(AUTHENTICATION_COMPLETE))?;
+        match authenticator.finish() {
+            Ok(bytes) => {
+                self.authenticated = true;
+                self.authenticated_bytes = bytes;
+                Ok(bytes)
+            }
+            Err(error) => {
+                self.authenticator = Some(self.fresh_authenticator()?);
+                Err(JsError::new(&format!(
+                    "{error}; zkey authentication restarted, feed the zkey again from byte 0"
+                )))
+            }
+        }
+    }
+
+    /// Discard a partial or completed whole-file authentication pass so the
+    /// zkey can be authenticated again from byte 0. Refused while a proof is
+    /// active; abort it first.
+    #[wasm_bindgen(js_name = resetZkeyAuthentication)]
+    pub fn reset_zkey_authentication(&mut self) -> Result<(), JsError> {
+        if self.proof_active() {
+            return Err(JsError::new(
+                "cannot reset zkey authentication while a SPARROW proof is active; call abortProof first",
+            ));
+        }
+        self.authenticator = Some(self.fresh_authenticator()?);
+        self.authenticated = false;
+        self.authenticated_bytes = 0;
+        Ok(())
+    }
+
+    /// Drop any active framed or manifest-authenticated proof. Idempotent.
+    ///
+    /// A reusable prover can begin another proof afterwards. A one-shot begin
+    /// has already released the SAGE graph, so after aborting it every begin
+    /// method reports that release; construct a new prover to retry.
+    #[wasm_bindgen(js_name = abortProof)]
+    pub fn abort_proof(&mut self) {
+        self.proof = None;
+        self.manifest_proof = None;
     }
 
     #[wasm_bindgen(js_name = beginProof)]
     pub fn begin_proof(&mut self, input_json: String) -> Result<(), JsError> {
         let input_json = Zeroizing::new(input_json);
-        if !self.authenticated {
-            return Err(JsError::new(
-                "authenticate the zkey before beginning a proof",
-            ));
-        }
-        if self.proof.is_some() || self.manifest_proof.is_some() {
-            return Err(JsError::new("a SPARROW proof is already active"));
-        }
+        self.check_can_begin(true)?;
         let assignment = self
             .prover
             .as_ref()
-            .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+            .ok_or_else(|| JsError::new(GRAPH_RELEASED))?
             .calculate_witness_json(&input_json)
             .map_err(js_error)?;
         self.install_proof(assignment)
@@ -404,23 +459,39 @@ impl WasmStreamingProver {
     #[wasm_bindgen(js_name = beginOneShotProof)]
     pub fn begin_one_shot_proof(&mut self, input_json: String) -> Result<(), JsError> {
         let input_json = Zeroizing::new(input_json);
-        if !self.authenticated {
-            return Err(JsError::new(
-                "authenticate the zkey before beginning a proof",
-            ));
-        }
-        if self.proof.is_some() || self.manifest_proof.is_some() {
-            return Err(JsError::new("a SPARROW proof is already active"));
-        }
+        self.check_can_begin(true)?;
         let proof = build_then_release(&mut self.prover, |prover| {
             let assignment = prover.calculate_witness_json(&input_json)?;
             StreamingProofBuilder::new(assignment, &self.expected_zkey_sha256, self.config)
                 .map(|proof| proof.with_authenticated_length(self.authenticated_bytes))
         })
-        .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+        .ok_or_else(|| JsError::new(GRAPH_RELEASED))?
         .map_err(js_error)?;
         self.proof = Some(proof);
         Ok(())
+    }
+
+    /// Begin-time preconditions, ordered so a released one-shot graph is
+    /// always reported as such rather than as a missing authentication.
+    fn check_can_begin(&self, requires_authentication: bool) -> Result<(), JsError> {
+        if self.proof_active() {
+            return Err(JsError::new(
+                "a SPARROW proof is already active; finish it or call abortProof",
+            ));
+        }
+        if self.prover.is_none() {
+            return Err(JsError::new(GRAPH_RELEASED));
+        }
+        if requires_authentication && !self.authenticated {
+            return Err(JsError::new(
+                "authenticate the zkey before beginning a proof",
+            ));
+        }
+        Ok(())
+    }
+
+    fn fresh_authenticator(&self) -> Result<StreamingAuthenticator, JsError> {
+        StreamingAuthenticator::new(&self.expected_zkey_sha256).map_err(js_error)
     }
 
     fn install_proof(&mut self, assignment: Vec<Fr>) -> Result<(), JsError> {
@@ -442,9 +513,7 @@ impl WasmStreamingProver {
         expected_manifest_sha256: &str,
     ) -> Result<(), JsError> {
         let input_json = Zeroizing::new(input_json);
-        if self.proof.is_some() || self.manifest_proof.is_some() {
-            return Err(JsError::new("a SPARROW proof is already active"));
-        }
+        self.check_can_begin(false)?;
         let manifest = ZkeyChunkManifest::from_bytes(
             manifest_bytes,
             expected_manifest_sha256,
@@ -455,7 +524,7 @@ impl WasmStreamingProver {
             let assignment = prover.calculate_witness_json(&input_json)?;
             ManifestProofStream::new(assignment, manifest, self.config)
         })
-        .ok_or_else(|| JsError::new("the one-shot SAGE graph has already been released"))?
+        .ok_or_else(|| JsError::new(GRAPH_RELEASED))?
         .map_err(js_error)?;
         self.manifest_proof = Some(manifest_proof);
         Ok(())
@@ -518,6 +587,13 @@ fn proof_mut(prover: &mut WasmStreamingProver) -> Result<&mut StreamingProofBuil
         .as_mut()
         .ok_or_else(|| JsError::new("no SPARROW proof is active"))
 }
+
+#[cfg(feature = "sparrow")]
+const GRAPH_RELEASED: &str =
+    "the one-shot SAGE graph has already been released; construct a new WasmStreamingProver";
+
+#[cfg(feature = "sparrow")]
+const AUTHENTICATION_COMPLETE: &str = "zkey authentication pass is already complete; call resetZkeyAuthentication to authenticate again";
 
 #[cfg(feature = "sparrow")]
 fn js_error(error: impl std::fmt::Display) -> JsError {

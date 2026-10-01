@@ -398,9 +398,11 @@ async function refreshCacheStatus() {
     profile.sourceGraphSha256,
     profile.batchProfile,
   );
-  const sageStatus = sage
-    ? `derived SAGE cached (${formatBytes(sage.bytes)})`
-    : "derived SAGE compiles on first run";
+  const sageStatus = !profile.sageProgramSha256
+    ? "no SAGE program pin; SAGE compiles on every run"
+    : sage
+      ? `derived SAGE cached (${formatBytes(sage.bytes)})`
+      : "derived SAGE compiles on first run";
   elements["progress-detail"].textContent =
     `${cachedCount}/${artifacts.length} source artifacts cached ` +
     `(${formatBytes(cachedBytes)} / ${formatBytes(totalArtifactBytes(profile))}); ${sageStatus}`;

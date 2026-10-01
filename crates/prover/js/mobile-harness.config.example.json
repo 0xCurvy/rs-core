@@ -18,6 +18,7 @@
         "file": "/absolute/path/to/circuit.signet.zst",
         "sha256": "SOURCE_SIGNET_SHA256"
       },
+      "sageProgramSha256": null,
       "input": {
         "file": "/absolute/path/to/input.json",
         "sha256": "INPUT_SHA256"

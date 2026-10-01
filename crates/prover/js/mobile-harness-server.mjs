@@ -210,6 +210,11 @@ async function prepareConfig(config) {
       publicProfile.artifacts[kind] = { url, size: metadata.size, sha256 };
     }
     publicProfile.sourceGraphSha256 = publicProfile.artifacts.graph.sha256;
+    // Optional trusted digest of the derived SAGE program for this graph,
+    // compiler version, and limits profile. Without it every run recompiles.
+    publicProfile.sageProgramSha256 = profile.sageProgramSha256 == null
+      ? null
+      : normalizedHash(profile.sageProgramSha256, `${profile.id}.sageProgramSha256`);
     if (profile.sourceGraphSha256 !== undefined) {
       const legacySourceHash = normalizedHash(
         profile.sourceGraphSha256,

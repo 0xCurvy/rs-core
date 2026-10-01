@@ -1,8 +1,8 @@
 import {
+  ARTIFACT_BYTE_LIMITS,
   cachedArtifactBytes,
   loadOrCompileStreamingProver,
   proveCachedZkeyOnePass,
-  sha256Hex,
 } from "./sparrow-cache-api.mjs";
 
 const PHASE_TIMEOUTS = {
@@ -32,14 +32,19 @@ export async function runProof({
   if (!(await cache.match(zkeyRequest))) {
     throw new Error("zkey is not cached; use Cache source artifacts before running a proof");
   }
-  const manifestBytes = await cachedArtifactBytes(cache, profile.artifacts.manifest.url);
-  const inputBytes = await cachedArtifactBytes(cache, profile.artifacts.input.url);
-  const inputSha256 = await sha256Hex(inputBytes);
-  if (inputSha256 !== profile.artifacts.input.sha256) {
-    throw new Error(
-      `input digest mismatch: expected ${profile.artifacts.input.sha256}, got ${inputSha256}`,
-    );
-  }
+  // Pinned reads evict a cached copy that fails its digest and refetch it once.
+  const onArtifactStatus = (message) => onProgress("artifacts", message);
+  const manifestBytes = await cachedArtifactBytes(cache, profile.artifacts.manifest.url, {
+    maxBytes: ARTIFACT_BYTE_LIMITS.manifest,
+    expectedSha256: profile.artifacts.manifest.sha256,
+    onStatus: onArtifactStatus,
+  });
+  const inputBytes = await cachedArtifactBytes(cache, profile.artifacts.input.url, {
+    maxBytes: ARTIFACT_BYTE_LIMITS.inputJson,
+    expectedSha256: profile.artifacts.input.sha256,
+    onStatus: onArtifactStatus,
+  });
+  const inputSha256 = profile.artifacts.input.sha256;
   const inputJson = new TextDecoder("utf-8", { fatal: true }).decode(inputBytes);
   const artifactReadMs = performance.now() - artifactStarted;
   throwIfStopped(shouldStop);
@@ -52,6 +57,8 @@ export async function runProof({
     graphUrl: profile.artifacts.graph.url,
     expectedSourceGraphSha256: profile.sourceGraphSha256,
     expectedZkeySha256: profile.artifacts.zkey.sha256,
+    // Without a trusted program pin the derived cache is neither read nor written.
+    expectedSageProgramSha256: profile.sageProgramSha256 ?? null,
     batchProfile: profile.batchProfile,
     windowBits: settings.windowBits,
     msmChunkPoints: settings.msmChunkPoints,
@@ -116,6 +123,7 @@ export async function runProof({
     reusedRuntime: reused,
     sageCacheHit: sage.cacheHit,
     sageCacheStored: sage.cacheStored,
+    sageProgramPinned: sage.programPinned,
     sageCacheWriteError: sage.cacheWriteError ?? null,
     sageCompilerVersion: sage.compilerVersion,
     sageProgramBytes: sage.programBytes,
