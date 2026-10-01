@@ -93,6 +93,32 @@ jobs:
       - run: npm test
         working-directory: bindings/node
 
+  # Builds and tests the binding natively on Apple Silicon, as
+  # scripts/build-node-release.mjs does for the shipped darwin-arm64 artifact
+  # (same target and deployment floor).
+  node-native-macos:
+    name: Node-API binding (macOS arm64, Node 22)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: bindings/node
+      - run: npm run build -- --target aarch64-apple-darwin -- --locked
+        working-directory: bindings/node
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      - run: npm test
+        working-directory: bindings/node
+
   # Formatting, generated-table, documentation, dependency-policy, artifact
   # tooling, native release build and publish checks. The feature-set test and
   # clippy commands run in parallel in the rust-checks matrix below.
@@ -391,3 +417,58 @@ jobs:
       # the corpus the compact run above just grew.
       - name: Exercise the nested zkey matrix parser
         run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run --no-default-features prover_formats -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
+
+  # crates/signet/generator is its own workspace, so nothing above compiles it.
+  # Drive the whole graph pipeline (circom -> generator -> graph.bin -> signet
+  # export -> evaluator round trip) on a three-signal circuit. Only the root
+  # workspace target is cached: the generator's build script does not track
+  # WITNESS_CPP (see build-graph.sh), so its target starts empty every run.
+  signet-generator:
+    name: SIGNET generator smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+      # circom v2.2.3: the tag's commit, built with circom's own Cargo.lock.
+      # rust-cache keeps ~/.cargo/bin, so warm runs skip the build.
+      - run: cargo install --locked --git https://github.com/iden3/circom --rev ad44e915a12bb047b05745c2884aad9cc8326bc6 circom
+      - run: test "$(circom --version)" = "circom compiler 2.2.3"
+      - run: crates/signet/scripts/smoke-generator.sh
+      # The smoke builds without --locked; a drifted lockfile would mean it
+      # tested something other than the pinned generator.
+      - run: git diff --exit-code -- Cargo.lock crates/signet/generator/Cargo.lock
+
+  # Lints every workflow, including the disabled release workflow, with pinned
+  # actionlint and shellcheck release binaries checked against their SHA-256.
+  actionlint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install actionlint and shellcheck
+        working-directory: ${{ runner.temp }}
+        run: |
+          actionlint_archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}"
+          echo "${ACTIONLINT_SHA256}  ${actionlint_archive}" | sha256sum --check --strict
+          tar -xzf "$actionlint_archive" actionlint
+          shellcheck_archive="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${shellcheck_archive}"
+          echo "${SHELLCHECK_SHA256}  ${shellcheck_archive}" | sha256sum --check --strict
+          tar -xJf "$shellcheck_archive" --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+      - name: Lint workflows
+        run: |
+          lint=("$RUNNER_TEMP/actionlint" -shellcheck "$RUNNER_TEMP/shellcheck")
+          "${lint[@]}" .github/workflows/*.yml
+          # The glob skips the disabled release workflow; lint it under its own name.
+          # shellcheck disable=SC2094 # -stdin-filename only labels messages
+          "${lint[@]}" -stdin-filename .github/workflows/release.yml.disabled - < .github/workflows/release.yml.disabled

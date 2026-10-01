@@ -446,8 +446,9 @@ cross-origin isolation.
   oracles. Change one only together with a documented upstream reference change.
 - Four crates are published: `curvy-core`, `curvy-witness`, `curvy-prover` and
   `curvy-wasm`. The SIGNET producer, bindings, benchmarks and debug CLI are not
-  crates.io packages. `crates/signet/generator` is outside the workspace; after
-  changing it, run `crates/signet/scripts/smoke-generator.sh` (needs `circom`).
+  crates.io packages. `crates/signet/generator` is outside the workspace; CI
+  runs `crates/signet/scripts/smoke-generator.sh` (needs `circom`), and you can
+  run it locally after changing the generator.
 
 ### Releasing
 
