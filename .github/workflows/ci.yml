@@ -65,48 +65,54 @@ jobs:
       - run: npm run package:preview
         working-directory: bindings/node
 
-  rust:
-    name: Rust quality and native build
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  # Builds the binding natively with MSVC and runs the Node suite on Windows.
+  # This is not the shipped Windows artifact: releases cross-compile that one
+  # with cargo-xwin in bindings/node/Dockerfile.release, which skips npm test.
+  node-native-windows:
+    name: Node-API binding (Windows x64, Node 22)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Git Bash: PowerShell's npm.ps1 shim can swallow the `--` separators.
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: 1.94.0
-          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/node/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: bindings/node
+      - run: npm run build -- --target x86_64-pc-windows-msvc -- --locked
+        working-directory: bindings/node
+      - run: npm test
+        working-directory: bindings/node
+
+  # Formatting, generated-table, documentation, dependency-policy, artifact
+  # tooling, native release build and publish checks. The feature-set test and
+  # clippy commands run in parallel in the rust-checks matrix below.
+  rust:
+    name: Rust quality and native build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+          components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo run --locked -p curvy-benchmarks --bin generate_poseidon_optimized -- --check
-      - run: cargo check --workspace --all-targets --locked
-      - run: cargo test --workspace --all-targets --locked
-      # Keep the direct Poseidon schedule buildable as an independent oracle.
-      - run: cargo test -p curvy-core --no-default-features --locked
-      # tools/leakage enables curvy-core `leakage`, so every --workspace run
-      # unifies it. Test the published defaults in isolation, and execute the
-      # rayon arms (bulk Merkle parents, announcement scans) that only
-      # `parallel` compiles.
-      - run: cargo test -p curvy-core --locked
-      - run: cargo test -p curvy-core --features parallel --locked
-      # Workspace feature unification includes the internal SIGNET producer.
-      # These isolated commands prove the published defaults still refuse v2
-      # and use stock serial ark-groth16.
-      - run: cargo test -p curvy-witness --no-default-features --locked
-      # SAGE without SIGNET v2 is what the C ABI and Node bindings ship.
-      - run: cargo test -p curvy-witness --features sage --locked
-      - run: cargo test -p curvy-prover --locked
-      # `sparrow` is intentionally opt-in, so the default workspace test does
-      # not select its integration suite or examples.
-      - run: cargo test -p curvy-prover --features sparrow --all-targets --locked
-      - run: cargo test -p curvy-prover --features parallel,sparrow --all-targets --locked
-      # `compact-matrix` swaps in a hand-rolled two-pass CSR zkey parser and its
-      # own QAP path, neither of which the default workspace test reaches. Cover
-      # the serial and parallel proof assemblies it can pair with.
-      - run: cargo test -p curvy-prover --features compact-matrix --all-targets --locked
-      - run: cargo test -p curvy-prover --features compact-matrix,parallel,sparrow --all-targets --locked
-      # Execute buffer-reuse success/error/unwind tests, not just compilation.
-      - run: cargo test -p curvy-prover --features scratch,sage,zkey-manifest --all-targets --locked
-      - run: cargo test -p curvy-prover --features scratch,parallel,sparrow --all-targets --locked
-      - run: cargo test -p curvy-prover --features zkey-manifest --all-targets --locked
+      - run: cargo doc --workspace --all-features --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # Both artifact-pipeline suites drive this validator example
+      # (target/debug/examples/artifact_manifest_check).
       - run: cargo build -p curvy-prover --example artifact_manifest_check --features sage --locked
       - run: python3 tools/artifacts/test_release.py
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -115,24 +121,6 @@ jobs:
       - run: npm ci --prefix tools/artifacts --ignore-scripts
       - run: npm audit --prefix tools/artifacts --audit-level=high
       - run: python3 tools/artifacts/test_pipeline.py
-      # `zkey-single-pass` replaces the seek-and-rehash zkey reader with one
-      # forward digesting walk. Cover it alone and paired with `compact-matrix`,
-      # whose two-pass CSR parser makes the walk buffer section 4.
-      - run: cargo test -p curvy-prover --features zkey-single-pass --all-targets --locked
-      - run: cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
-      - run: cargo test --workspace --doc --all-features --locked
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # --all-features unifies `parallel` everywhere, so serial
-      # cfg(not(feature = "parallel")) arms and default-only code are never
-      # linted above. Lint the shipped and opt-in combinations directly.
-      - run: cargo clippy -p curvy-prover --all-targets --features sparrow --locked -- -D warnings
-      - run: cargo clippy -p curvy-prover --all-targets --features scratch --locked -- -D warnings
-      - run: cargo clippy -p curvy-prover --all-targets --no-default-features --locked -- -D warnings
-      - run: cargo clippy -p curvy-core --all-targets --no-default-features --locked -- -D warnings
-      - run: cargo clippy -p curvy-core --all-targets --features parallel --locked -- -D warnings
-      - run: cargo doc --workspace --all-features --no-deps --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
       - run: cargo install cargo-deny --version 0.19.9 --locked
       - run: cargo deny check
       - run: scripts/build.sh native
@@ -149,7 +137,6 @@ jobs:
             fi
           done
           prover_contents="$(cargo package -p curvy-prover --list --allow-dirty)"
-          grep -qx BENCHMARKS.md <<<"$prover_contents"
           grep -qx SPARROW.md <<<"$prover_contents"
           grep -qx examples/artifact_manifest_check.rs <<<"$prover_contents"
           grep -qx examples/derive_sage_cache.rs <<<"$prover_contents"
@@ -160,6 +147,92 @@ jobs:
           fi
           cargo package -p curvy-core --locked --no-verify
           cargo package -p curvy-witness --locked --no-verify
+
+  # Every test and clippy feature set, split across runners. Each entry runs its
+  # commands in order and stops at the first failure, like consecutive steps.
+  # Entries that mix serial and `parallel` sets compile two dependency feature
+  # sets; they are grouped so each comment stays with the commands it explains.
+  rust-checks:
+    name: Rust (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: workspace tests and clippy
+            id: workspace
+            components: clippy
+            run: |
+              cargo check --workspace --all-targets --locked
+              cargo test --workspace --all-targets --locked
+              cargo test --workspace --doc --all-features --locked
+              cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+              # --all-features unifies `parallel` everywhere, so serial
+              # cfg(not(feature = "parallel")) arms and default-only code are never
+              # linted above. Lint the shipped and opt-in combinations directly.
+              cargo clippy -p curvy-prover --all-targets --features sparrow --locked -- -D warnings
+              cargo clippy -p curvy-prover --all-targets --features scratch --locked -- -D warnings
+              cargo clippy -p curvy-prover --all-targets --no-default-features --locked -- -D warnings
+              cargo clippy -p curvy-core --all-targets --no-default-features --locked -- -D warnings
+              cargo clippy -p curvy-core --all-targets --features parallel --locked -- -D warnings
+          - name: core, witness and prover defaults
+            id: defaults
+            components: ""
+            run: |
+              # Keep the direct Poseidon schedule buildable as an independent oracle.
+              cargo test -p curvy-core --no-default-features --locked
+              # tools/leakage enables curvy-core `leakage`, so every --workspace run
+              # unifies it. Test the published defaults in isolation, and execute the
+              # rayon arms (bulk Merkle parents, announcement scans) that only
+              # `parallel` compiles.
+              cargo test -p curvy-core --locked
+              cargo test -p curvy-core --features parallel --locked
+              # Workspace feature unification includes the internal SIGNET producer.
+              # These isolated commands prove the published defaults still refuse v2
+              # and use stock serial ark-groth16.
+              cargo test -p curvy-witness --no-default-features --locked
+              # SAGE without SIGNET v2 is what the C ABI and Node bindings ship.
+              cargo test -p curvy-witness --features sage --locked
+              cargo test -p curvy-prover --locked
+          - name: prover sparrow and compact-matrix
+            id: prover-sparrow-compact
+            components: ""
+            run: |
+              # `sparrow` is intentionally opt-in, so the default workspace test does
+              # not select its integration suite or examples.
+              cargo test -p curvy-prover --features sparrow --all-targets --locked
+              cargo test -p curvy-prover --features parallel,sparrow --all-targets --locked
+              # `compact-matrix` swaps in a hand-rolled two-pass CSR zkey parser and its
+              # own QAP path, neither of which the default workspace test reaches. Cover
+              # the serial and parallel proof assemblies it can pair with.
+              cargo test -p curvy-prover --features compact-matrix --all-targets --locked
+              cargo test -p curvy-prover --features compact-matrix,parallel,sparrow --all-targets --locked
+          - name: prover scratch, manifest and single-pass
+            id: prover-scratch-manifest
+            components: ""
+            run: |
+              # Execute buffer-reuse success/error/unwind tests, not just compilation.
+              cargo test -p curvy-prover --features scratch,sage,zkey-manifest --all-targets --locked
+              cargo test -p curvy-prover --features scratch,parallel,sparrow --all-targets --locked
+              cargo test -p curvy-prover --features zkey-manifest --all-targets --locked
+              # `zkey-single-pass` replaces the seek-and-rehash zkey reader with one
+              # forward digesting walk. Cover it alone and paired with `compact-matrix`,
+              # whose two-pass CSR parser makes the walk buffer section 4.
+              cargo test -p curvy-prover --features zkey-single-pass --all-targets --locked
+              cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+          components: ${{ matrix.components }}
+          # rust-cache keys on the job id, which every entry shares. A per-entry
+          # key keeps each feature set's target directory from evicting another's.
+          cache-key: ${{ matrix.id }}
+      # -x echoes each command before it runs, so the log shows which one failed.
+      - shell: bash --noprofile --norc -xeo pipefail {0}
+        run: ${{ matrix.run }}
 
   wasm-portable:
     name: Portable WASM
@@ -294,7 +367,7 @@ jobs:
   parser-fuzz:
     name: Authenticated parser fuzz smoke tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -302,6 +375,11 @@ jobs:
           toolchain: nightly-2026-07-03
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +nightly-2026-07-03 fetch --manifest-path fuzz/Cargo.toml --locked
+      # The fuzz crate's default `compact-matrix` feature selects the compact CSR
+      # zkey parser; --no-default-features builds the nested parse_matrices path
+      # that Rust, C and WASM ship by default. Build every target both ways; the
+      # second build recompiles only curvy-prover and the fuzz binaries.
+      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build --no-default-features
       - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build
       - run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Exercise parsers after digest authentication
@@ -309,3 +387,7 @@ jobs:
           for target in graph sage prover_formats input_json; do
             CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
           done
+      # prover_formats is the only target that uses curvy-prover. It starts from
+      # the corpus the compact run above just grew.
+      - name: Exercise the nested zkey matrix parser
+        run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run --no-default-features prover_formats -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536

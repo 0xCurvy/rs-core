@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+// The loader is exercised as if on Linux, so join POSIX paths on every host.
+import { join } from "node:path/posix";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 const source = readFileSync(new URL("../index.js", import.meta.url), "utf8");

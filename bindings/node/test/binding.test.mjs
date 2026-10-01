@@ -163,7 +163,7 @@ test("rejects oversized artifact files before authentication or whole-file alloc
       assert.throws(() => new binding.ResidentProver(oversized), error);
       await assert.rejects(binding.ResidentProver.create(oversized), error);
     }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
 test("SAGE and manifest loading produce verified proofs", async () => {
@@ -406,5 +406,5 @@ test("zkey file size is bounded before hashing", async () => {
     assert.throws(() => new binding.ResidentProver({
       zkeyPath: path, zkeySha256, witnessGraphPath: zkeyPath, witnessGraphSha256: zkeySha256,
     }), /byte limit/);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 3 }); }
 });
