@@ -456,6 +456,65 @@ Optimized Poseidon tables (25 Aug): portable WASM raw −301,986 B (−11.8%), b
 gzip 942,085 -> 1,173,605 B (+24.6%). Accepted: ~1.12 MiB compressed versus
 the ~5 MB Go artifact it replaces.
 
+### 6.5 Serial build on Curvy's proof path (1 Oct 2026)
+
+The default serial build (no `parallel`, no `compact-matrix`: default native
+Rust, the C FFI, portable and Node WASM) switched from stock ark-groth16 to
+Curvy's proof assembly with batch-affine MSMs and `serial_window_bits`. Before =
+`07a4aff`, after = the change; every proof self-verified and matched
+`expectedPublics`. Native: `curvy-native-prover` default features, 1 thread, 9
+ABBA rounds. Browser: Chromium 143.0.7499.4, `scripts/build-wasm.sh web`, 7 ABBA
+rounds × (1 warm-up + 3 proofs); all 21 paired rounds were faster. Host load
+4–15.
+
+| Notes | Native proof ms | Native peak RSS MiB | Browser proof ms | Browser parse ms | Browser peak RSS MiB |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 1,808.7 -> 1,523.4 (−15.8%) | 298.8 -> 241.5 (−19.2%) | 4,643.4 -> 3,989.7 (−14.1%) | 1,196.0 -> 1,207.9 | 777.9 -> 777.5 |
+| 5 | 2,448.5 -> 1,998.1 (−18.4%) | 420.5 -> 324.9 (−22.7%) | 6,477.2 -> 5,194.3 (−19.8%) | 1,716.7 -> 1,713.4 | 968.2 -> 967.3 |
+| 10 | 4,610.3 -> 3,587.5 (−22.2%) | 743.8 -> 565.8 (−23.9%) | 12,162.9 -> 9,407.6 (−22.7%) | 3,022.3 -> 3,036.4 | 1,421.1 -> 1,421.9 |
+
+Browser memory does not move because the WASM heap peaks during authenticated
+parse. Portable prover module 804,300 -> 780,221 B raw (−3.0%), gzip 279,797 ->
+274,864 B. Serial window check (fixed widths for queries ≥ 4,096 points vs the
+policy's 14/14/15 bits, 5 rounds): 13 bits −5.1% / −1.0% / +5.1%, 12 bits
+−1.3% / +1.9% / +11.9%, 15 bits +8.5% at 2 notes; no width wins on all three,
+so `serial_window_bits` is unchanged (noise ≈ 2%).
+
+### 6.6 Threaded WASM after batch-affine (1 Oct 2026)
+
+`build-wasm.sh web --threads`, 4 workers, `c620a33` (pre-batch-affine) vs the
+current tree, 7 ABBA rounds × (1 warm-up + 5 proofs); every paired round faster.
+
+| Notes | Before ms | After ms | Change | Peak RSS MiB |
+|---:|---:|---:|---:|---:|
+| 2 | 1,490.0 | 1,065.3 | −28.5% | 788.8 -> 791.3 |
+| 5 | 2,123.8 | 1,457.9 | −31.4% | 980.8 -> 981.3 |
+| 10 | 3,855.4 | 2,837.1 | −26.4% | 1,433.4 -> 1,434.2 |
+
+Parse time and WASM heap unchanged. Threaded module 901,617 -> 936,440 B raw.
+
+### 6.7 SPARROW browser window width (1 Oct 2026)
+
+`tools/browser/sparrow-window.html` (one-pass manifest proofs, 65,536-point
+chunks as in `StreamingConfig::default`, SIGNET v1 graphs compiled to SAGE,
+1 MiB-chunk manifests). 6 rounds of a fresh browser per mode and circuit,
+widths rotated in-page: 12 proofs per width. Threaded = 4 workers.
+
+| Mode | Notes | w11 | w12 | w13 (default) | w14 |
+|---|---:|---:|---:|---:|---:|
+| portable | 2 | 4,154.8 (+3.0%) | 4,017.7 (−0.4%) | 4,032.0 | 4,252.5 (+5.5%) |
+| portable | 5 | 5,677.0 (+6.5%) | 5,486.8 (+2.9%) | 5,331.2 | 5,511.3 (+3.4%) |
+| portable | 10 | 11,121.4 (+8.2%) | 10,668.7 (+3.8%) | 10,283.0 | 10,137.6 (−1.4%) |
+| threaded | 2 | 1,295.8 (+0.3%) | 1,312.4 (+1.5%) | 1,292.5 | 1,381.0 (+6.8%) |
+| threaded | 5 | 1,810.4 (+2.9%) | 1,790.0 (+1.7%) | 1,759.6 | 1,799.8 (+2.3%) |
+| threaded | 10 | 3,459.1 (+6.8%) | 3,423.3 (+5.7%) | 3,238.7 | 3,249.3 (+0.3%) |
+
+**Conclusion.** No width beats 13 by ≥3% in either mode, so the browser default
+stays 13 bits (unlike native, where 12 won: browsers stream 65,536-point
+chunks, not 524,288). WASM heap peak 85.6 / 90.1 / 121.1 MiB portable, 93.0 /
+96.2 / 129.2 MiB threaded; persistent G2 buckets 3.3 / 6.1 / 11.1 / 21.2 MB for
+w11–w14.
+
 ### Re-run
 
 ```sh
@@ -708,8 +767,9 @@ times unchanged within noise):
 | 10 | parallel | 5,182.4 -> 3,696.1 (−28.7%) | 739.5 -> 609.7 (−17.6%) |
 | 10 | compact-matrix,parallel | 5,136.9 -> 3,684.3 (−28.3%) | 746.8 -> 607.5 (−18.7%) |
 
-`CURVY_PROVER_NUM_THREADS` selects the pool size (default 1). Builds without
-`parallel` or `compact-matrix` use stock ark-groth16 and are unaffected.
+`CURVY_PROVER_NUM_THREADS` selects the pool size (default 1). At the time of
+this run, builds without `parallel` or `compact-matrix` still used stock
+ark-groth16; they now use the same path (6.5).
 
 **Real-key window check.** The table above was first tuned on synthetic
 scalars, which put 65,537–524,288 points at 13 bits. Production witnesses have

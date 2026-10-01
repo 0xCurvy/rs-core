@@ -7,7 +7,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const port = Number(process.env.PORT || 8127);
 const artifactFile = process.argv[2];
 const cases = artifactFile ? JSON.parse(await readFile(artifactFile, 'utf8')) : [];
-const artifacts = new Map(cases.flatMap(c => [[c.zkeyUrl, c.zkeyPath], [c.graphUrl, c.graphPath]]));
+// A case may also name a zkey chunk manifest (manifestUrl/manifestPath) for the
+// SPARROW pages.
+const artifacts = new Map(cases.flatMap(c => [[c.zkeyUrl, c.zkeyPath], [c.graphUrl, c.graphPath],
+  ...(c.manifestUrl ? [[c.manifestUrl, c.manifestPath]] : [])]));
 // The page always imports the prover from these URLs. CURVY_BROWSER_PKG_WEB and
 // CURVY_BROWSER_PKG_WEB_THREADS serve a prover package directory built
 // elsewhere (scripts/build-wasm.sh with CURVY_WASM_OUT_DIR) in their place.
@@ -16,6 +19,7 @@ const sources = await Promise.all([
   ['/crates/prover/pkg-web-threads/', process.env.CURVY_BROWSER_PKG_WEB_THREADS || resolve(root, 'crates/prover/pkg-web-threads')],
   ['/tools/browser/', resolve(root, 'tools/browser')],
   ['/crates/prover/testdata/', resolve(root, 'crates/prover/testdata')],
+  ['/crates/prover/js/', resolve(root, 'crates/prover/js')],
 ].map(async ([prefix, dir]) => [prefix, await realpath(resolve(dir)).catch(() => resolve(dir))]));
 const types = {'.html':'text/html', '.js':'text/javascript', '.mjs':'text/javascript', '.wasm':'application/wasm', '.json':'application/json'};
 export const server = http.createServer(async (request, response) => {
@@ -34,7 +38,7 @@ export const server = http.createServer(async (request, response) => {
     if (pathname === '/crates/prover/pkg-web-threads/') pathname += 'curvy_prover.js';
     if (pathname === '/benchmark/config.json') {
       response.setHeader('Content-Type', 'application/json');
-      response.end(JSON.stringify(cases.map(({zkeyPath, graphPath, ...config}) => config)));
+      response.end(JSON.stringify(cases.map(({zkeyPath, graphPath, manifestPath, ...config}) => config)));
       return;
     }
     let path;

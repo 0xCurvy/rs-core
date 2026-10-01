@@ -48,3 +48,15 @@ CURVY_BROWSER_BUILDS="nested=threaded:out-a/prover/pkg-web-threads,compact=threa
 the measured proofs per run and the threaded worker count. The output records
 each served prover's SHA-256 and a per-circuit summary with medians and changes
 relative to the first build.
+
+`node tools/browser/sparrow-window.mjs output.json 2,5,10` sweeps fixed
+SPARROW MSM window widths in Chromium (`sparrow-window.html`). Point
+`CURVY_BROWSER_PKG_WEB` and `CURVY_BROWSER_PKG_WEB_THREADS` at
+`scripts/build-wasm.sh web --sparrow` and `web --threads --sparrow` prover
+packages, and give each case in `CURVY_BROWSER_ARTIFACTS` a 1 MiB-chunk
+manifest from the `zkey_chunk_manifest` example as `manifestUrl`,
+`manifestPath` and `manifestSha256`. Each run is a fresh browser per mode and
+circuit with one warm-up and `CURVY_BROWSER_SAMPLES` one-pass manifest proofs
+per width in `CURVY_SPARROW_WIDTHS` (default `11,12,13,14`), rotated so every
+width sees each position equally often; `CURVY_SPARROW_CHUNK` sets the MSM
+chunk (default 65,536 points, the browser default).
