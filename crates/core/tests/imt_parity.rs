@@ -2,6 +2,9 @@
 //! witness is proven equal to the flat IMT proof, so the same `@zk-kit` proofs are
 //! the oracle for both.
 
+// The unpinned `verify_proof` stays covered until it is removed.
+#![allow(deprecated)]
+
 use curvy_core::field::{Fr, fr_from_dec, fr_to_dec};
 use curvy_core::imt::{Imt, sharded_root, sharded_witness, verify_proof, verify_proof_at_depth};
 use serde::Deserialize;

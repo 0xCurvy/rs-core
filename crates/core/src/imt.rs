@@ -878,7 +878,16 @@ impl IndexedMerkleTree {
 /// so a truncated proof whose `leaf` is really an internal node, or a
 /// zero-sibling proof with `leaf == root`, verifies. Untrusted proofs against a
 /// known tree must use [`verify_proof_at_depth`].
+#[deprecated(
+    since = "0.1.0-rc.6",
+    note = "does not pin the tree depth; use verify_proof_at_depth"
+)]
 pub fn verify_proof(proof: &InclusionProof) -> bool {
+    verify_path(proof)
+}
+
+/// Hashes the proof path to the root without checking its length.
+fn verify_path(proof: &InclusionProof) -> bool {
     let mut node = proof.leaf;
     let mut idx = proof.index;
     for &sib in &proof.siblings {
@@ -894,10 +903,11 @@ pub fn verify_proof(proof: &InclusionProof) -> bool {
 
 /// Verify an inclusion proof for a depth-`depth` tree: the proof must carry
 /// exactly `depth` siblings (one per level), `depth` must be a constructible
-/// tree depth, and the proof must then pass [`verify_proof`]. Pinning the depth
-/// rejects internal-node and zero-sibling `leaf == root` proofs.
+/// tree depth, and the path must then hash to `root` with `index` fully
+/// consumed. Pinning the depth rejects internal-node and zero-sibling
+/// `leaf == root` proofs.
 pub fn verify_proof_at_depth(proof: &InclusionProof, depth: usize) -> bool {
-    tree_capacity(depth).is_ok() && proof.siblings.len() == depth && verify_proof(proof)
+    tree_capacity(depth).is_ok() && proof.siblings.len() == depth && verify_path(proof)
 }
 
 // ── stateful sharded tree (bounded live shard + mutable cap) ────────────────
@@ -1838,6 +1848,8 @@ pub fn sharded_witness(
 }
 
 #[cfg(test)]
+// The unpinned `verify_proof` stays covered until it is removed.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::field::fr_from_dec;

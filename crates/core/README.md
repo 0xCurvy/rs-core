@@ -114,7 +114,7 @@ rejected as a key and skipped as a scan announcement. `send_with_r` requires
 `r` as a canonical decimal in `[1, p)` of the BN254 scalar field. Legacy
 witness builders reject a stored public key that does not match the seed.
 
-`imt::verify_proof` trusts the proof's sibling count; verify untrusted proofs
+`imt::verify_proof` (deprecated) trusts the proof's sibling count; verify proofs
 against a known tree with `imt::verify_proof_at_depth`, which also rejects
 truncated internal-node and zero-sibling proofs.
 
