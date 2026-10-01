@@ -23,6 +23,7 @@ document.querySelector('#run').onclick = async () => {
     check(['threaded', 'portable'].includes(mode), 'unknown mode');
     check(crossOriginIsolated, 'cross-origin isolation is required');
     const wasm = await import(`/crates/prover/pkg-web${mode === 'threaded' ? '-threads' : ''}/curvy_prover.js`);
+    check((typeof wasm.initThreadPool === 'function') === (mode === 'threaded'), `${mode} mode loaded the wrong package build`);
     result.textContent = 'Initializing WASM';
     await wasm.default();
     const threads = mode === 'threaded' ? Number(query.get('threads') || 2) : 1;

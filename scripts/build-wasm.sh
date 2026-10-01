@@ -102,19 +102,27 @@ case "$binding_target" in
     ;;
 esac
 
-prover_features="curvy-prover/std,curvy-prover/wasm"
+# Opt-in features shared by the portable and threaded builds. `bench` and
+# `sparrow` are cumulative supersets (see crates/prover/Cargo.toml), so only the
+# widest requested one is passed.
+optional_features=""
 if [ "$bench_mode" = "--bench" ]; then
-  prover_features+=",curvy-prover/bench"
+  optional_features+=",curvy-prover/bench"
 elif [ "$sparrow_mode" = "--sparrow" ]; then
-  prover_features+=",curvy-prover/sparrow"
+  optional_features+=",curvy-prover/sparrow"
 elif [ "$signet_v2_mode" = "--signet-v2" ]; then
-  prover_features+=",curvy-prover/signet-v2"
+  optional_features+=",curvy-prover/signet-v2"
 fi
 if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
-  prover_features+=",curvy-prover/compact-matrix"
+  optional_features+=",curvy-prover/compact-matrix"
 fi
 if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
-  prover_features+=",curvy-wasm/poseidon-optimized"
+  optional_features+=",curvy-wasm/poseidon-optimized"
+fi
+if [ "$thread_mode" = "--threads" ]; then
+  prover_features="curvy-wasm/wasm-threads,curvy-prover/std,curvy-prover/wasm-threads${optional_features}"
+else
+  prover_features="curvy-prover/std,curvy-prover/wasm${optional_features}"
 fi
 
 case "$thread_mode" in
@@ -140,20 +148,6 @@ case "$thread_mode" in
     rust_flags+=' -C link-arg=--export=__heap_base -C link-arg=--export=__data_end'
     rust_flags+=' -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size'
     rust_flags+=' -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base'
-    prover_features="curvy-wasm/wasm-threads,curvy-prover/std,curvy-prover/wasm-threads"
-    if [ "$bench_mode" = "--bench" ]; then
-      prover_features+=",curvy-prover/bench"
-    elif [ "$sparrow_mode" = "--sparrow" ]; then
-      prover_features+=",curvy-prover/sparrow"
-    elif [ "$signet_v2_mode" = "--signet-v2" ]; then
-      prover_features+=",curvy-prover/signet-v2"
-    fi
-    if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
-      prover_features+=",curvy-prover/compact-matrix"
-    fi
-    if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
-      prover_features+=",curvy-wasm/poseidon-optimized"
-    fi
     CARGO_PROFILE_RELEASE_LTO="$wasm_release_lto" \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$wasm_release_codegen_units" \
     RUSTFLAGS="$rust_flags" cargo +"$thread_toolchain" build --locked --release \
@@ -214,20 +208,34 @@ if [ "$binding_target" = "nodejs" ]; then
   printf '{\n  "name": "@curvy/prover-wasm-node",\n  "type": "commonjs",\n  "main": "curvy_prover.js",\n  "types": "curvy_prover.d.ts"\n}\n' > "$prover_output/package.json"
 fi
 
-if [ "$sparrow_mode" = "--sparrow" ]; then
-  sparrow_status="enabled"
+# Report what the feature string actually enables, not which flags were typed:
+# curvy-prover `bench` implies `sparrow`, which implies `signet-v2`, `sage`, and
+# `zkey-manifest`.
+has_feature() {
+  case ",$prover_features," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+feature_status() {
+  if "$@"; then echo enabled; else echo disabled; fi
+}
+has_bench() { has_feature curvy-prover/bench; }
+has_sparrow() { has_bench || has_feature curvy-prover/sparrow; }
+has_signet_v2() { has_sparrow || has_feature curvy-prover/signet-v2; }
+bench_status="$(feature_status has_bench)"
+sparrow_status="$(feature_status has_sparrow)"
+sage_status="$sparrow_status"
+signet_v2_status="$(feature_status has_signet_v2)"
+compact_matrix_status="$(feature_status has_feature curvy-prover/compact-matrix)"
+threads_status="$(feature_status has_feature curvy-wasm/wasm-threads)"
+# curvy-wasm depends on curvy-core with its default features, which include
+# `poseidon-optimized`; no flag here can disable it. The flag only makes it
+# explicit in the feature list.
+if has_feature curvy-wasm/poseidon-optimized; then
+  poseidon_optimized_status="enabled-explicit"
 else
-  sparrow_status="disabled"
+  poseidon_optimized_status="enabled-default"
 fi
-if [ "$sparrow_mode" = "--sparrow" ] || [ "$signet_v2_mode" = "--signet-v2" ]; then
-  signet_v2_status="enabled"
-else
-  signet_v2_status="disabled"
-fi
-if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
-  compact_matrix_status="enabled"
-else
-  compact_matrix_status="disabled"
-fi
-poseidon_optimized_status="enabled-default"
-echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, compact-matrix=$compact_matrix_status, poseidon-optimized=$poseidon_optimized_status)"
+echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, poseidon-optimized=$poseidon_optimized_status)"
+echo "cargo features: $prover_features"

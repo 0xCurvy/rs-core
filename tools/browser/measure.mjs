@@ -9,7 +9,7 @@ import {chromium} from 'playwright';
 const exec = promisify(execFile);
 const [output, scenarios = '2'] = process.argv.slice(2);
 const report = {platform:os.platform(), architecture:os.arch(), warmup:1,
-  buildProfile:process.env.CURVY_BROWSER_BUILD_PROFILE || 'portable default / threaded compact',
+  buildProfile:process.env.CURVY_BROWSER_BUILD_PROFILE || 'portable release / threaded release (scripts/build.sh wasm-web, wasm-web-threads)',
   rssMethod:'50 ms samples of summed RSS for this isolated Chromium process tree; shared pages are counted per process, so this is not unique physical memory', runs:[]};
 for (const scenario of scenarios.split(',')) {
   for (const mode of (process.env.CURVY_BROWSER_MODES || 'portable,threaded').split(',')) {

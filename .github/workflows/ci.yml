@@ -68,7 +68,7 @@ jobs:
   rust:
     name: Rust quality and native build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -81,10 +81,18 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       # Keep the direct Poseidon schedule buildable as an independent oracle.
       - run: cargo test -p curvy-core --no-default-features --locked
+      # tools/leakage enables curvy-core `leakage`, so every --workspace run
+      # unifies it. Test the published defaults in isolation, and execute the
+      # rayon arms (bulk Merkle parents, announcement scans) that only
+      # `parallel` compiles.
+      - run: cargo test -p curvy-core --locked
+      - run: cargo test -p curvy-core --features parallel --locked
       # Workspace feature unification includes the internal SIGNET producer.
       # These isolated commands prove the published defaults still refuse v2
       # and use stock serial ark-groth16.
       - run: cargo test -p curvy-witness --no-default-features --locked
+      # SAGE without SIGNET v2 is what the C ABI and Node bindings ship.
+      - run: cargo test -p curvy-witness --features sage --locked
       - run: cargo test -p curvy-prover --locked
       # `sparrow` is intentionally opt-in, so the default workspace test does
       # not select its integration suite or examples.
@@ -114,6 +122,14 @@ jobs:
       - run: cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
       - run: cargo test --workspace --doc --all-features --locked
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # --all-features unifies `parallel` everywhere, so serial
+      # cfg(not(feature = "parallel")) arms and default-only code are never
+      # linted above. Lint the shipped and opt-in combinations directly.
+      - run: cargo clippy -p curvy-prover --all-targets --features sparrow --locked -- -D warnings
+      - run: cargo clippy -p curvy-prover --all-targets --features scratch --locked -- -D warnings
+      - run: cargo clippy -p curvy-prover --all-targets --no-default-features --locked -- -D warnings
+      - run: cargo clippy -p curvy-core --all-targets --no-default-features --locked -- -D warnings
+      - run: cargo clippy -p curvy-core --all-targets --features parallel --locked -- -D warnings
       - run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
@@ -165,32 +181,66 @@ jobs:
       - name: Check production prover bindings exclude SPARROW and SAGE
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmResidentProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
+      # Run a real self-verified Groth16 proof through each Node build, not just
+      # an export check: pinned fixture, publicSignals ["33"], VK digest equal
+      # to the snarkjs export, and a corrupted key refused.
+      - run: node tools/browser/node-proof-check.mjs
       - run: node crates/prover/js/signet-v2-cross-target.cjs --expect-v2-disabled
       - run: scripts/build-wasm.sh nodejs --signet-v2
       - name: Check standalone SIGNET v2 bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
+      - run: node tools/browser/node-proof-check.mjs
       - run: node crates/prover/js/signet-v2-cross-target.cjs
       - run: scripts/build-wasm.sh nodejs --sparrow
       - name: Check opt-in SPARROW and SAGE bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); const streaming = wasm.WasmStreamingProver; if (typeof wasm.WasmResidentProver !== "function" || typeof streaming !== "function" || typeof wasm.sageCacheVersion !== "function" || typeof streaming.fromSignetWithConfig !== "function" || typeof streaming.prototype.compiledSageProgram !== "function" || wasm.benchSha256 !== undefined) process.exit(1)'
-      - run: scripts/build.sh wasm-web
+      - run: node tools/browser/node-proof-check.mjs
+      # The browser package (scripts/build.sh wasm-web) is built and proved by
+      # the wasm-browser job below.
       - run: scripts/build.sh wasm-bundler
 
-  wasm-threaded:
-    name: Threaded WASM
+  # Build every browser configuration that ships in @0xcurvy/rs-core-wasm with
+  # the exact release command (release.yml.disabled, scripts/build.sh npm) and
+  # prove with it in Chromium and Firefox. compact-matrix is an opt-in variant
+  # kept proven alongside.
+  wasm-browser:
+    name: Browser WASM proof (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: threaded release
+            toolchain: nightly-2026-07-03
+            components: rust-src
+            build: scripts/build.sh wasm-web-threads
+            mode: threaded
+            artifact: wasm-web-threads
+            artifact-dir: pkg-web-threads
+          - name: threaded compact-matrix
+            toolchain: nightly-2026-07-03
+            components: rust-src
+            build: scripts/build-wasm.sh web --threads --compact-matrix
+            mode: threaded
+          - name: portable release
+            toolchain: 1.94.0
+            components: ""
+            build: scripts/build.sh wasm-web
+            mode: portable
+            artifact: wasm-web
+            artifact-dir: pkg-web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: nightly-2026-07-03
-          components: rust-src
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.components }}
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - run: scripts/build-wasm.sh web --threads --compact-matrix
+      - run: ${{ matrix.build }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -198,7 +248,48 @@ jobs:
           cache-dependency-path: tools/browser/package-lock.json
       - run: npm ci --prefix tools/browser --ignore-scripts
       - run: npx --prefix tools/browser playwright install --with-deps chromium firefox
-      - run: node tools/browser/check.mjs
+      - run: node tools/browser/check.mjs ${{ matrix.mode }}
+      # Hand the proved release builds to the npm-package job.
+      - if: matrix.artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.artifact }}
+          # Both paths live under crates/, so the artifact is rooted there.
+          path: |
+            crates/wasm/${{ matrix.artifact-dir }}
+            crates/prover/${{ matrix.artifact-dir }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # Assemble, pack, install, and smoke-test the npm tarball exactly as the
+  # release workflow does, from the builds proved above. The smoke test runs a
+  # real proof through the packed portable prover entry.
+  npm-package:
+    name: npm package (pack and smoke)
+    needs: wasm-browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wasm-web
+          path: crates
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wasm-web-threads
+          path: crates
+      - run: node scripts/build-npm.mjs --pack
+      - name: Smoke-test the packed tarball
+        run: |
+          install_dir="$(mktemp -d)"
+          cd "$install_dir"
+          npm init -y > /dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/0xcurvy-rs-core-wasm-*.tgz
+          node "$GITHUB_WORKSPACE/scripts/smoke-npm.mjs" "$install_dir"
 
   parser-fuzz:
     name: Authenticated parser fuzz smoke tests
