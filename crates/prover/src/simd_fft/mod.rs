@@ -2,20 +2,21 @@
 //! Fr transforms on a 4-lane simd128 9x29-bit Montgomery multiply. Prototype
 //! from poc/wasm-fft; results are bit-identical to ark-poly (the PoC tests
 //! every size 2^3..2^18 against fft/ifft/coset fft and this exact step;
-//! `simdFftSelfTest` checks `qap::finish_evaluations` in the shipped build).
+//! `simdFftSelfTest` checks `qap::finish_evaluations` in a
+//! `wasm-simd-selftest` build of the shipped code).
 //!
 //! Each NTT is serial. With `parallel`, the three independent transforms
 //! (A, B, C) run concurrently on the host's Rayon pool instead, and only on
 //! pools of at most `MAX_WORKERS` threads: ark-poly's parallel FFT keeps
 //! scaling past three workers, three serial NTTs do not.
-#![allow(clippy::needless_range_loop, dead_code)]
+#![allow(clippy::needless_range_loop)]
 
 mod fr29;
 #[rustfmt::skip]
 #[allow(unused_mut, unused_assignments, clippy::all)]
 mod gen_u29;
 mod ntt;
-#[cfg(feature = "wasm")]
+#[cfg(feature = "wasm-simd-selftest")]
 mod self_test;
 
 use ark_bn254::Fr;

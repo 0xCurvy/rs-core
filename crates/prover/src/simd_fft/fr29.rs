@@ -98,34 +98,3 @@ pub fn raw_to_ark(a: &[u32; 9]) -> Fr {
 pub fn const_from_ark(x: &Fr) -> [u32; 9] {
     mont_mul(&raw_from_ark(x), &TO)
 }
-
-#[inline(always)]
-pub fn add(a: &[u32; 9], b: &[u32; 9]) -> [u32; 9] {
-    let mut s = [0u32; 9];
-    let mut carry = 0u32;
-    for i in 0..9 {
-        let v = a[i] + b[i] + carry;
-        s[i] = v & MASK;
-        carry = v >> W;
-    }
-    sub_if_geq(s, &P2)
-}
-
-#[inline(always)]
-pub fn sub(a: &[u32; 9], b: &[u32; 9]) -> [u32; 9] {
-    let mut d = [0u32; 9];
-    let mut borrow = 0i32;
-    for i in 0..9 {
-        let v = a[i] as i32 - b[i] as i32 + borrow;
-        d[i] = (v as u32) & MASK;
-        borrow = v >> W;
-    }
-    let mask = borrow as u32;
-    let mut carry = 0u32;
-    for i in 0..9 {
-        let v = d[i] + (P2[i] & mask) + carry;
-        d[i] = v & MASK;
-        carry = v >> W;
-    }
-    d
-}

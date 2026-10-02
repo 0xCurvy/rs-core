@@ -13,18 +13,13 @@
 use core::arch::wasm32::*;
 
 pub use crate::msm_simd::gen_u29::{mul4, sqr4};
-use crate::msm_simd::u29x9::{MASK, MU, P, P2, U29x9, W};
+use crate::msm_simd::u29x9::{MASK, P2, U29x9, W};
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct U29x9x4(pub [v128; 9]);
 
 impl U29x9x4 {
-    #[inline(always)]
-    pub fn zero() -> Self {
-        U29x9x4([u32x4_splat(0); 9])
-    }
-
     /// Transpose four elements into limb-sliced form.
     #[inline(always)]
     pub fn pack(e: [&U29x9; 4]) -> Self {
@@ -47,97 +42,6 @@ impl U29x9x4 {
         }
         out
     }
-}
-
-/// Low 32 bits of the four u64 lanes of (lo, hi), as one u32x4.
-#[inline(always)]
-fn narrow(lo: v128, hi: v128) -> v128 {
-    i32x4_shuffle::<0, 2, 4, 6>(lo, hi)
-}
-
-#[inline(always)]
-fn normalize4(lo: &[v128; 9], hi: &[v128; 9]) -> [v128; 9] {
-    let mask64 = u64x2_splat(MASK as u64);
-    let mut out = [u32x4_splat(0); 9];
-    let (mut clo, mut chi) = (u64x2_splat(0), u64x2_splat(0));
-    for j in 0..9 {
-        let vlo = u64x2_add(lo[j], clo);
-        let vhi = u64x2_add(hi[j], chi);
-        clo = u64x2_shr(vlo, W);
-        chi = u64x2_shr(vhi, W);
-        out[j] = narrow(v128_and(vlo, mask64), v128_and(vhi, mask64));
-    }
-    out
-}
-
-/// Loop form (reference for the generated, fully unrolled [`mul4`]).
-#[inline(always)]
-pub fn mul4_ref(a: &[v128; 9], b: &[v128; 9]) -> [v128; 9] {
-    let mu = u32x4_splat(MU);
-    let mask = u32x4_splat(MASK);
-    let mut lo = [u64x2_splat(0); 9];
-    let mut hi = [u64x2_splat(0); 9];
-    for i in 0..9 {
-        let ai = a[i];
-        for j in 0..9 {
-            lo[j] = u64x2_add(lo[j], u64x2_extmul_low_u32x4(ai, b[j]));
-            hi[j] = u64x2_add(hi[j], u64x2_extmul_high_u32x4(ai, b[j]));
-        }
-        let q = v128_and(i32x4_mul(narrow(lo[0], hi[0]), mu), mask);
-        for j in 0..9 {
-            let pj = u32x4_splat(P[j]);
-            lo[j] = u64x2_add(lo[j], u64x2_extmul_low_u32x4(q, pj));
-            hi[j] = u64x2_add(hi[j], u64x2_extmul_high_u32x4(q, pj));
-        }
-        let (clo, chi) = (u64x2_shr(lo[0], W), u64x2_shr(hi[0], W));
-        for j in 0..8 {
-            lo[j] = lo[j + 1];
-            hi[j] = hi[j + 1];
-        }
-        lo[8] = u64x2_splat(0);
-        hi[8] = u64x2_splat(0);
-        lo[0] = u64x2_add(lo[0], clo);
-        hi[0] = u64x2_add(hi[0], chi);
-    }
-    normalize4(&lo, &hi)
-}
-
-/// Loop form (reference for the generated [`sqr4`]).
-#[inline(always)]
-pub fn sqr4_ref(a: &[v128; 9]) -> [v128; 9] {
-    let mu = u32x4_splat(MU);
-    let mask = u32x4_splat(MASK);
-    let mut lo = [u64x2_splat(0); 18];
-    let mut hi = [u64x2_splat(0); 18];
-    for i in 0..9 {
-        for j in (i + 1)..9 {
-            lo[i + j] = u64x2_add(lo[i + j], u64x2_extmul_low_u32x4(a[i], a[j]));
-            hi[i + j] = u64x2_add(hi[i + j], u64x2_extmul_high_u32x4(a[i], a[j]));
-        }
-    }
-    for k in 1..16 {
-        lo[k] = u64x2_shl(lo[k], 1);
-        hi[k] = u64x2_shl(hi[k], 1);
-    }
-    for i in 0..9 {
-        lo[2 * i] = u64x2_add(lo[2 * i], u64x2_extmul_low_u32x4(a[i], a[i]));
-        hi[2 * i] = u64x2_add(hi[2 * i], u64x2_extmul_high_u32x4(a[i], a[i]));
-    }
-    for i in 0..9 {
-        let q = v128_and(i32x4_mul(narrow(lo[i], hi[i]), mu), mask);
-        for j in 0..9 {
-            let pj = u32x4_splat(P[j]);
-            lo[i + j] = u64x2_add(lo[i + j], u64x2_extmul_low_u32x4(q, pj));
-            hi[i + j] = u64x2_add(hi[i + j], u64x2_extmul_high_u32x4(q, pj));
-        }
-        lo[i + 1] = u64x2_add(lo[i + 1], u64x2_shr(lo[i], W));
-        hi[i + 1] = u64x2_add(hi[i + 1], u64x2_shr(hi[i], W));
-    }
-    let mut tlo = [u64x2_splat(0); 9];
-    let mut thi = [u64x2_splat(0); 9];
-    tlo.copy_from_slice(&lo[9..18]);
-    thi.copy_from_slice(&hi[9..18]);
-    normalize4(&tlo, &thi)
 }
 
 /// `a - m` lane-wise where `a >= m`, else `a`; limbs normalized.

@@ -1,8 +1,8 @@
-//! The arithmetic interface shared by every representation, so the MSM kernel
-//! and the benchmarks are written once and instantiated per representation.
+//! The arithmetic interface shared by the kernel's field representations, so
+//! the MSM kernel is written once for G1 (`U29x9`) and G2 (`Fq2Simd`).
 
 use ark_bn254::Fq;
-use ark_ff::{AdditiveGroup, BigInt, Field, PrimeField};
+use ark_ff::{BigInt, Field, PrimeField};
 
 /// A BN254 base-field element in some Montgomery representation.
 ///
@@ -13,7 +13,6 @@ use ark_ff::{AdditiveGroup, BigInt, Field, PrimeField};
 pub trait PocField: Copy + Send + Sync + 'static + core::fmt::Debug {
     /// The arkworks field this represents (`Fq` for G1, `Fq2` for G2).
     type Ark: Field;
-    const NAME: &'static str;
     fn zero() -> Self;
     fn one() -> Self;
     fn from_ark(x: &Self::Ark) -> Self;
@@ -31,69 +30,6 @@ pub trait PocField: Copy + Send + Sync + 'static + core::fmt::Debug {
     #[inline]
     fn inverse(&self) -> Self {
         Self::from_ark(&Field::inverse(&self.to_ark()).expect("non-zero"))
-    }
-}
-
-/// Baseline: arkworks' 4x64-bit Montgomery `Fq`, unchanged (a newtype only so
-/// the trait's method names do not shadow arkworks' own on `Fq`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct Ark(pub Fq);
-
-impl PocField for Ark {
-    type Ark = Fq;
-    const NAME: &'static str = "ark";
-    #[inline(always)]
-    fn zero() -> Self {
-        Ark(Fq::ZERO)
-    }
-    #[inline(always)]
-    fn one() -> Self {
-        Ark(Fq::ONE)
-    }
-    #[inline(always)]
-    fn from_ark(x: &Fq) -> Self {
-        Ark(*x)
-    }
-    #[inline(always)]
-    fn to_ark(&self) -> Fq {
-        self.0
-    }
-    #[inline(always)]
-    fn add(&self, rhs: &Self) -> Self {
-        Ark(self.0 + rhs.0)
-    }
-    #[inline(always)]
-    fn sub(&self, rhs: &Self) -> Self {
-        Ark(self.0 - rhs.0)
-    }
-    #[inline(always)]
-    fn double(&self) -> Self {
-        Ark(AdditiveGroup::double(&self.0))
-    }
-    #[inline(always)]
-    fn neg(&self) -> Self {
-        Ark(-self.0)
-    }
-    #[inline(always)]
-    fn mul(&self, rhs: &Self) -> Self {
-        Ark(self.0 * rhs.0)
-    }
-    #[inline(always)]
-    fn square(&self) -> Self {
-        Ark(Field::square(&self.0))
-    }
-    #[inline(always)]
-    fn is_zero(&self) -> bool {
-        self.0 == Fq::ZERO
-    }
-    #[inline(always)]
-    fn equals(&self, rhs: &Self) -> bool {
-        self.0 == rhs.0
-    }
-    #[inline]
-    fn inverse(&self) -> Self {
-        Ark(Field::inverse(&self.0).expect("non-zero"))
     }
 }
 

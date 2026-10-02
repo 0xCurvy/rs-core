@@ -1,7 +1,7 @@
 //! Batch application with four simd128 lanes (WASM only), for any
 //! [`Lanes4`] field: G1 over `U29x9`, G2 over `Fq2Simd`.
 //!
-//! Same contract as `msm::ScalarApply`, so the scheduling (distinct buckets,
+//! Same contract as `msm::AffineBuckets`' batch application, so the scheduling (distinct buckets,
 //! deferral, XYZZ overflow) is untouched. Pending addition `k` runs in lane
 //! `k % 4`: each lane keeps its own Montgomery-trick prefix chain, the four
 //! lane products share one field inversion (plus 9 multiplications to split
@@ -32,8 +32,6 @@ impl<F: Lanes4> Default for SimdApply<F> {
 }
 
 impl<C: SWCurveConfig<BaseField = F::Ark>, F: Lanes4> BatchApply<C, F> for SimdApply<F> {
-    const NAME: &'static str = "simd4";
-
     fn window_sum(buckets: &[Aff<F>], overflow: &[Xyzz<F>]) -> Projective<C> {
         crate::msm_simd::simd_reduce::window_sum::<C, F>(buckets, overflow)
     }

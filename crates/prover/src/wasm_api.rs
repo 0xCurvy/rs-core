@@ -9,32 +9,32 @@ use crate::sparrow::{
     manifest::{ManifestProofStream, ZkeyChunkManifest},
 };
 
-/// Development check for `wasm-simd-msm`: compares the SIMD MSM kernel with
-/// arkworks on random and adversarial G1/G2 inputs. Returns the number of
-/// MSMs compared; throws on the first mismatch.
+/// Development check (`wasm-simd-selftest`) for `wasm-simd-msm`: compares the
+/// SIMD MSM kernel with arkworks on random and adversarial G1/G2 inputs.
+/// Returns the number of MSMs compared; traps on the first mismatch.
 #[cfg(all(
+    feature = "wasm-simd-selftest",
     feature = "wasm-simd-msm",
     target_arch = "wasm32",
-    target_feature = "simd128",
-    not(feature = "parallel")
+    target_feature = "simd128"
 ))]
 #[wasm_bindgen(js_name = simdMsmSelfTest)]
 pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
     crate::msm_simd::self_test::self_test(size as usize, u64::from(seed))
 }
 
-/// Development check for `wasm-simd-msm` with SPARROW: streams zkey-encoded
-/// G1/G2 queries through SPARROW's query accumulator, whose buckets are the
-/// SIMD kernel's in this build, and compares with arkworks on random and
-/// adversarial inputs, widths and chunk sizes. `size` is the adversarial
-/// query size. Returns the number of MSMs compared; throws on the first
-/// mismatch.
+/// Development check (`wasm-simd-selftest`) for `wasm-simd-msm` with SPARROW:
+/// streams zkey-encoded G1/G2 queries through SPARROW's query accumulator,
+/// whose buckets are the SIMD kernel's in this build, and compares with
+/// arkworks on random and adversarial inputs, widths and chunk sizes. `size`
+/// is the adversarial query size. Returns the number of MSMs compared; throws
+/// on the first mismatch.
 #[cfg(all(
+    feature = "wasm-simd-selftest",
     feature = "sparrow",
     feature = "wasm-simd-msm",
     target_arch = "wasm32",
-    target_feature = "simd128",
-    not(feature = "parallel")
+    target_feature = "simd128"
 ))]
 #[wasm_bindgen(js_name = simdSparrowSelfTest)]
 pub fn simd_sparrow_self_test(size: u32, seed: u32) -> Result<u32, JsError> {

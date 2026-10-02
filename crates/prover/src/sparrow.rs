@@ -15,11 +15,10 @@ pub mod manifest;
 #[doc(hidden)]
 pub mod phase_bench;
 #[cfg(all(
-    feature = "wasm",
+    feature = "wasm-simd-selftest",
     feature = "wasm-simd-msm",
     target_arch = "wasm32",
-    target_feature = "simd128",
-    not(feature = "parallel")
+    target_feature = "simd128"
 ))]
 pub(crate) mod simd_self_test;
 

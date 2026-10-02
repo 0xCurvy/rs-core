@@ -12,7 +12,7 @@ use ark_std::rand::{Rng, SeedableRng, rngs::StdRng};
 
 use super::field::PocField;
 use super::fq2::Fq2Simd;
-use super::kernel::{self, BatchApply, Phases, Stats};
+use super::kernel::{self, BatchApply, Stats};
 use super::simd_msm::SimdApply;
 use super::u29x9::U29x9;
 
@@ -24,14 +24,7 @@ where
 {
     let expected = Projective::<C>::msm_bigint(bases, scalars);
     let converted = kernel::convert_bases::<C, F>(bases);
-    let got = kernel::msm::<C, F, A>(
-        &converted,
-        scalars,
-        width,
-        batch,
-        &mut Stats::default(),
-        &mut Phases::default(),
-    );
+    let got = kernel::msm::<C, F, A>(&converted, scalars, width, batch, &mut Stats::default());
     assert_eq!(
         got,
         expected,

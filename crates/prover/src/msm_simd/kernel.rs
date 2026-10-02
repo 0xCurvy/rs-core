@@ -21,9 +21,6 @@ use ark_ec::short_weierstrass::{Affine, Projective, SWCurveConfig};
 use ark_ec::{AdditiveGroup, AffineRepr};
 use ark_ff::{BigInt, PrimeField, Zero};
 
-fn now_ms() -> f64 {
-    0.0
-}
 use crate::msm_simd::field::PocField;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,14 +48,6 @@ impl<F: PocField> Aff<F> {
                 y: F::from_ark(&y),
                 inf: false,
             },
-        }
-    }
-
-    pub fn to_ark<C: SWCurveConfig<BaseField = F::Ark>>(&self) -> Affine<C> {
-        if self.inf {
-            Affine::identity()
-        } else {
-            Affine::new_unchecked(self.x.to_ark(), self.y.to_ark())
         }
     }
 
@@ -232,15 +221,13 @@ pub enum Step {
 pub struct Pending<F> {
     pub bucket: u32,
     pub step: Step,
-    pub prefix: F,
     pub point: Aff<F>,
 }
 
 /// Applies one batch of pending additions (all to distinct buckets) with a
-/// shared inversion. `ScalarApply` is production's algorithm; the WASM build
-/// adds a 4-lane simd128 version for `U29x9` (`simd_msm.rs`).
+/// shared inversion: the 4-lane simd128 `SimdApply` (`simd_msm.rs`), the
+/// same contract as production's `msm::AffineBuckets`.
 pub trait BatchApply<C: SWCurveConfig<BaseField = F::Ark>, F: PocField>: Default {
-    const NAME: &'static str;
     fn apply(
         &mut self,
         buckets: &mut [Aff<F>],
@@ -274,73 +261,13 @@ pub fn scalar_window_sum<F: PocField>(buckets: &[Aff<F>], overflow: &[Xyzz<F>]) 
     sum
 }
 
-#[derive(Default)]
-pub struct ScalarApply;
-
-impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField> BatchApply<C, F> for ScalarApply {
-    const NAME: &'static str = "scalar";
-    fn apply(
-        &mut self,
-        buckets: &mut [Aff<F>],
-        batch: &mut [Pending<F>],
-        state: &mut [u8],
-        stats: &mut Stats,
-    ) {
-        let mut product = F::one();
-        for pending in batch.iter_mut() {
-            let bucket = &buckets[pending.bucket as usize];
-            pending.prefix = product;
-            if !bucket.x.equals(&pending.point.x) {
-                pending.step = Step::Add;
-                product = product.mul(&pending.point.x.sub(&bucket.x));
-            } else if bucket.y.equals(&pending.point.y) && !bucket.y.is_zero() {
-                pending.step = Step::Double;
-                product = product.mul(&bucket.y.double());
-            } else {
-                pending.step = Step::Cancel;
-            }
-        }
-
-        let mut inverse = product.inverse();
-        stats.inversions += 1;
-        for pending in batch.iter().rev() {
-            let index = pending.bucket as usize;
-            if state[index] == SCHEDULED {
-                state[index] = FREE;
-            }
-            let bucket = &mut buckets[index];
-            let point = &pending.point;
-            let (numerator, denominator) = match pending.step {
-                Step::Add => {
-                    stats.adds += 1;
-                    (point.y.sub(&bucket.y), point.x.sub(&bucket.x))
-                }
-                Step::Double => {
-                    stats.doubles += 1;
-                    let square = bucket.x.square();
-                    (square.double().add(&square), bucket.y.double())
-                }
-                Step::Cancel => {
-                    stats.cancels += 1;
-                    *bucket = Aff::identity();
-                    continue;
-                }
-            };
-            let lambda = numerator.mul(&inverse.mul(&pending.prefix));
-            inverse = inverse.mul(&denominator);
-            let x = lambda.square().sub(&bucket.x).sub(&point.x);
-            let y = lambda.mul(&bucket.x.sub(&x)).sub(&bucket.y);
-            *bucket = Aff { x, y, inf: false };
-        }
-    }
-}
-
 pub const FREE: u8 = 0;
 pub const SCHEDULED: u8 = 1;
 const HOT: u8 = 2;
 const MIN_RETRY_BATCH: usize = 8;
 
 /// Same policy as production: `2^(width-1) / 4`, clamped to 32..=1024.
+#[cfg(any(feature = "sparrow", feature = "wasm-simd-selftest"))]
 pub fn batch_size(width: usize) -> usize {
     ((1_usize << (width - 1)) / 4).clamp(32, 1_024)
 }
@@ -354,11 +281,7 @@ pub struct Stats {
     pub overflow_adds: u64,
 }
 
-pub struct AffineBuckets<
-    C: SWCurveConfig<BaseField = F::Ark>,
-    F: PocField,
-    A: BatchApply<C, F> = ScalarApply,
-> {
+pub struct AffineBuckets<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>> {
     buckets: Vec<Aff<F>>,
     overflow: Vec<Xyzz<F>>,
     batch: Vec<Pending<F>>,
@@ -391,6 +314,7 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
 
     /// Fallibly allocate a window's persistent buckets with the production
     /// batch size (SPARROW). Batch scratch grows on demand.
+    #[cfg(feature = "sparrow")]
     pub fn try_new(width: usize) -> Option<Self> {
         debug_assert!(C::COEFF_A.is_zero(), "the formulas assume a = 0");
         let count = 1_usize << (width - 1);
@@ -415,6 +339,7 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
 
     /// Drop the batch scratch, the applier's included, between SPARROW
     /// chunks, so only the buckets stay resident. Call after [`Self::finish`].
+    #[cfg(feature = "sparrow")]
     pub fn release_scratch(&mut self) {
         debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
         self.batch = Vec::new();
@@ -466,7 +391,6 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
         self.batch.push(Pending {
             bucket: bucket as u32,
             step: Step::Add,
-            prefix: F::one(),
             point,
         });
     }
@@ -555,17 +479,6 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
     }
 }
 
-/// Per-phase wall time of one MSM, in ms.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Phases {
-    /// Digit recoding + bucket accumulation (+ the inversions inside it).
-    pub accumulate: f64,
-    /// Running-sum reduction of every window.
-    pub reduce: f64,
-    /// Combining the window sums (arkworks projective arithmetic).
-    pub combine: f64,
-}
-
 /// Signed-window Pippenger, one window at a time (as production's serial
 /// `batch_affine_msm`). Bases must already be in the kernel's representation.
 pub fn msm<C, F, A>(
@@ -574,7 +487,6 @@ pub fn msm<C, F, A>(
     width: usize,
     batch: usize,
     stats: &mut Stats,
-    phases: &mut Phases,
 ) -> Projective<C>
 where
     C: SWCurveConfig<BaseField = F::Ark>,
@@ -588,7 +500,7 @@ where
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let _ = (&stats, &phases);
+        let _ = &stats;
         let sums: Vec<Projective<C>> = (0..windows)
             .into_par_iter()
             .map(|window| {
@@ -612,17 +524,12 @@ where
     #[allow(unreachable_code)]
     let mut sums = Vec::with_capacity(windows);
     for window in 0..windows {
-        let started = now_ms();
         let mut buckets = AffineBuckets::<C, F, A>::with_batch_size(width, batch);
         for (base, scalar) in bases.iter().zip(scalars) {
             buckets.add_digit(signed_window_digit(scalar, width, window), base);
         }
         buckets.finish();
-        let accumulated = now_ms();
         sums.push(buckets.window_sum());
-        let reduced = now_ms();
-        phases.accumulate += accumulated - started;
-        phases.reduce += reduced - accumulated;
         let s = buckets.stats;
         stats.inversions += s.inversions;
         stats.adds += s.adds;
@@ -630,7 +537,6 @@ where
         stats.cancels += s.cancels;
         stats.overflow_adds += s.overflow_adds;
     }
-    let started = now_ms();
     let mut total = Projective::<C>::ZERO;
     for sum in sums.iter().rev() {
         for _ in 0..width {
@@ -638,7 +544,6 @@ where
         }
         total += sum;
     }
-    phases.combine += now_ms() - started;
     total
 }
 
@@ -681,6 +586,7 @@ fn scalar_window(scalar: &BigInt<4>, start_bit: usize, width: usize) -> usize {
 }
 
 /// Convert arkworks bases to the kernel's representation.
+#[cfg(feature = "wasm-simd-selftest")]
 pub fn convert_bases<C: SWCurveConfig<BaseField = F::Ark>, F: PocField>(
     bases: &[Affine<C>],
 ) -> Vec<Aff<F>> {

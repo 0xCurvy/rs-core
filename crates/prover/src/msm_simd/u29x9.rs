@@ -81,80 +81,6 @@ const FROM: [u32; 9] = [
 #[repr(transparent)]
 pub struct U29x9(pub [u32; 9]);
 
-/// Carry-propagate u64 columns into 29-bit limbs. The value must be < 2^261.
-#[inline(always)]
-fn normalize(t: &[u64; 9]) -> [u32; 9] {
-    let mut r = [0u32; 9];
-    let mut carry = 0u64;
-    for j in 0..9 {
-        let v = t[j] + carry;
-        r[j] = (v & MASK64) as u32;
-        carry = v >> W;
-    }
-    debug_assert_eq!(carry, 0);
-    r
-}
-
-/// Loop form of the multiplication (reference; the generated, fully unrolled
-/// [`mont_mul`] is what the field uses).
-#[inline(always)]
-pub fn mont_mul_ref(a: &[u32; 9], b: &[u32; 9]) -> [u32; 9] {
-    let mut b64 = [0u64; 9];
-    for j in 0..9 {
-        b64[j] = b[j] as u64;
-    }
-    let mut t = [0u64; 9];
-    for i in 0..9 {
-        let ai = a[i] as u64;
-        for j in 0..9 {
-            t[j] += ai * b64[j];
-        }
-        let q = ((t[0] as u32).wrapping_mul(MU) & MASK) as u64;
-        for j in 0..9 {
-            t[j] += q * P[j] as u64;
-        }
-        // t[0] is now divisible by 2^29: retire it into t[1] and shift.
-        let carry = t[0] >> W;
-        for j in 0..8 {
-            t[j] = t[j + 1];
-        }
-        t[8] = 0;
-        t[0] += carry;
-    }
-    normalize(&t)
-}
-
-/// Loop form of the squaring (reference for the generated [`mont_sqr`]).
-#[inline(always)]
-pub fn mont_sqr_ref(a: &[u32; 9]) -> [u32; 9] {
-    let mut a64 = [0u64; 9];
-    for j in 0..9 {
-        a64[j] = a[j] as u64;
-    }
-    let mut c = [0u64; 18];
-    for i in 0..9 {
-        for j in (i + 1)..9 {
-            c[i + j] += a64[i] * a64[j];
-        }
-    }
-    for k in 1..16 {
-        c[k] <<= 1;
-    }
-    for i in 0..9 {
-        c[2 * i] += a64[i] * a64[i];
-    }
-    for i in 0..9 {
-        let q = ((c[i] as u32).wrapping_mul(MU) & MASK) as u64;
-        for j in 0..9 {
-            c[i + j] += q * P[j] as u64;
-        }
-        c[i + 1] += c[i] >> W;
-    }
-    let mut t = [0u64; 9];
-    t.copy_from_slice(&c[9..18]);
-    normalize(&t)
-}
-
 /// `a - m` if `a >= m`, else `a` (branchless); limbs normalized.
 #[inline(always)]
 fn sub_if_geq(a: [u32; 9], m: &[u32; 9]) -> [u32; 9] {
@@ -213,7 +139,6 @@ pub fn to_u64x4(a: &[u32; 9]) -> [u64; 4] {
 
 impl PocField for U29x9 {
     type Ark = Fq;
-    const NAME: &'static str = "u29x9";
     #[inline(always)]
     fn zero() -> Self {
         U29x9([0; 9])

@@ -18,9 +18,8 @@
 //! unchanged. Under `parallel` (threaded WASM) windows run on the host's
 //! Rayon pool, as in `msm.rs`.
 
-// Copied from the PoC with its arkworks baselines and alternative layouts
-// (step-1 integration); limb code indexes several arrays in lockstep.
-#![allow(dead_code, clippy::needless_range_loop, clippy::wrong_self_convention)]
+// Limb code indexes several arrays in lockstep.
+#![allow(clippy::needless_range_loop, clippy::wrong_self_convention)]
 
 use std::any::{Any, TypeId};
 
@@ -39,13 +38,13 @@ mod simd_msm;
 mod simd_reduce;
 mod u29x9;
 
-#[cfg(feature = "wasm")]
+#[cfg(feature = "wasm-simd-selftest")]
 pub(crate) mod self_test;
 #[cfg(feature = "sparrow")]
 mod sparrow;
 
 use fq2::Fq2Simd;
-use kernel::{Phases, Stats};
+use kernel::Stats;
 use simd_msm::SimdApply;
 use u29x9::U29x9;
 
@@ -75,7 +74,6 @@ where
             width,
             batch,
             &mut Stats::default(),
-            &mut Phases::default(),
         );
         return Some(*downcast::<_, V>(&sum));
     }
@@ -90,7 +88,6 @@ where
             width,
             batch,
             &mut Stats::default(),
-            &mut Phases::default(),
         );
         return Some(*downcast::<_, V>(&sum));
     }
