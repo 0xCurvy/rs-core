@@ -663,7 +663,15 @@ pub struct ProofBundle {
 }
 
 fn verify_sha256(bytes: &[u8], expected_sha256: &str) -> Result<(), ProverError> {
-    verify_digest(Sha256::digest(bytes).into(), expected_sha256)
+    // Many 1 MiB updates, not one call over the whole artifact: V8 runs a WASM
+    // call to completion in the tier it started in, so a single digest of a
+    // freshly loaded module hashed 90-230 MB zkeys in baseline code, 6x slower
+    // (benchmarks 6.11).
+    let mut hasher = Sha256::new();
+    for chunk in bytes.chunks(1 << 20) {
+        hasher.update(chunk);
+    }
+    verify_digest(hasher.finalize().into(), expected_sha256)
 }
 
 /// SHA-256 over a Groth16 verifying key, in an encoding this crate defines.

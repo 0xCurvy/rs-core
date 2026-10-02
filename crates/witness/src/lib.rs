@@ -1127,7 +1127,14 @@ fn verify_sha256(bytes: &[u8], expected_sha256: &str) -> Result<(), WitnessError
         return Err(WitnessError::InvalidExpectedHash);
     }
     let expected = expected_sha256.to_ascii_lowercase();
-    let actual = Sha256::digest(bytes)
+    // 1 MiB updates, not one call: V8 keeps a long WASM call in the tier it
+    // started in, so one digest on a cold module runs in baseline code.
+    let mut hasher = Sha256::new();
+    for chunk in bytes.chunks(1 << 20) {
+        hasher.update(chunk);
+    }
+    let actual = hasher
+        .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
