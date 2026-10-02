@@ -26,6 +26,11 @@ pub struct ManifestProofStream {
     next_chunk: usize,
     received: u64,
     pending: Vec<u8>,
+    /// Under `parallel`, a complete chunk that is authenticated but not yet
+    /// framed: [`Self::push_complete_chunk`] frames it while it hashes the
+    /// next chunk.
+    #[cfg(feature = "parallel")]
+    authenticated: Option<Vec<u8>>,
     framer: ZkeyFramer,
 }
 
@@ -50,6 +55,8 @@ impl ManifestProofStream {
             next_chunk: 0,
             received: 0,
             pending,
+            #[cfg(feature = "parallel")]
+            authenticated: None,
             framer: ZkeyFramer::new(builder),
         })
     }
@@ -78,11 +85,49 @@ impl ManifestProofStream {
     /// Consume one complete manifest chunk without copying it into the internal
     /// partial-chunk buffer. Browser adapters use this after coalescing arbitrary
     /// `ReadableStream` pieces to the manifest's authenticated boundaries.
+    ///
+    /// Under `parallel` the chunk is hashed on the Rayon pool while the
+    /// previous chunk, already authenticated by the previous call, is framed
+    /// and parsed on the rest of the pool, so SHA-256 leaves the serial path.
+    /// No byte is parsed before its chunk is authenticated, and chunks are
+    /// parsed in order; the last one is parsed by [`Self::finish`].
     pub fn push_complete_chunk(&mut self, bytes: Vec<u8>) -> Result<(), StreamingError> {
+        #[cfg(feature = "parallel")]
+        {
+            self.check_complete_chunk(&bytes)?;
+            let expected = *self
+                .manifest
+                .chunk_hashes
+                .get(self.next_chunk)
+                .ok_or_else(|| StreamingError::InvalidZkey("too many zkey chunks".into()))?;
+            let previous = self.authenticated.take();
+            let framer = &mut self.framer;
+            let (actual, framed) = rayon::join(
+                || -> [u8; HASH_BYTES] { Sha256::digest(&bytes).into() },
+                || {
+                    previous
+                        .as_deref()
+                        .map_or(Ok(()), |chunk| framer.push(chunk))
+                },
+            );
+            framed?;
+            if actual != expected {
+                return Err(StreamingError::ZkeyChunkHashMismatch {
+                    index: self.next_chunk,
+                    expected: hex_digest(expected),
+                    actual: hex_digest(actual),
+                });
+            }
+            self.next_chunk += 1;
+            self.received += bytes.len() as u64;
+            self.authenticated = Some(bytes);
+            Ok(())
+        }
+        #[cfg(not(feature = "parallel"))]
         self.push_complete_chunk_ref(&bytes)
     }
 
-    fn push_complete_chunk_ref(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
+    fn check_complete_chunk(&self, bytes: &[u8]) -> Result<(), StreamingError> {
         if !self.pending.is_empty() {
             return invalid("cannot mix partial and complete manifest chunks");
         }
@@ -95,8 +140,24 @@ impl ManifestProofStream {
         if expected == 0 || bytes.len() != expected {
             return invalid("complete zkey chunk has the wrong size");
         }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    fn push_complete_chunk_ref(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
+        self.check_complete_chunk(bytes)?;
         self.authenticate_chunk(bytes)?;
         self.received += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Parse the chunk [`Self::push_complete_chunk`] authenticated last, so
+    /// that later bytes follow it.
+    fn frame_authenticated(&mut self) -> Result<(), StreamingError> {
+        #[cfg(feature = "parallel")]
+        if let Some(chunk) = self.authenticated.take() {
+            self.framer.push(&chunk)?;
+        }
         Ok(())
     }
 
@@ -104,6 +165,7 @@ impl ManifestProofStream {
         if !self.pending.is_empty() || bytes.is_empty() {
             return invalid("invalid complete zkey chunk batch");
         }
+        self.frame_authenticated()?;
         let remaining = self
             .manifest
             .zkey_bytes
@@ -169,6 +231,7 @@ impl ManifestProofStream {
         if self.next_chunk != self.manifest.chunk_hashes.len() {
             return invalid("zkey chunk count disagrees with manifest size");
         }
+        self.frame_authenticated()?;
         let builder = self.framer.finish()?;
         builder.finish()
     }
@@ -187,6 +250,7 @@ impl ManifestProofStream {
     }
 
     fn authenticate_chunk(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
+        self.frame_authenticated()?;
         let expected = self
             .manifest
             .chunk_hashes

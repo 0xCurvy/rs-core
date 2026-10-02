@@ -15,8 +15,7 @@ use crate::sparrow::{
 #[cfg(all(
     feature = "wasm-simd-msm",
     target_arch = "wasm32",
-    target_feature = "simd128",
-    not(feature = "parallel")
+    target_feature = "simd128"
 ))]
 #[wasm_bindgen(js_name = simdMsmSelfTest)]
 pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
@@ -33,8 +32,7 @@ pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
     feature = "sparrow",
     feature = "wasm-simd-msm",
     target_arch = "wasm32",
-    target_feature = "simd128",
-    not(feature = "parallel")
+    target_feature = "simd128"
 ))]
 #[wasm_bindgen(js_name = simdSparrowSelfTest)]
 pub fn simd_sparrow_self_test(size: u32, seed: u32) -> Result<u32, JsError> {

@@ -247,6 +247,43 @@ fn manifest_advances_across_multiple_chunks_and_batches_authentication() {
         .finish()
         .expect("exact-chunk entry point must produce a proof");
 
+    // Exact chunks then the remainder through the partial-chunk path: under
+    // `parallel` the last exact chunk is still waiting to be parsed and must
+    // precede the partial bytes.
+    let mut mixed = ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
+    mixed
+        .push_complete_chunk(zkey[..64 * 1024].to_vec())
+        .expect("first exact chunk");
+    for chunk in zkey[64 * 1024..].chunks(1_000) {
+        mixed
+            .push(chunk)
+            .expect("partial pushes after an exact chunk");
+    }
+    mixed
+        .finish()
+        .expect("mixed entry points must produce a proof");
+
+    // A corrupted exact chunk is rejected by the push that carries it.
+    for corrupt_chunk in [1, 2] {
+        let mut corrupted = zkey.clone();
+        corrupted[corrupt_chunk * 64 * 1024] ^= 1;
+        let mut stream =
+            ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
+        let mut chunks = corrupted.chunks(64 * 1024);
+        for _ in 0..corrupt_chunk {
+            stream
+                .push_complete_chunk(chunks.next().unwrap().to_vec())
+                .expect("authentic chunk");
+        }
+        let error = stream
+            .push_complete_chunk(chunks.next().unwrap().to_vec())
+            .expect_err("corrupted exact chunk");
+        assert!(matches!(
+            error,
+            StreamingError::ZkeyChunkHashMismatch { index, .. } if index == corrupt_chunk
+        ));
+    }
+
     let mut truncated =
         ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
     truncated
