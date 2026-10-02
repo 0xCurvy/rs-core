@@ -196,6 +196,18 @@ pub fn bench_g2_msm(log_size: u32, window_bits: u32) -> Result<u32, JsError> {
     crate::sparrow::phase_bench::g2_msm(log_size, window_bits as usize).map_err(js_error)
 }
 
+/// Development-only phase spans recorded since the last call, as JSON
+/// `[[name, ms], ...]` in completion order (see `phase_timing`).
+#[cfg(feature = "bench")]
+#[wasm_bindgen(js_name = takePhaseTimings)]
+pub fn take_phase_timings() -> String {
+    let spans: Vec<String> = crate::phase_timing::take()
+        .into_iter()
+        .map(|(name, ms)| format!("[\"{name}\",{ms}]"))
+        .collect();
+    format!("[{}]", spans.join(","))
+}
+
 #[wasm_bindgen]
 pub struct WasmWitnessGraph(curvy_witness::WitnessGraph);
 

@@ -65,6 +65,8 @@
 //! matrix type.
 
 pub mod artifacts;
+#[doc(hidden)]
+pub mod phase_timing;
 #[cfg(all(feature = "bench", feature = "parallel"))]
 pub mod proof_bench;
 pub mod qap;
@@ -98,6 +100,8 @@ mod msm;
 mod msm_simd;
 
 use std::io::{Cursor, Read, Seek};
+
+use phase_timing::phase;
 
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
@@ -190,7 +194,7 @@ impl Prover {
     /// Authenticate and parse one zkey. Hash verification happens before the
     /// unchecked point parser sees any artifact-controlled curve coordinates.
     pub fn from_zkey_bytes(bytes: &[u8], expected_sha256: &str) -> Result<Self, ProverError> {
-        verify_sha256(bytes, expected_sha256)?;
+        phase!("load.sha256", verify_sha256(bytes, expected_sha256))?;
         let mut cursor = Cursor::new(bytes);
         Self::from_authenticated_zkey_reader(&mut cursor)
     }
@@ -272,7 +276,7 @@ impl Prover {
     }
 
     fn from_parsed(pk: ProvingKey<Bn254>, matrices: ZkeyMatrices<Fr>) -> Self {
-        let pvk = prepare_verifying_key(&pk.vk);
+        let pvk = phase!("load.prepare_vk", prepare_verifying_key(&pk.vk));
         let assignment_size = pk.a_query.len();
         Self {
             pk,
@@ -392,15 +396,18 @@ impl Prover {
 
     /// Prove and self-verify one direct arkworks witness assignment.
     pub fn prove_assignment(&self, assignment: &[Fr]) -> Result<ProofBundle, ProverError> {
-        let proof = self.prove(assignment)?;
+        let proof = phase!("proof.prove", self.prove(assignment))?;
         let public_inputs = self.public_inputs(assignment)?;
-        if !self.verify(&proof, public_inputs)? {
+        if !phase!("proof.verify", self.verify(&proof, public_inputs))? {
             return Err(ProverError::SelfVerificationFailed);
         }
-        Ok(ProofBundle {
-            proof_json: proof_to_snarkjs_json(&proof),
-            public_signals_json: publics_to_json(public_inputs),
-        })
+        Ok(phase!(
+            "proof.json",
+            ProofBundle {
+                proof_json: proof_to_snarkjs_json(&proof),
+                public_signals_json: publics_to_json(public_inputs),
+            }
+        ))
     }
 
     fn validate_assignment(&self, full_assignment: &[Fr]) -> Result<(), ProverError> {
@@ -529,9 +536,14 @@ impl ResidentProver {
         expected_graph_sha256: &str,
         limits: curvy_witness::Limits,
     ) -> Result<Self, ProverError> {
-        let prover = Prover::from_zkey_bytes(zkey, expected_zkey_sha256)?;
-        let witness_graph =
-            WitnessGraph::from_bytes_with_limits(witness_graph, expected_graph_sha256, limits)?;
+        let prover = phase!(
+            "load.zkey",
+            Prover::from_zkey_bytes(zkey, expected_zkey_sha256)
+        )?;
+        let witness_graph = phase!(
+            "load.graph",
+            WitnessGraph::from_bytes_with_limits(witness_graph, expected_graph_sha256, limits)
+        )?;
         Self::with_graph(prover, witness_graph)
     }
 
@@ -637,7 +649,10 @@ impl ResidentProver {
     }
 
     pub fn prove_json(&self, input_json: &str) -> Result<ProofBundle, ProverError> {
-        let assignment = zeroize::Zeroizing::new(self.calculate_witness_json(input_json)?);
+        let assignment = zeroize::Zeroizing::new(phase!(
+            "proof.witness",
+            self.calculate_witness_json(input_json)
+        )?);
         self.prove_assignment(&assignment)
     }
 }

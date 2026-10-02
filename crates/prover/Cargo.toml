@@ -115,5 +115,9 @@ name = "derive_sage_cache"
 required-features = ["sage"]
 
 [[example]]
+name = "phase_profile"
+required-features = ["bench"]
+
+[[example]]
 name = "zkey_chunk_manifest"
 required-features = ["zkey-manifest"]

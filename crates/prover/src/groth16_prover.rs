@@ -23,6 +23,7 @@ use ark_relations::utils::matrix::Matrix;
 use rayon::prelude::*;
 
 use crate::msm;
+use crate::phase_timing::phase;
 #[cfg(not(feature = "compact-matrix"))]
 use crate::qap::CircomReduction;
 use crate::qap::WipeOnDrop;
@@ -40,11 +41,14 @@ pub(crate) fn create_proof_with_matrices(
     num_constraints: usize,
     full_assignment: &[Fr],
 ) -> Result<Proof<Bn254>, SynthesisError> {
-    let h = CircomReduction::witness_map_from_matrices::<Fr, GeneralEvaluationDomain<Fr>>(
-        matrices,
-        num_inputs,
-        num_constraints,
-        full_assignment,
+    let h = phase!(
+        "proof.qap",
+        CircomReduction::witness_map_from_matrices::<Fr, GeneralEvaluationDomain<Fr>>(
+            matrices,
+            num_inputs,
+            num_constraints,
+            full_assignment,
+        )
     )?;
 
     create_proof_from_h(pk, r, s, h, num_inputs, full_assignment)
@@ -61,11 +65,14 @@ pub(crate) fn create_proof_with_compact_matrices(
     num_constraints: usize,
     full_assignment: &[Fr],
 ) -> Result<Proof<Bn254>, SynthesisError> {
-    let h = witness_map_from_compact_matrices::<Fr, GeneralEvaluationDomain<Fr>>(
-        matrices,
-        num_inputs,
-        num_constraints,
-        full_assignment,
+    let h = phase!(
+        "proof.qap",
+        witness_map_from_compact_matrices::<Fr, GeneralEvaluationDomain<Fr>>(
+            matrices,
+            num_inputs,
+            num_constraints,
+            full_assignment,
+        )
     )?;
 
     create_proof_from_h(pk, r, s, h, num_inputs, full_assignment)
@@ -81,12 +88,15 @@ fn create_proof_from_h(
 ) -> Result<Proof<Bn254>, SynthesisError> {
     // H and both scalar conversions are derived from the witness, so each is
     // wiped when dropped (best effort; see `WipeOnDrop`).
-    let h_assignment = into_bigints(h);
+    let h_assignment = phase!("proof.scalars", into_bigints(h));
     // Public inputs (except the leading one) followed by private witnesses are
     // exactly `full_assignment[1..]`; retain one conversion for A, B1, B2, and
     // L. The L query starts where the private-witness suffix starts in this
     // shared representation, avoiding a second full copy of those scalars.
-    let assignment = WipeOnDrop(to_bigints(&full_assignment[1..]));
+    let assignment = phase!(
+        "proof.scalars",
+        WipeOnDrop(to_bigints(&full_assignment[1..]))
+    );
     assemble_proof(pk, r, s, &h_assignment, &assignment, num_inputs)
 }
 
@@ -100,12 +110,21 @@ fn assemble_proof(
 ) -> Result<Proof<Bn254>, SynthesisError> {
     let aux_assignment = &assignment[num_inputs.saturating_sub(1)..];
 
-    let h_acc = msm::msm_bigint::<G1Projective>(&pk.h_query, h_assignment);
-    let l_aux_acc = msm::msm_bigint::<G1Projective>(&pk.l_query, aux_assignment);
+    let h_acc = phase!(
+        "proof.msm.h",
+        msm::msm_bigint::<G1Projective>(&pk.h_query, h_assignment)
+    );
+    let l_aux_acc = phase!(
+        "proof.msm.l",
+        msm::msm_bigint::<G1Projective>(&pk.l_query, aux_assignment)
+    );
     let r_s_delta_g1 = pk.delta_g1.mul_bigint((r * s).into_bigint());
 
     let r_g1 = pk.delta_g1.mul_bigint(r.into_bigint());
-    let g_a = calculate_coeff(r_g1, &pk.a_query, pk.vk.alpha_g1, assignment);
+    let g_a = phase!(
+        "proof.msm.a",
+        calculate_coeff(r_g1, &pk.a_query, pk.vk.alpha_g1, assignment)
+    );
     let s_g_a = g_a.mul_bigint(s.into_bigint());
 
     // Preserve ark-groth16's branch: B1 is needed only for the r * B1 term in C.
@@ -113,11 +132,17 @@ fn assemble_proof(
         Default::default()
     } else {
         let s_g1 = pk.delta_g1.mul_bigint(s.into_bigint());
-        calculate_coeff(s_g1, &pk.b_g1_query, pk.beta_g1, assignment)
+        phase!(
+            "proof.msm.b1",
+            calculate_coeff(s_g1, &pk.b_g1_query, pk.beta_g1, assignment)
+        )
     };
 
     let s_g2 = pk.vk.delta_g2.mul_bigint(s.into_bigint());
-    let g2_b = calculate_coeff(s_g2, &pk.b_g2_query, pk.vk.beta_g2, assignment);
+    let g2_b = phase!(
+        "proof.msm.b2",
+        calculate_coeff(s_g2, &pk.b_g2_query, pk.vk.beta_g2, assignment)
+    );
 
     let mut g_c = s_g_a;
     g_c += g1_b.mul_bigint(r.into_bigint());

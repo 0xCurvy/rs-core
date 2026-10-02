@@ -13,6 +13,8 @@ use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut, vec};
 use rayon::prelude::*;
 use zeroize::Zeroize;
 
+use crate::phase_timing::phase;
+
 /// A witness-derived buffer whose elements are wiped when it is dropped,
 /// including on error and unwinding paths.
 ///
@@ -194,15 +196,18 @@ impl R1CSToQAP for CircomReduction {
         let mut a = WipeOnDrop(vec![zero; domain_size]);
         let mut b = WipeOnDrop(vec![zero; domain_size]);
 
-        cfg_iter_mut!(a[..num_constraints])
-            .zip(cfg_iter_mut!(b[..num_constraints]))
-            .zip(cfg_iter!(&matrices[0]))
-            .zip(cfg_iter!(&matrices[1]))
-            .try_for_each(|(((a, b), at_i), bt_i)| {
-                *a = evaluate_checked(at_i, full_assignment)?;
-                *b = evaluate_checked(bt_i, full_assignment)?;
-                Ok::<_, SynthesisError>(())
-            })?;
+        phase!(
+            "proof.qap.evaluate",
+            cfg_iter_mut!(a[..num_constraints])
+                .zip(cfg_iter_mut!(b[..num_constraints]))
+                .zip(cfg_iter!(&matrices[0]))
+                .zip(cfg_iter!(&matrices[1]))
+                .try_for_each(|(((a, b), at_i), bt_i)| {
+                    *a = evaluate_checked(at_i, full_assignment)?;
+                    *b = evaluate_checked(bt_i, full_assignment)?;
+                    Ok::<_, SynthesisError>(())
+                })
+        )?;
 
         finish_witness_map::<F, D>(a, b, num_inputs, num_constraints, full_assignment)
     }
@@ -252,13 +257,16 @@ pub(crate) fn witness_map_from_compact_matrices<F: PrimeField, D: EvaluationDoma
 
     let mut a = WipeOnDrop(vec![zero; domain_size]);
     let mut b = WipeOnDrop(vec![zero; domain_size]);
-    cfg_iter_mut!(a[..num_constraints])
-        .zip(cfg_iter_mut!(b[..num_constraints]))
-        .enumerate()
-        .for_each(|(row, (a, b))| {
-            *a = matrices[0].evaluate_row(row, full_assignment);
-            *b = matrices[1].evaluate_row(row, full_assignment);
-        });
+    phase!(
+        "proof.qap.evaluate",
+        cfg_iter_mut!(a[..num_constraints])
+            .zip(cfg_iter_mut!(b[..num_constraints]))
+            .enumerate()
+            .for_each(|(row, (a, b))| {
+                *a = matrices[0].evaluate_row(row, full_assignment);
+                *b = matrices[1].evaluate_row(row, full_assignment);
+            })
+    );
 
     finish_witness_map::<F, D>(a, b, num_inputs, num_constraints, full_assignment)
 }
@@ -332,6 +340,8 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
         });
 
     // Move A, B and C to the coset: ifft, distribute_powers(omega_2n), fft.
+    #[cfg(feature = "bench")]
+    let transforms = crate::phase_timing::Span::new("proof.qap.fft");
     let root_of_unity = double.element(1);
     // Opt-in SIMD transforms, bit-identical to ark-poly's; parallel under
     // `parallel` (see `simd_fft`).
@@ -356,6 +366,8 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
             domain.fft_in_place(v);
         }
     }
+    #[cfg(feature = "bench")]
+    drop(transforms);
 
     // `a` is no longer needed after this product. Reuse its domain-sized
     // allocation instead of asking `mul_polynomials_in_evaluation_domain`

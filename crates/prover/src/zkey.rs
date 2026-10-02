@@ -45,6 +45,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
 };
 
+use crate::phase_timing::phase;
 #[cfg(feature = "compact-matrix")]
 use crate::qap::CompactMatrix;
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
@@ -106,10 +107,10 @@ pub fn read_zkey<R: Read + Seek>(
     reader: &mut R,
 ) -> IoResult<(ProvingKey<Bn254>, ZkeyMatrices<Fr>)> {
     let mut binfile = BinFile::new(reader)?;
-    let proving_key = binfile.proving_key()?;
-    let matrices = binfile.matrices()?;
+    let proving_key = phase!("load.zkey.points", binfile.proving_key())?;
+    let matrices = phase!("load.zkey.matrices", binfile.matrices())?;
     check_domain_size(&proving_key, &matrices)?;
-    spot_check(&proving_key)?;
+    phase!("load.zkey.spot_check", spot_check(&proving_key))?;
     Ok((proving_key, matrices))
 }
 
