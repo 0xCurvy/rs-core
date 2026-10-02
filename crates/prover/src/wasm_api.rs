@@ -9,6 +9,38 @@ use crate::sparrow::{
     manifest::{ManifestProofStream, ZkeyChunkManifest},
 };
 
+/// Development only (`wasm-simd-selftest`): keep the message of the last
+/// panic, which the trap of a failed assertion otherwise loses, for
+/// [`simd_self_test_panic`]. Chains to the previous hook.
+#[cfg(all(feature = "wasm-simd-selftest", target_arch = "wasm32"))]
+#[wasm_bindgen(js_name = simdSelfTestInit)]
+pub fn simd_self_test_init() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Ok(mut last) = LAST_PANIC.lock() {
+                *last = info.to_string();
+            }
+            previous(info);
+        }));
+    });
+}
+
+#[cfg(all(feature = "wasm-simd-selftest", target_arch = "wasm32"))]
+static LAST_PANIC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The last panic message recorded since [`simd_self_test_init`] (empty if
+/// none): what a self-test that trapped asserted.
+#[cfg(all(feature = "wasm-simd-selftest", target_arch = "wasm32"))]
+#[wasm_bindgen(js_name = simdSelfTestPanic)]
+pub fn simd_self_test_panic() -> String {
+    LAST_PANIC
+        .lock()
+        .map(|last| last.clone())
+        .unwrap_or_default()
+}
+
 /// Development check (`wasm-simd-selftest`) for `wasm-simd-msm`: compares the
 /// SIMD MSM kernel with arkworks on random and adversarial G1/G2 inputs.
 /// Returns the number of MSMs compared; traps on the first mismatch.
@@ -40,6 +72,90 @@ pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
 pub fn simd_sparrow_self_test(size: u32, seed: u32) -> Result<u32, JsError> {
     crate::sparrow::simd_self_test::self_test(size as usize, u64::from(seed))
         .map_err(|error| JsError::new(&error))
+}
+
+/// Stress round (`wasm-simd-selftest`): `rounds` randomized differential
+/// checks of the kernel's Fq/Fq2 arithmetic, scalar and 4-lane, against
+/// arkworks. Returns the number of operations compared; throws on a mismatch.
+#[cfg(all(
+    feature = "wasm-simd-selftest",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+#[wasm_bindgen(js_name = simdFieldStress)]
+pub fn simd_field_stress(seed: u32, rounds: u32) -> Result<u32, JsError> {
+    crate::msm_simd::self_test::field_stress(u64::from(seed), rounds as usize)
+        .map_err(|error| JsError::new(&error))
+}
+
+/// Stress round (`wasm-simd-selftest`): one randomized MSM (curve, size up to
+/// `max_size`, width, batch size, base and scalar mix) through the SIMD
+/// kernel, and with SPARROW one randomized streamed query, against arkworks.
+/// Returns the number of MSMs compared; throws on a mismatch.
+#[cfg(all(
+    feature = "wasm-simd-selftest",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+#[wasm_bindgen(js_name = simdMsmStress)]
+pub fn simd_msm_stress(seed: u32, max_size: u32) -> Result<u32, JsError> {
+    let seed = u64::from(seed);
+    let kernel = crate::msm_simd::self_test::msm_stress(seed, max_size as usize);
+    #[cfg(feature = "sparrow")]
+    let kernel = kernel.and_then(|n| {
+        crate::sparrow::simd_self_test::stress_case(seed, max_size as usize).map(|m| n + m)
+    });
+    kernel.map_err(|error| JsError::new(&error))
+}
+
+/// Relative benchmark (`wasm-simd-selftest`): the SIMD MSM kernel and the
+/// arkworks batch-affine path on one random input at the production window
+/// width. Time `simd()` and `ark()` alternately; both return a checksum.
+#[cfg(all(
+    feature = "wasm-simd-selftest",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+#[wasm_bindgen(js_name = SimdMsmBench)]
+pub struct SimdMsmBench(crate::msm_simd::self_test::MsmBench);
+
+#[cfg(all(
+    feature = "wasm-simd-selftest",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+#[wasm_bindgen(js_class = SimdMsmBench)]
+impl SimdMsmBench {
+    /// `curve` 1 is G1, 2 is G2; `2^log_size` points (4..=16).
+    #[wasm_bindgen(constructor)]
+    pub fn new(curve: u32, log_size: u32, seed: u32) -> Result<SimdMsmBench, JsError> {
+        crate::msm_simd::self_test::MsmBench::new(curve, log_size, u64::from(seed))
+            .map(SimdMsmBench)
+            .map_err(|error| JsError::new(&error))
+    }
+
+    /// The window width both paths use.
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.0.width() as u32
+    }
+
+    pub fn simd(&self) -> u32 {
+        self.0.simd()
+    }
+
+    pub fn ark(&self) -> u32 {
+        self.0.ark()
+    }
+
+    /// Both paths against arkworks' `VariableBaseMSM`; throws on a mismatch.
+    pub fn check(&self) -> Result<(), JsError> {
+        self.0.check().map_err(|error| JsError::new(&error))
+    }
 }
 
 /// Invalidate origin-local SAGE caches when compiler semantics change.

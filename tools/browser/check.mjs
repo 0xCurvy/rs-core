@@ -7,10 +7,12 @@
 // crates/prover/pkg-web (scripts/build.sh wasm-web). With no argument both run,
 // so both packages must already be built. CURVY_BROWSER_PKG_WEB and
 // CURVY_BROWSER_PKG_WEB_THREADS substitute other prover package directories.
+// CURVY_BROWSER_ENGINES picks the browsers (default chromium,firefox; webkit
+// also works, after `npx --prefix tools/browser playwright install webkit`).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { request } from 'node:http';
-import { chromium, firefox } from 'playwright';
+import { chromium, firefox, webkit } from 'playwright';
 const port = 8127;
 const origin = `http://127.0.0.1:${port}`;
 const modes = process.argv.slice(2).flatMap(arg => arg.split(',')).filter(Boolean);
@@ -32,7 +34,7 @@ try {
   assert.equal(await status({}, 'POST'), 405);
   const engines = process.env.CURVY_BROWSER_ENGINES?.split(',') || ['chromium', 'firefox'];
   for (const name of engines) {
-    const engine = {chromium, firefox}[name];
+    const engine = {chromium, firefox, webkit}[name];
     assert.ok(engine, `unknown browser ${name}`);
     const browser = await engine.launch({headless: true});
     try {

@@ -14,6 +14,41 @@ This runs a real Groth16 proof in isolated Chromium and Firefox sessions, checks
 
 `node tools/browser/node-proof-check.mjs [curvy_prover.js]` runs the same fixture through a Node.js prover build (default: `crates/prover/pkg-node`, from `scripts/build.sh wasm-nodejs`). It pins the fixture digests, checks that the prover's verifying-key digest equals one re-derived from `crates/prover/testdata/multiplier.vk.json`, proves `a=3, b=11` to public signal `33`, and checks that wrong pins, malformed input, and a corrupted proving key are refused. `scripts/smoke-npm.mjs` runs the same check against the portable prover entry of the packed npm tarball.
 
+## SIMD self-tests
+
+The opt-in SIMD MSM and FFT (`scripts/build-wasm.sh ... --simd`) have
+development-only differential self-tests, randomized stress rounds and a
+relative kernel benchmark, compiled in only with `--simd-selftest`
+(curvy-prover `wasm-simd-selftest`; release builds never export them).
+`scripts/simd-selftest.mjs` runs them (`simd-selftest-suite.mjs` holds the
+suite, `simd-selftest.html` the browser page):
+
+```sh
+scripts/build-wasm.sh nodejs --sparrow --simd --simd-selftest
+node scripts/simd-selftest.mjs --stress 60          # Node: fixed seeds, 60 s stress, speed gate
+scripts/build-wasm.sh web --threads --sparrow --simd --simd-selftest
+node scripts/simd-selftest.mjs --engine chromium --mode threaded
+```
+
+The fixed suite compares the SIMD MSM (direct and through SPARROW's streamed
+buckets) and the SIMD witness-map FFT with arkworks for several seeds. The
+stress mode draws random seeds for a time budget: field operations on both
+weakly reduced representatives, edge values and four lanes; MSMs of random
+size, width, batch size and adversarial base/scalar mixes; SPARROW queries
+with random chunking; single NTTs and witness maps of random size. It stands
+in for cargo-fuzz, which builds native binaries and so never compiles these
+wasm32-only kernels; a failure prints a `--repro KIND:SEED:ARG` command. The
+benchmark times the SIMD kernel and the arkworks batch-affine path on one
+input in one process and fails below `--min-speedup` (default 1.4x), a ratio
+independent of the machine. `scripts/check-simd-codegen.mjs` (needs
+`wasm-tools`) checks the same property statically: the 4-lane multiplies
+must stay `i64x2.extmul`, not emulated `i64x2.mul`. Threaded builds need a
+browser (wasm-bindgen-rayon starts Web Workers). Playwright WebKit runs the
+portable build (`--engine webkit`, after `npx --prefix tools/browser
+playwright install webkit`); with Playwright 1.57's WebKit 26.0 every threaded
+build, SIMD or not, traps in `initThreadPool` although the page is
+cross-origin isolated.
+
 For manual checks, run `node tools/browser/serve.mjs` and open the printed URL. The page displays all results. `?mode=portable` uses a `scripts/build.sh wasm-web` build. `?threads=4&samples=11` controls the threaded run.
 
 The server optionally accepts a JSON array of benchmark cases containing `notes`, `zkeyUrl`, `graphUrl`, `zkeyPath`, `graphPath`, `zkeySha256`, `graphSha256`, `input`, and `expectedPublics`. Only the named external files are exposed. Select one with `?scenario=2`; production measurements should run without concurrent builds or other benchmarks. It binds only to loopback.

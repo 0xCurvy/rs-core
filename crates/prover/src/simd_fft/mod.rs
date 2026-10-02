@@ -2,8 +2,8 @@
 //! Fr transforms on a 4-lane simd128 9x29-bit Montgomery multiply. Prototype
 //! from poc/wasm-fft; results are bit-identical to ark-poly (the PoC tests
 //! every size 2^3..2^18 against fft/ifft/coset fft and this exact step;
-//! `simdFftSelfTest` checks `qap::finish_evaluations` in a
-//! `wasm-simd-selftest` build of the shipped code).
+//! `simdFftSelfTest` and `simdFftStress` check `qap::finish_evaluations` and
+//! the NTTs in a `wasm-simd-selftest` build of the shipped code).
 //!
 //! Each NTT is serial. With `parallel`, the three independent transforms
 //! (A, B, C) run concurrently on the host's Rayon pool instead, and only on

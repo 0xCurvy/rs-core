@@ -15,8 +15,9 @@
 # `--simd-msm` opts into curvy-prover's SIMD batch-affine MSM (`wasm-simd-msm`).
 # `--simd-fft` opts into its SIMD witness-map FFT (`wasm-simd-fft`); `--simd`
 # enables both. Both features are prototypes (poc/wasm-field, poc/wasm-fft).
-# `--simd-selftest` adds their development-only differential self-tests
-# (`wasm-simd-selftest`; never shipped).
+# `--simd-selftest` adds their development-only differential self-tests,
+# stress cases and kernel benchmark (`wasm-simd-selftest`; never shipped),
+# driven by scripts/simd-selftest.mjs.
 # `--poseidon-optimized` is retained as a compatible explicit assertion of the
 # optimized default and does not change the exported API.
 #

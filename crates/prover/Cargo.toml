@@ -97,9 +97,12 @@ wasm = ["dep:wasm-bindgen"]
 # only on wasm32 with `+simd128`; every other build ignores it. See
 # src/msm_simd and poc/wasm-field.
 wasm-simd-msm = []
-# Development only, never shipped: the in-WASM differential self-tests of
-# `wasm-simd-msm` / `wasm-simd-fft` (`simdMsmSelfTest`, `simdSparrowSelfTest`,
-# `simdFftSelfTest`), for whichever of the two is enabled.
+# Development only, never shipped: in-WASM differential self-tests, randomized
+# stress cases and a kernel benchmark for `wasm-simd-msm` / `wasm-simd-fft`
+# (`simdMsmSelfTest`, `simdSparrowSelfTest`, `simdFftSelfTest`,
+# `simdFieldStress`, `simdMsmStress`, `simdFftStress`, `SimdMsmBench`,
+# `simdSelfTestInit`, `simdSelfTestPanic`), for
+# whichever of the two is enabled. Driven by scripts/simd-selftest.mjs.
 wasm-simd-selftest = ["wasm"]
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 

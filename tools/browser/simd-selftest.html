@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Curvy SIMD self-tests</title>
+<style>body{font:16px system-ui;max-width:900px;margin:48px auto;padding:0 24px}button{font:inherit;padding:12px 20px}pre{white-space:pre-wrap}</style>
+<h1>SIMD self-tests</h1>
+<p>Needs a prover package built with <code>scripts/build-wasm.sh web [--threads] --sparrow --simd --simd-selftest</code>. Query: <code>?mode=portable|threaded&amp;threads=2&amp;options={json}</code> (see simd-selftest-suite.mjs).</p>
+<button id="run">Run SIMD self-tests</button>
+<pre id="log"></pre>
+<pre id="result" role="status">Ready</pre>
+<script type="module">
+import { runSuite } from './simd-selftest-suite.mjs';
+const query = new URLSearchParams(location.search);
+const result = document.querySelector('#result');
+const logView = document.querySelector('#log');
+const log = line => { logView.textContent += line + '\n'; console.log(line); };
+document.querySelector('#run').onclick = async () => {
+  document.querySelector('#run').disabled = true;
+  result.textContent = 'Running';
+  let report;
+  try {
+    const mode = query.get('mode') || 'portable';
+    if (!['threaded', 'portable'].includes(mode)) throw new Error('unknown mode');
+    if (!crossOriginIsolated) throw new Error('cross-origin isolation is required');
+    const wasm = await import(`/crates/prover/pkg-web${mode === 'threaded' ? '-threads' : ''}/curvy_prover.js`);
+    if ((typeof wasm.initThreadPool === 'function') !== (mode === 'threaded')) throw new Error(`${mode} mode loaded the wrong package build`);
+    await wasm.default();
+    const threads = mode === 'threaded' ? Number(query.get('threads') || 2) : 1;
+    if (!Number.isInteger(threads) || threads < 1 || threads > 16) throw new Error('invalid thread count');
+    if (mode === 'threaded') await wasm.initThreadPool(threads);
+    const options = JSON.parse(query.get('options') || '{}');
+    report = {mode, threads, userAgent: navigator.userAgent, ...await runSuite(wasm, options, log)};
+  } catch (error) {
+    report = {passed: false, error: String(error), stack: error.stack};
+  }
+  result.textContent = JSON.stringify(report, null, 2);
+  result.dataset.state = report.passed ? 'passed' : 'failed';
+};
+if (query.has('autorun')) document.querySelector('#run').click();
+</script>

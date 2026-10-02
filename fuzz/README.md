@@ -24,3 +24,9 @@ multiplier graph and a built-in graph with scalar, one- and two-dimensional arra
 inputs. It asserts that errors never repeat an object input or a planted
 `PRIVATE` sentinel outside an echoed signal name, and that echoed names stay within
 128 bytes. Run it with the same sanitizer and byte/time limits above.
+
+The opt-in WASM SIMD kernels (curvy-prover `wasm-simd-msm`, `wasm-simd-fft`) are
+not fuzzed here: they compile only for wasm32 with simd128, which cargo-fuzz's
+native libFuzzer builds never target. `scripts/simd-selftest.mjs --stress SECONDS`
+runs a time-bounded randomized differential check of them against arkworks inside
+the WASM module instead (see tools/browser/README.md).

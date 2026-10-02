@@ -16,6 +16,9 @@
 //! - hot buckets: every scalar equal, so each window sends every point to
 //!   one bucket; at 1,500-point chunks the deferral queue spills mid-chunk at
 //!   every width, and the bucket stays hot (XYZZ overflow) across chunks.
+//!
+//! [`stress_case`] (part of `simdMsmStress`) streams one randomized query per
+//! seed for the runner's time-bounded stress mode.
 
 use std::sync::Arc;
 
@@ -297,4 +300,64 @@ pub(crate) fn self_test(size: usize, seed: u64) -> Result<u32, String> {
     }
     let mut rng = StdRng::seed_from_u64(seed);
     Ok(curve::<g1::Config>(size, &mut rng)? + curve::<g2::Config>(size.div_ceil(2), &mut rng)?)
+}
+
+/// One randomized streamed query against arkworks: a random curve, size (up
+/// to `max_size`, G2 half), width (4..=16 or adaptive), chunk size, and base
+/// and scalar mix. Returns the number of streamed MSMs compared (1).
+pub(crate) fn stress_case(seed: u64, max_size: usize) -> Result<u32, String> {
+    // Not the kernel case's stream: the same seed drives a different input.
+    let mut rng = StdRng::seed_from_u64(seed ^ 0x5350_4152_524f_5753);
+    if rng.gen_bool(0.5) {
+        stress::<g1::Config>(&mut rng, max_size.max(1), seed)
+    } else {
+        stress::<g2::Config>(&mut rng, max_size.div_ceil(2).max(1), seed)
+    }
+}
+
+fn stress<P: Query>(rng: &mut StdRng, max_size: usize, seed: u64) -> Result<u32, String> {
+    let size = rng.gen_range(1..=max_size);
+    let p = Projective::<P>::rand(rng).into_affine();
+    let identity = Affine::<P>::identity();
+    let base_kind = rng.gen_range(0..3);
+    let bases: Vec<Affine<P>> = match base_kind {
+        0 => random_bases::<P>(size, rng),
+        1 => {
+            let pool = [p, -p, (p + p).into_affine(), identity];
+            (0..size)
+                .map(|_| pool[rng.gen_range(0..pool.len())])
+                .collect()
+        }
+        _ => {
+            let mut bases = random_bases::<P>(size, rng);
+            for base in bases.iter_mut() {
+                if rng.gen_range(0..8) == 0 {
+                    *base = identity;
+                }
+            }
+            bases
+        }
+    };
+    let scalar_kind = rng.gen_range(0..4);
+    let scalars: Vec<Fr> = match scalar_kind {
+        0 => witness_scalars(size, rng),
+        1 => (0..size).map(|_| Fr::rand(rng)).collect(),
+        2 => vec![Fr::rand(rng); size],
+        _ => {
+            let mut s: Vec<Fr> = (0..size).map(|_| Fr::rand(rng)).collect();
+            for i in (1..size).step_by(2) {
+                s[i] = -s[i - 1];
+            }
+            s
+        }
+    };
+    let width = if rng.gen_range(0..5) == 0 {
+        StreamingConfig::ADAPTIVE_WINDOW_BITS
+    } else {
+        rng.gen_range(4..=16)
+    };
+    let chunk = rng.gen_range(1..=size + 8);
+    let case = format!("stress seed {seed}, bases {base_kind}, scalars {scalar_kind}");
+    run::<P>(&bases, &scalars, width, chunk, &case)?;
+    Ok(1)
 }
