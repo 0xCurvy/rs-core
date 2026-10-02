@@ -544,6 +544,36 @@ portable build, 4- and 7-worker runs (the harness recommends leaving one CPU
 free), longer thermal runs, and iOS/Safari. Raw report kept locally under
 `tools/benchmarks/results/mobile-2026-10-01/` (not tracked).
 
+### 6.9 Mobile A/B: SIMD MSM + FFT experiment (2 Oct 2026, branch `poc/wasm-simd`)
+
+Same Fold2 (Chrome 154, Android 10, USB `adb reverse`, charging 59–63%).
+Two harness servers served the same SPARROW profiles from different builds:
+baseline (`build-wasm.sh web [--threads] --sparrow`) and SIMD
+(`... --sparrow --simd`: `wasm-simd-msm` + `wasm-simd-fft`); each report
+records the served build label and wasm SHA-256. 13-bit windows, 65,536-point
+chunks, pinned SAGE cache, `Run all circuits` × 3 runs. All 72 proofs
+self-verified and matched `expectedPublics`. Median proof + verify, seconds:
+
+| Mode | 2 notes | 5 notes | 10 notes |
+|---|---:|---:|---:|
+| Portable | 7.36 -> 3.64 (−51%) | 10.96 -> 6.30 (−42%) | 19.96 -> 10.25 (−49%) |
+| Threaded, 8 workers | 1.63 -> 1.13 (−30%) | 3.78 -> 2.14 (−43%) | 7.08 -> 4.22 (−40%) |
+| Threaded, 7 workers | 2.49 -> 1.20 (−52%) | 4.08 -> 2.67 (−35%) | 8.28 -> 5.15 (−38%) |
+| Threaded, 4 workers | 2.44 -> 2.03 (−17%) | 5.24 -> 2.97 (−43%) | 11.34 -> 6.52 (−42%) |
+
+**Caveats.** Runs were not interleaved: SIMD threaded ran first (08:13–08:17),
+baseline threaded and portable next (08:19–08:25), SIMD portable last
+(08:26). The phone throttles within a run (e.g. SIMD portable 2 notes 2.23 ->
+3.64 -> 4.72 s), so threaded deltas may flatter SIMD and the portable delta
+may understate it. Treat these as "SIMD is faster in every configuration,
+roughly 1.4–2x", not as precise ratios.
+
+**Findings.** The gain on the phone is at least as large as on the M4 Pro
+(desktop portable 1.83x). More workers win on this 1+3+4-core SoC: 8 workers
+beat 4 by ~1.8x in both builds, so the SIMD FFT (active only at ≤4 workers)
+does not offset dropping to 4 workers; intra-transform FFT parallelism would
+be needed for it to help at 8.
+
 ### Re-run
 
 ```sh
