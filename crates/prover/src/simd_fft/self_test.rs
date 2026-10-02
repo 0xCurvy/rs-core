@@ -1,6 +1,6 @@
 //! Development check for `wasm-simd-fft`, run inside the WASM build
-//! (`simdFftSelfTest`): `qap::finish_evaluations` (SIMD transforms, concurrent
-//! with `parallel`) against the ark-poly witness-map step, on random and edge
+//! (`simdFftSelfTest`): `qap::finish_evaluations` (SIMD transforms, parallel
+//! under `parallel`) against the ark-poly witness-map step, on random and edge
 //! inputs (zero, one, r-1, a delta; full, partial and empty constraint rows)
 //! for every domain size 2^min_log..2^max_log. Up to 2^16 it also runs the
 //! step alone with leaf blocks of 2, 8 and 64 vectors, so the recursive and

@@ -5,11 +5,13 @@
 //! `simdFftSelfTest` checks `qap::finish_evaluations` in the shipped build).
 //!
 //! The inverse transform, coset scaling and forward transform run fused,
-//! depth-first over the packed data (see ntt.rs). With `parallel`, the three
-//! transforms (A, B, C) run concurrently on the host's Rayon pool and each
-//! one is parallel inside as well, so the step scales with the pool:
-//! 0.32-0.36x of ark-poly's parallel time on 2, 4, 8 and 13 workers
-//! (2^18 and 2^19, Chromium 143, Apple M4 Pro), 0.36-0.38x serially.
+//! depth-first over the packed data (see ntt.rs). With `parallel`, each
+//! transform is parallel inside on the host's Rayon pool, so the step scales
+//! with the pool: 0.32-0.36x of ark-poly's parallel time on 2, 4, 8 and 13
+//! workers (2^18 and 2^19, Chromium 143, Apple M4 Pro), 0.36-0.38x serially.
+//! A, B and C are transformed in turn, so only one packed copy (36 bytes per
+//! element) is live: running the three concurrently was within 5% on 2-8
+//! workers but held three copies (+38 MB WASM heap at 2^19).
 #![allow(clippy::needless_range_loop, dead_code)]
 
 mod fr29;
@@ -61,20 +63,11 @@ impl WitnessStep {
         Some(WitnessStep { step })
     }
 
-    /// Applies the step to A, B and C: concurrently with `parallel`, else in
-    /// turn. Each transform is itself parallel under `parallel`.
+    /// Applies the step to A, B and C in turn; each transform is parallel
+    /// under `parallel`.
     pub(crate) fn apply3<F: 'static>(&self, a: &mut Vec<F>, b: &mut Vec<F>, c: &mut Vec<F>) {
-        let [a, b, c] = [a, b, c].map(fr_vec);
-        #[cfg(feature = "parallel")]
-        rayon::join(
-            || self.step.apply(a),
-            || rayon::join(|| self.step.apply(b), || self.step.apply(c)),
-        );
-        #[cfg(not(feature = "parallel"))]
-        {
-            self.step.apply(a);
-            self.step.apply(b);
-            self.step.apply(c);
+        for v in [a, b, c] {
+            self.step.apply(fr_vec(v));
         }
     }
 }
