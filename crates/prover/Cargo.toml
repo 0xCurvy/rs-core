@@ -85,6 +85,9 @@ parallel = [
 signet-v2 = ["curvy-witness/signet-v2"]
 sage = ["curvy-witness/sage"]
 zkey-manifest = []
+# Prototype: witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
+# simd128 only; a no-op elsewhere).
+wasm-simd-fft = []
 sparrow = ["signet-v2", "sage", "zkey-manifest"]
 wasm = ["dep:wasm-bindgen"]
 # Opt-in SIMD batch-affine MSM (BN254 G1/G2) for WASM builds. Takes effect

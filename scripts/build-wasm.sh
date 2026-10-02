@@ -125,6 +125,10 @@ fi
 if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
   optional_features+=",curvy-prover/compact-matrix"
 fi
+# Prototype (poc/wasm-fft): CURVY_WASM_SIMD_FFT=1 enables the simd128 witness-map FFT.
+if [ "${CURVY_WASM_SIMD_FFT:-0}" = "1" ]; then
+  optional_features+=",curvy-prover/wasm-simd-fft"
+fi
 if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
   optional_features+=",curvy-wasm/poseidon-optimized"
 fi
