@@ -553,6 +553,20 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
         debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
         A::window_sum(&self.buckets, &self.overflow)
     }
+
+    /// Plain sum of every bucket, without weights: the sum of all points
+    /// added, whatever their digits (see `msm_simd::try_sum`).
+    pub fn bucket_total(&self) -> Projective<C> {
+        debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
+        let mut sum = Xyzz::<F>::zero();
+        for bucket in &self.buckets {
+            sum.add_affine(bucket);
+        }
+        for overflow in &self.overflow {
+            sum.add_xyzz(overflow);
+        }
+        sum.to_ark()
+    }
 }
 
 /// Per-phase wall time of one MSM, in ms.

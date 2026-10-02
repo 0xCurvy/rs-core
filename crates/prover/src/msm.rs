@@ -69,8 +69,102 @@ where
     if size == 0 {
         return V::zero();
     }
+    let (bases, scalars) = (&bases[..size], &scalars[..size]);
+    #[cfg(all(
+        feature = "wasm-simd-msm",
+        target_arch = "wasm32",
+        target_feature = "simd128"
+    ))]
+    if size >= BATCH_AFFINE_MIN_POINTS
+        && let Some(sum) = split_trivial_scalars::<V>(bases, scalars)
+    {
+        return sum;
+    }
 
     msm_bigint_with_window::<V>(bases, scalars, resident_window_bits(size))
+}
+
+/// Witness queries are dominated by trivial scalars: production witnesses
+/// are 40-48% zeros and 23-32% ones, and every other scalar exceeds 2^224.
+/// Inside the windowed MSM a zero still costs a digit per window (and, in
+/// the SIMD kernel, a base conversion), and every one lands in window 0's
+/// first bucket, which turns hot and serializes window 0 on XYZZ additions.
+/// So when at least 1/8 of the scalars are 0 or 1, zeros are dropped, ones
+/// are summed directly (batch-affine in the SIMD kernel, concurrently with
+/// the rest under `parallel`), and only the rest goes through the MSM, with
+/// the window width for its own size. Used by the SIMD build only: natively
+/// it measured neutral (within 2% on the production keys). `None` (no copy)
+/// for queries with few trivial scalars, such as H.
+#[cfg(any(
+    test,
+    all(
+        feature = "wasm-simd-msm",
+        target_arch = "wasm32",
+        target_feature = "simd128"
+    )
+))]
+fn split_trivial_scalars<V>(bases: &[V::MulBase], scalars: &[BigInt<4>]) -> Option<V>
+where
+    V: VariableBaseMSM<ScalarField = Fr>,
+{
+    const ZERO: BigInt<4> = BigInt([0; 4]);
+    const ONE: BigInt<4> = BigInt([1, 0, 0, 0]);
+    let trivial = |s: &BigInt<4>| *s == ZERO || *s == ONE;
+    #[cfg(feature = "parallel")]
+    let count = scalars.par_iter().filter(|s| trivial(s)).count();
+    #[cfg(not(feature = "parallel"))]
+    let count = scalars.iter().filter(|s| trivial(s)).count();
+    if count * 8 < scalars.len() {
+        return None;
+    }
+    let mut rest_bases = Vec::with_capacity(scalars.len() - count);
+    let mut rest_scalars = Vec::with_capacity(scalars.len() - count);
+    for (base, scalar) in bases.iter().zip(scalars) {
+        if !trivial(scalar) {
+            rest_bases.push(*base);
+            rest_scalars.push(*scalar);
+        }
+    }
+    let rest = || match rest_scalars.len() {
+        0 => V::zero(),
+        size => msm_bigint_with_window::<V>(&rest_bases, &rest_scalars, resident_window_bits(size)),
+    };
+    let ones = || -> V {
+        #[cfg(all(
+            feature = "wasm-simd-msm",
+            target_arch = "wasm32",
+            target_feature = "simd128"
+        ))]
+        if let Some(sum) = crate::msm_simd::try_sum::<V>(bases, scalars) {
+            return sum;
+        }
+        let add = |mut sum: V::Bucket, (base, scalar): (&V::MulBase, &BigInt<4>)| {
+            if *scalar == ONE {
+                sum += base;
+            }
+            sum
+        };
+        #[cfg(feature = "parallel")]
+        let sum = bases
+            .par_iter()
+            .zip(scalars)
+            .fold(|| V::ZERO_BUCKET, add)
+            .reduce(
+                || V::ZERO_BUCKET,
+                |mut a, b| {
+                    a += &b;
+                    a
+                },
+            );
+        #[cfg(not(feature = "parallel"))]
+        let sum = bases.iter().zip(scalars).fold(V::ZERO_BUCKET, add);
+        sum.into()
+    };
+    #[cfg(feature = "parallel")]
+    let (rest, ones) = rayon::join(rest, ones);
+    #[cfg(not(feature = "parallel"))]
+    let (rest, ones) = (rest(), ones());
+    Some(rest + ones)
 }
 
 fn resident_window_bits(points: usize) -> usize {
@@ -873,6 +967,106 @@ mod tests {
                     assert_eq!(digit, super::signed_window_digit(&scalar, width, window));
                 });
             }
+        }
+    }
+
+    /// The zero/one split (its arkworks ones-sum here; the SIMD build's
+    /// batch-affine one is in `simdMsmSelfTest`) agrees with arkworks for
+    /// witness-like mixes,
+    /// boundary scalars (0, 1, 2, 2^64 - 1, 2^64, r - 1), all-trivial
+    /// queries, ones on the identity and on P / -P pairs, and mixes on
+    /// either side of the 1/8 threshold, for G1 and G2.
+    #[test]
+    fn trivial_scalar_split_matches_arkworks() {
+        let mut rng = ark_std::test_rng();
+        let size = 4_200;
+        let p1 = G1Projective::rand(&mut rng).into_affine();
+        let p2 = G2Projective::rand(&mut rng).into_affine();
+        let mut g1 = (0..size)
+            .map(|_| G1Projective::rand(&mut rng).into_affine())
+            .collect::<Vec<_>>();
+        let mut g2 = (0..size)
+            .map(|_| G2Projective::rand(&mut rng).into_affine())
+            .collect::<Vec<_>>();
+        for i in (0..size).step_by(97) {
+            g1[i] = G1Affine::identity();
+            g2[i] = G2Affine::identity();
+        }
+        for i in (5..size).step_by(89) {
+            (g1[i], g1[i + 1]) = (p1, -p1);
+            (g2[i], g2[i + 1]) = (p2, -p2);
+        }
+        let modulus_minus_one = {
+            let mut v = Fr::MODULUS;
+            v.sub_with_borrow(&BigInt::from(1_u64));
+            v
+        };
+        let boundary = [
+            BigInt::from(0_u64),
+            BigInt::from(1_u64),
+            BigInt::from(2_u64),
+            BigInt::from(u64::MAX),
+            BigInt([0, 1, 0, 0]),
+            modulus_minus_one,
+        ];
+        let uniform = (0..size)
+            .map(|_| Fr::rand(&mut rng).into_bigint())
+            .collect::<Vec<_>>();
+        let mix = |f: &dyn Fn(usize) -> BigInt<4>| (0..size).map(f).collect::<Vec<_>>();
+        let mixes = [
+            (
+                "witness-like",
+                mix(&|i| match i % 9 {
+                    0..=3 => BigInt::from(0_u64),
+                    4 | 5 => BigInt::from(1_u64),
+                    6 => boundary[i % boundary.len()],
+                    _ => uniform[i],
+                }),
+            ),
+            ("all zero", mix(&|_| BigInt::from(0_u64))),
+            ("all one", mix(&|_| BigInt::from(1_u64))),
+            ("boundary", mix(&|i| boundary[i % boundary.len()])),
+            // 1/8 trivial (split) and just below it (no split).
+            (
+                "one in eight",
+                mix(&|i| {
+                    if i % 8 == 0 {
+                        BigInt::from(1_u64)
+                    } else {
+                        uniform[i]
+                    }
+                }),
+            ),
+            (
+                "one in nine",
+                mix(&|i| {
+                    if i % 9 == 0 {
+                        BigInt::from(0_u64)
+                    } else {
+                        uniform[i]
+                    }
+                }),
+            ),
+        ];
+        for (name, scalars) in &mixes {
+            let split = name != &"one in nine";
+            assert_eq!(
+                super::split_trivial_scalars::<G1Projective>(&g1, scalars).is_some(),
+                split,
+                "{name}"
+            );
+            assert_eq!(
+                super::split_trivial_scalars::<G1Projective>(&g1, scalars)
+                    .unwrap_or_else(|| msm_bigint::<G1Projective>(&g1, scalars)),
+                G1Projective::msm_bigint(&g1, scalars),
+                "G1 {name}"
+            );
+            assert_eq!(
+                super::split_trivial_scalars::<G2Projective>(&g2, scalars)
+                    .unwrap_or_else(|| msm_bigint::<G2Projective>(&g2, scalars)),
+                G2Projective::msm_bigint(&g2, scalars),
+                "G2 {name}"
+            );
         }
     }
 
