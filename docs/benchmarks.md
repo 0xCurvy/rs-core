@@ -570,9 +570,125 @@ roughly 1.4–2x", not as precise ratios.
 
 **Findings.** The gain on the phone is at least as large as on the M4 Pro
 (desktop portable 1.83x). More workers win on this 1+3+4-core SoC: 8 workers
-beat 4 by ~1.8x in both builds, so the SIMD FFT (active only at ≤4 workers)
-does not offset dropping to 4 workers; intra-transform FFT parallelism would
-be needed for it to help at 8.
+beat 4 by ~1.8x in both builds, so the SIMD FFT (then active only at ≤4
+workers) does not offset dropping to 4 workers; intra-transform FFT
+parallelism would be needed for it to help at 8. 6.10 adds it; this phone has
+not measured that build yet.
+
+### 6.10 SIMD follow-ups: parallel FFT, SPARROW serial path, trivial scalars (2 Oct 2026, branch `poc/wasm-simd`)
+
+Chromium 143 on the reference host, production keys, interleaved ABBA rounds,
+every proof self-verified. The machine was shared (load averages 5–15), so
+treat single-digit deltas as approximate. Baseline is the 6.9 build
+(`09d206a`, `--simd`). Median proof ms:
+
+| Proof | 2 notes | 10 notes |
+|---|---:|---:|
+| Resident, threaded, 4 workers | 683 -> 587 (−14%) | 1,811 -> 1,602 (−12%) |
+| Resident, threaded, 8 workers | 449 -> 355 (−21%) | 1,157 -> 980 (−15%) |
+| Resident, portable | 2,020 -> 1,766 (−13%) | 4,818 -> 4,629 (−4%) |
+| SPARROW, threaded, 4 workers | 908 -> 758 (−17%) | 2,299 -> 1,944 (−15%) |
+| SPARROW, threaded, 8 workers | 749 -> 556 (−26%) | 1,851 -> 1,480 (−20%) |
+
+Resident WASM heap is unchanged. SPARROW heap at 4 workers fell from 83.4 to
+73.6 MiB (2 notes) and from 165 to 129 MiB (10 notes); at 8 workers it is
+unchanged.
+
+**FFT.** The inverse NTT, coset scaling and forward NTT now run fused and
+depth-first, in 512-vector leaf blocks that stay in cache, and each transform
+is parallel inside. A, B and C run one at a time: running them concurrently
+was within ±5% and held three packed copies (+38 MB heap at 2^19). The
+out-of-line `ntt::mul4` alone took the serial step from 0.74x to 0.36x of
+ark-poly, because it removed the 648–810 emulated `i64x2.mul` that the
+splatted twiddles caused when inlined. The pool-size gate is gone. The three
+witness-map transforms at 2^19, including twiddles, median ms:
+
+| Workers | ark-poly | 6.9 SIMD | Now |
+|---|---:|---:|---:|
+| 1 (portable) | 1,714 | 829 | 661 |
+| 2 | 902 | 687 | 334 |
+| 4 | 474 | 355 | 171 |
+| 8 | 260 | 349 | 91 |
+| 13 | 227 | 352 | 76 |
+
+At every pool size, including 2^18, the step now takes 0.32–0.38x of
+ark-poly's time.
+
+**SPARROW serial path.** The main thread spent 163 ms hashing and 54 ms
+decoding (8 workers, 2 notes). Records are now decoded on the pool, and the
+browser push hashes chunk k on one worker while chunk k−1 is parsed. No byte
+is parsed before its chunk is authenticated. With the same binary and each
+step toggled in the page, the time changed by:
+
+| Workers | 2 notes | 10 notes |
+|---|---:|---:|
+| 4 | −5.1% | −7.6% |
+| 8 | −12.1% | −9.0% |
+
+Native multi-threaded SPARROW (`sparrow_manifest_wtns`, 8 threads, 6
+interleaved rounds) is neutral: +0.0% at 2 notes and −1.5% at 10.
+
+**Trivial scalars.** Real witnesses at 2, 5 and 10 notes are 48%, 42% and 40%
+zeros and 32%, 26% and 23% ones, and every other scalar is above 2^224. When at
+least 1/8 of a query is trivial, the SIMD resident MSM drops the zeros, sums
+the ones with batch-affine additions and runs the rest at its own window
+width. The uniform H query is not split. With the split toggled in the page:
+
+- threaded: −4% to −8%;
+- portable: −2% to −10%.
+
+The split was not applied elsewhere:
+
+- natively it was noise (−1.8% to +1.5%);
+- routing the ones in SPARROW ranged from −3.5% to +1.2%, with up to 8 MiB
+  more heap;
+- a short MSM for scalars below 2^64 would never run on these witnesses.
+
+**GLV rejected.** An optimistic lower bound compared n points with 254-bit
+scalars against 2n points with 128-bit scalars. It left out decomposition,
+φ(P) and signs, so real GLV can only do worse. Random G1, best window width
+for each, change against the plain MSM:
+
+| | 2^15 | 2^17 | 2^18 |
+|---|---:|---:|---:|
+| Native, 8 threads | +34% | +28% | +29% |
+| Native, 1 thread | −10% | −3.6% | −4.0% |
+| SIMD, portable | −10.7% | −2.6% | −0.1% |
+| SIMD, 4 workers | −3.8% | +5.4% | +9.9% |
+| SIMD, 8 workers | +16% | +24% | +28% |
+
+With batch-affine buckets, GLV doubles the points and halves the windows. That
+saves only bucket reduction and window rounding, and parallelism is per
+window. After the zero/one split, only 19–37% of real scalars are full-size.
+
+**Module size.** `curvy_prover_bg.wasm` after wasm-opt; raw bytes / gzip -9
+bytes:
+
+| Build | Without SIMD | `--simd` | Added (KB) |
+|---|---:|---:|---:|
+| Portable | 780,355 / 274,702 | 1,499,131 / 456,774 | +719 / +182 |
+| Portable + SPARROW | 914,775 / 326,221 | 1,630,451 / 505,195 | +716 / +179 |
+| Threaded | 935,970 / 315,153 | 1,692,462 / 507,236 | +756 / +192 |
+| Threaded + SPARROW | 1,081,007 / 367,069 | 1,857,635 / 567,365 | +777 / +200 |
+
+The self-tests are excluded from these builds; they are the
+`wasm-simd-selftest` feature.
+
+**WebKit.** Measured before the FFT work: Playwright WebKit 26.0, portable,
+2-note key, 3 interleaved rounds.
+
+- WebKit: 4,487 -> 2,439 ms (1.84x).
+- Chromium, same session: 4,070 -> 2,062 ms (1.97x).
+- Threaded builds do not start in Playwright WebKit, with or without SIMD:
+  `initThreadPool` traps with an out-of-bounds memory access.
+- Real Safari is untested.
+
+**Not measured yet:**
+
+- the Fold2 on this build;
+- real Safari or iOS;
+- the speed gate's SIMD/arkworks ratio on the x86-64 CI runner (arm64:
+  G1 1.8–1.9x, G2 2.0–2.1x).
 
 ### Re-run
 
@@ -582,6 +698,11 @@ npm ci --prefix tools/browser --ignore-scripts && npx --prefix tools/browser pla
 node tools/browser/serve.mjs CASES.json &   # benchmark cases on port 8127; see tools/browser/README.md
 node tools/browser/measure.mjs "$OUT/browser.json" 2,5,10   # header comment documents A/B build mode
 node tools/benchmarks/signing-boundary.cjs BEFORE_PKG_DIR crates/wasm/pkg-node
+# SIMD (6.9, 6.10): codegen guard (wasm-tools 1.260.0), self-tests, stress, speed gate.
+scripts/build-wasm.sh nodejs --sparrow --simd --simd-selftest
+node scripts/check-simd-codegen.mjs
+node scripts/simd-selftest.mjs --seeds 3 --stress 60
+# A/B: build each side with CURVY_WASM_OUT_DIR, then CURVY_BROWSER_BUILDS (measure.mjs header).
 ```
 
 ### 6.4 Nested vs compact matrices in Chromium (1 Oct 2026)

@@ -54,6 +54,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | Node `ResidentProver.create()` on a native task (25 Aug) | Event-loop delay 117.9 -> 1.5 ms during load | `bindings/node/src/lib.rs` |
 | Packed field boundaries (25 Aug) | 262,144-field assignment: 67.8 -> 1.95 ms, −60% bytes | `bindings/node/src/lib.rs`, `crates/prover/src/wasm_api.rs` (`calculatePacked`), `bindings/ffi/src/prover.rs` |
 | FFI registry map lock only for lookup, then per-handle locks (25 Aug) | Independent handles no longer wait behind a long proof | `bindings/ffi/src/registry.rs` |
+| Parallel SPARROW record decoding; browser chunk hashing overlapped with parsing (2 Oct) | SHA-256 was the browser's serial bottleneck: SPARROW −5 to −12%, heap −12 to −22% at 4 workers; native neutral (+0.0 / −1.5%) (benchmarks 6.10) | `crates/prover/src/sparrow.rs` (`PARALLEL_DECODE_MIN_RECORDS`), `crates/prover/src/sparrow/manifest.rs` (`push_complete_chunk`) |
 | Reverse owned-leaf index in `ShardedNotesTree` (7 Sep) | Removes repeated full scans in restore/mark/adopt; restore O(n log n) | `crates/core/src/imt.rs` (`owned_leaves`) |
 
 ## Opt-in (not promoted)
@@ -65,6 +66,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | `scratch` retained witness/FFT/MSM-scalar buffers (5 Sep) | 10 notes: +3.5% latency, +29 MiB. MSM buckets and arkworks FFT temporaries are not pooled | `crates/prover/src/workspace.rs`, `crates/witness/src/workspace.rs` |
 | SAGE for resident proving and compiled caches (5 Sep) | −22% RSS and 27 ms warm load, but adds a derived artifact with its own trusted pin and cache lifecycle | `crates/witness/src/sage.rs`, `ResidentProver::with_sage` / `from_compiled_sage` |
 | SPARROW streaming prover | Bounded memory at 37–45% more latency than an already-resident key; needs a manifest and SAGE integration. Excluded from default crates and npm | `crates/prover/src/sparrow.rs` (`sparrow`) |
+| `wasm-simd-msm` + `wasm-simd-fft` simd128 kernels (2 Oct, branch `poc/wasm-simd`) | Browser proofs 1.4–2x faster on the Fold2 and desktop; threaded 8-worker FFT 0.35x of ark-poly; +179–200 KB gzip (benchmarks 6.9, 6.10). Not default until: a real Safari/iOS run, the 1.4x speed gate confirmed on x86-64 CI, and a phone A/B of the current build | `crates/prover/src/msm_simd/`, `crates/prover/src/simd_fft/`, `scripts/build-wasm.sh --simd`, guards `scripts/check-simd-codegen.mjs`, `scripts/simd-selftest.mjs` |
 
 ## Rejected or closed
 
@@ -73,6 +75,11 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | Precomputed i16 digits on top of wider serial windows (6 Sep) | At most 2% faster, up to 19 MiB more peak RSS | `crates/prover/src/msm.rs` (recoding stays random-access) |
 | Run the five proof MSMs (H, L, A, B1, B2) concurrently (25 Aug) | 1.9% slower at 524,288 points and 8 workers | `crates/prover/src/proof_bench.rs` (`materialized_concurrent`) |
 | Chunked scalar materialization in the production proof path (25 Aug) | 9.3% faster and −11% RSS synthetically, but the deployed conversion already costs single-digit ms; not worth the extra proof-path complexity. Closed, benchmark-only | `crates/prover/src/proof_bench.rs` (`chunked_sequential`) |
+| GLV endomorphism for the batch-affine MSM (2 Oct) | Lower bound without decomposition already +16 to +34% at 8 workers and at most 10.7% faster serially (benchmarks 6.10) | not implemented |
+| Short MSM for scalars below 2^64 (2 Oct) | Real witnesses have no scalars between 2 and 2^224 | not implemented |
+| Zero/one scalar split outside the SIMD resident MSM (2 Oct) | Native noise (−1.8 to +1.5%); SPARROW ones routing −3.5 to +1.2% with up to 8 MiB more heap. Kept in the SIMD resident MSM only (−2 to −10%) | `crates/prover/src/msm_simd/mod.rs` (`try_sum`) |
+| Concurrent SIMD transforms of A, B and C (2 Oct) | Within ±5% of one at a time on 2–8 workers; +38 MB heap at 2^19 | `crates/prover/src/simd_fft/mod.rs` |
+| cargo-fuzz for the SIMD kernels (2 Oct) | They compile only for wasm32; a seed-driven, time-bounded stress mode runs instead | `scripts/simd-selftest.mjs`, `fuzz/README.md` |
 | Browser SPARROW MSM chunks above 524,288 points | No latency gain, larger footprint | `StreamingConfig` |
 | Compact matrices inside SPARROW | Not applicable: SPARROW never builds constraint matrices | `crates/prover/src/sparrow.rs` |
 | Reduce out-of-range Poseidon table values modulo the field | Rejecting them is stricter and cheaper | `crates/core/src/poseidon/optimized_constants.rs` |
@@ -91,6 +98,10 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 
 - The 4 September reader comparison used identical executables for "previous"
   and "fixed"; record and compare binary SHA-256s before trusting an A/B result.
+- Two checkouts sharing one `CARGO_TARGET_DIR` produced byte-identical
+  benchmark binaries (2 Oct): `curvy-prover` is also a cdylib, so its library
+  output names carry no hash and one build reused the other's. Give each
+  checkout its own target dir.
 - The MSM schedule fixture used repeated bases, so its test could not catch a
   base/scalar misalignment; it now uses distinct bases.
 - Do not add standalone Poseidon gains to proving totals: SIGNET/SAGE evaluate
