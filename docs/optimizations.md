@@ -55,6 +55,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | Packed field boundaries (25 Aug) | 262,144-field assignment: 67.8 -> 1.95 ms, −60% bytes | `bindings/node/src/lib.rs`, `crates/prover/src/wasm_api.rs` (`calculatePacked`), `bindings/ffi/src/prover.rs` |
 | FFI registry map lock only for lookup, then per-handle locks (25 Aug) | Independent handles no longer wait behind a long proof | `bindings/ffi/src/registry.rs` |
 | Parallel SPARROW record decoding; browser chunk hashing overlapped with parsing (2 Oct) | SHA-256 was the browser's serial bottleneck: SPARROW −5 to −12%, heap −12 to −22% at 4 workers; native neutral (+0.0 / −1.5%) (benchmarks 6.10) | `crates/prover/src/sparrow.rs` (`PARALLEL_DECODE_MIN_RECORDS`), `crates/prover/src/sparrow/manifest.rs` (`push_complete_chunk`) |
+| Hash pinned artifacts in 1 MiB updates (2 Oct) | V8 keeps a long WASM call in its baseline tier. Cold browser loads drop 72% (2 notes 1,207 -> 337 ms, 10 notes 2,988 -> 839 ms); same digest, proofs and memory (benchmarks 6.11) | `crates/prover/src/lib.rs` (`verify_sha256`), `crates/witness/src/lib.rs` (`verify_sha256`) |
 | Reverse owned-leaf index in `ShardedNotesTree` (7 Sep) | Removes repeated full scans in restore/mark/adopt; restore O(n log n) | `crates/core/src/imt.rs` (`owned_leaves`) |
 
 ## Opt-in (not promoted)
@@ -79,6 +80,7 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
 | Short MSM for scalars below 2^64 (2 Oct) | Real witnesses have no scalars between 2 and 2^224 | not implemented |
 | Zero/one scalar split outside the SIMD resident MSM (2 Oct) | Native noise (−1.8 to +1.5%); SPARROW ones routing −3.5 to +1.2% with up to 8 MiB more heap. Kept in the SIMD resident MSM only (−2 to −10%) | `crates/prover/src/msm_simd/mod.rs` (`try_sum`) |
 | Concurrent SIMD transforms of A, B and C (2 Oct) | Within ±5% of one at a time on 2–8 workers; +38 MB heap at 2^19 | `crates/prover/src/simd_fft/mod.rs` |
+| WebCrypto SHA-256 for zkey authentication (2 Oct) | 270 ms on the 2-note zkey vs 161 ms for warm WASM `sha2`; after the 1 MiB-update fix it would also move authentication out of Rust for no gain | not implemented |
 | cargo-fuzz for the SIMD kernels (2 Oct) | They compile only for wasm32; a seed-driven, time-bounded stress mode runs instead | `scripts/simd-selftest.mjs`, `fuzz/README.md` |
 | Browser SPARROW MSM chunks above 524,288 points | No latency gain, larger footprint | `StreamingConfig` |
 | Compact matrices inside SPARROW | Not applicable: SPARROW never builds constraint matrices | `crates/prover/src/sparrow.rs` |
@@ -102,6 +104,9 @@ option, deliberately not default), **Rejected/closed** (measured and dropped),
   benchmark binaries (2 Oct): `curvy-prover` is also a cdylib, so its library
   output names carry no hash and one build reused the other's. Give each
   checkout its own target dir.
+- On a fresh page, V8 runs a long single WASM call in its baseline tier (2 Oct):
+  one 92 MB `Sha256::digest` took 1,035 ms cold and 161 ms warm. Time phases
+  from a cold page as users see them, and split long kernels into calls.
 - The MSM schedule fixture used repeated bases, so its test could not catch a
   base/scalar misalignment; it now uses distinct bases.
 - Do not add standalone Poseidon gains to proving totals: SIGNET/SAGE evaluate

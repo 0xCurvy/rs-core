@@ -84,6 +84,10 @@ the measured proofs per run and the threaded worker count. The output records
 each served prover's SHA-256 and a per-circuit summary with medians and changes
 relative to the first build.
 
+With packages built with `--bench`, each run also records named load and
+proof phases; `node tools/browser/phase-summary.mjs output.json` prints their
+medians (benchmarks 6.11).
+
 `node tools/browser/sparrow-window.mjs output.json 2,5,10` sweeps fixed
 SPARROW MSM window widths in Chromium (`sparrow-window.html`). Point
 `CURVY_BROWSER_PKG_WEB` and `CURVY_BROWSER_PKG_WEB_THREADS` at

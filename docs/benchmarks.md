@@ -690,6 +690,78 @@ The self-tests are excluded from these builds; they are the
 - the speed gate's SIMD/arkworks ratio on the x86-64 CI runner (arm64:
   G1 1.8–1.9x, G2 2.0–2.1x).
 
+### 6.11 Whole-proof phase profile and cold-load hashing (2 Oct 2026, branch `poc/wasm-simd`)
+
+`--bench` builds time named phases (`crates/prover/src/phase_timing.rs`).
+`proof-check.html` adds them to `measure.mjs` reports,
+`tools/browser/phase-summary.mjs` summarizes them, and the `phase_profile`
+example prints the same breakdown natively. Setup: Chromium 143, production
+keys, 2 rounds × (1 warm-up + 3 proofs), load average 7–11. Medians in ms.
+
+**Loading was mostly hashing.** The browser spent about 85% of the resident
+load on the SHA-256 pin check:
+
+| Notes | Browser load | Browser SHA-256 | Native load, 8 threads | Native SHA-256 |
+|---:|---:|---:|---:|---:|
+| 2 | 1,197 | 1,035 | 117 | 44 |
+| 5 | 1,678 | 1,450 | 145 | 44 |
+| 10 | 2,984 | 2,558 | 275 | 83 |
+
+The rest of a browser load:
+
+- zkey points: 40–80 ms;
+- matrices: 40–170 ms (up to 300 ms portable);
+- witness graph: 60–145 ms;
+- copying the artifacts into WASM memory: 10–30 ms.
+
+**Cause and fix.** V8 starts every WASM function in its baseline tier and
+switches it to optimized code only at a later call. `Sha256::digest` hashed
+the whole zkey in one call, so on a fresh page all of it ran in baseline code,
+at about 90 MB/s. After a warm-up, the same 92 MB took 161 ms. WebCrypto took
+270 ms on the same bytes, so it would not help.
+
+Hashing in 1 MiB updates lets the optimized code take over after the first
+few. The same change applies to the witness graph check. Interleaved, 3
+rounds, 8 workers:
+
+| Notes | Load before | Load after |
+|---:|---:|---:|
+| 2 | 1,207 | 337 (−72%) |
+| 5 | 1,692 | 475 (−72%) |
+| 10 | 2,988 | 839 (−72%) |
+
+Proof time and WASM heap are unchanged. The proof is not affected the same
+way: its MSM and FFT kernels are many short calls, so a first proof is only
+5–8% slower than later ones.
+
+**Where proof time goes.** Share of the median proof:
+
+| Phase | SIMD, 8 workers, 2 notes | SIMD, 8 workers, 10 notes | SIMD portable, 2 notes | Default build, 8 workers, 2 notes | Native, 8 threads, 2 notes |
+|---|---:|---:|---:|---:|---:|
+| Proof, ms | 385 | 1,024 | 1,754 | 677 | 242 |
+| H MSM | 44% | 33% | 45% | 43% | 40% |
+| L + A + B1 MSMs | 15% | 26% | 19% | 14% | 15% |
+| B2 MSM (G2) | 10% | 18% | 14% | 12% | 10% |
+| FFT | 13% | 10% | 17% | 21% | 23% |
+| Witness evaluation | 12% | 10% | 3% | 7% | 10% |
+| QAP evaluation, scalars, verify, JSON | 2% | 1% | 2% | 1% | 1% |
+
+**Findings.**
+
+- **H MSM is the largest phase everywhere** (31–45%). Its scalars are uniform,
+  so the zero/one split does not help it.
+- **The SIMD FFT now beats native.** At 8 workers it is faster than native
+  ark-poly: 49 vs 56 ms at 2 notes.
+- **Witness evaluation is single-threaded.** It takes 44–105 ms in the
+  browser, twice native, and is 10–12% of a threaded SIMD proof.
+- **The small phases are negligible.** Self-verification (2 ms), JSON, scalar
+  conversion and QAP evaluation are each at most 2%.
+- **Possible native window issue (one unpaired run, load 8–11).** The native
+  `parallel` build on one thread uses the parallel window policy. At 10 notes
+  it was 11% slower than the serial build (3,868 vs 3,475 ms; H MSM 1,349 vs
+  1,069 ms). At 2 and 5 notes the two were within 3%. Node uses `parallel` with
+  one thread by default, so re-measure this.
+
 ### Re-run
 
 ```sh
@@ -702,6 +774,9 @@ node tools/benchmarks/signing-boundary.cjs BEFORE_PKG_DIR crates/wasm/pkg-node
 scripts/build-wasm.sh nodejs --sparrow --simd --simd-selftest
 node scripts/check-simd-codegen.mjs
 node scripts/simd-selftest.mjs --seeds 3 --stress 60
+# Phase profile (6.11): measure.mjs with --bench builds, then summarize; natively, the example.
+node tools/browser/phase-summary.mjs "$OUT/browser.json"
+cargo run --release --locked -p curvy-prover --features bench,parallel --example phase_profile -- ZKEY ZKEY_SHA256 GRAPH GRAPH_SHA256 INPUT.json 5
 # A/B: build each side with CURVY_WASM_OUT_DIR, then CURVY_BROWSER_BUILDS (measure.mjs header).
 ```
 
