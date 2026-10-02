@@ -38,7 +38,7 @@ const builds = process.env.CURVY_BROWSER_BUILDS
   ? process.env.CURVY_BROWSER_BUILDS.split(',').map((entry, index) => {
     const match = /^([^=]+)=(portable|threaded):(.+)$/.exec(entry);
     assert.ok(match, `invalid CURVY_BROWSER_BUILDS entry ${entry} (use label=portable|threaded:DIR)`);
-    return {label: match[1], mode: match[2], dir: match[3], port: 8127 + index};
+    return {label: match[1], mode: match[2], dir: match[3], port: Number(process.env.CURVY_BROWSER_PORT || 8127) + index};
   })
   : (process.env.CURVY_BROWSER_MODES || 'portable,threaded').split(',').map(mode => ({label: mode, mode, dir: null, port: 8127}));
 assert.ok(!process.env.CURVY_BROWSER_BUILDS || process.env.CURVY_BROWSER_ARTIFACTS,

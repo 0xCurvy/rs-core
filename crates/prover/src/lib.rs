@@ -68,6 +68,8 @@ pub mod artifacts;
 #[cfg(all(feature = "bench", feature = "parallel"))]
 pub mod proof_bench;
 pub mod qap;
+#[cfg(all(feature = "wasm-simd-fft", target_arch = "wasm32", target_feature = "simd128"))]
+mod simd_fft;
 #[cfg(feature = "scratch")]
 mod workspace;
 #[cfg(feature = "scratch")]

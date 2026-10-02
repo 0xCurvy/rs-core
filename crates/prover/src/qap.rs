@@ -331,15 +331,21 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
             *c_i = a * b;
         });
 
-    domain.ifft_in_place(a);
-    domain.ifft_in_place(b);
-
     let root_of_unity = double.element(1);
-    D::distribute_powers_and_mul_by_const(a, root_of_unity, F::one());
-    D::distribute_powers_and_mul_by_const(b, root_of_unity, F::one());
-
-    domain.fft_in_place(a);
-    domain.fft_in_place(b);
+    #[cfg(all(feature = "wasm-simd-fft", target_arch = "wasm32", target_feature = "simd128"))]
+    let simd = crate::simd_fft::WitnessStep::new(&domain, root_of_unity);
+    let step = |v: &mut Vec<F>| {
+        #[cfg(all(feature = "wasm-simd-fft", target_arch = "wasm32", target_feature = "simd128"))]
+        if let Some(simd) = &simd {
+            simd.apply(v);
+            return;
+        }
+        domain.ifft_in_place(v);
+        D::distribute_powers_and_mul_by_const(v, root_of_unity, F::one());
+        domain.fft_in_place(v);
+    };
+    step(a);
+    step(b);
 
     // `a` is no longer needed after this product. Reuse its domain-sized
     // allocation instead of asking `mul_polynomials_in_evaluation_domain`
@@ -349,9 +355,7 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
         .zip(cfg_iter!(b))
         .for_each(|(a_i, b_i)| *a_i *= b_i);
 
-    domain.ifft_in_place(c);
-    D::distribute_powers_and_mul_by_const(c, root_of_unity, F::one());
-    domain.fft_in_place(c);
+    step(c);
 
     cfg_iter_mut!(a[..])
         .zip(cfg_iter!(c))
