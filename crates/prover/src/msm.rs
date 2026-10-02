@@ -135,6 +135,14 @@ where
     let scalars = &scalars[..size];
     if accumulation == Accumulation::BatchAffine {
         let batch = batch.unwrap_or_else(|| batch_size(width));
+        #[cfg(all(
+            feature = "wasm-simd-msm",
+            target_arch = "wasm32",
+            target_feature = "simd128"
+        ))]
+        if let Some(sum) = crate::msm_simd::try_msm::<V>(bases, scalars, width, batch) {
+            return sum;
+        }
         if let Some(sum) =
             batch_affine_msm::<V, ark_bn254::g1::Config>(bases, scalars, width, batch)
         {

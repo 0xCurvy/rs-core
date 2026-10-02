@@ -9,6 +9,20 @@ use crate::sparrow::{
     manifest::{ManifestProofStream, ZkeyChunkManifest},
 };
 
+/// Development check for `wasm-simd-msm`: compares the SIMD MSM kernel with
+/// arkworks on random and adversarial G1/G2 inputs. Returns the number of
+/// MSMs compared; throws on the first mismatch.
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128",
+    not(feature = "parallel")
+))]
+#[wasm_bindgen(js_name = simdMsmSelfTest)]
+pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
+    crate::msm_simd::self_test::self_test(size as usize, u64::from(seed))
+}
+
 /// Invalidate origin-local SAGE caches when compiler semantics change.
 #[cfg(feature = "sparrow")]
 #[wasm_bindgen(js_name = sageCacheVersion)]

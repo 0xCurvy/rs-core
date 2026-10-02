@@ -84,6 +84,12 @@ pub mod zkey;
 mod authenticated_reader;
 mod groth16_prover;
 mod msm;
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+mod msm_simd;
 
 use std::io::{Cursor, Read, Seek};
 

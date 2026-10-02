@@ -1,0 +1,185 @@
+--- a/crates/prover/src/lib.rs
++++ b/crates/prover/src/lib.rs
+@@ -83,6 +83,7 @@
+ 
+ mod authenticated_reader;
+ mod groth16_prover;
++pub mod phase_timing;
+ mod msm;
+ 
+ use std::io::{Cursor, Read, Seek};
+@@ -380,9 +381,14 @@
+ 
+     /// Prove and self-verify one direct arkworks witness assignment.
+     pub fn prove_assignment(&self, assignment: &[Fr]) -> Result<ProofBundle, ProverError> {
++        let started = phase_timing::now();
+         let proof = self.prove(assignment)?;
++        phase_timing::add(phase_timing::PROVE, started);
+         let public_inputs = self.public_inputs(assignment)?;
+-        if !self.verify(&proof, public_inputs)? {
++        let started = phase_timing::now();
++        let verified = self.verify(&proof, public_inputs)?;
++        phase_timing::add(phase_timing::VERIFY, started);
++        if !verified {
+             return Err(ProverError::SelfVerificationFailed);
+         }
+         Ok(ProofBundle {
+@@ -625,7 +631,9 @@
+     }
+ 
+     pub fn prove_json(&self, input_json: &str) -> Result<ProofBundle, ProverError> {
++        let started = phase_timing::now();
+         let assignment = zeroize::Zeroizing::new(self.calculate_witness_json(input_json)?);
++        phase_timing::add(phase_timing::WITNESS, started);
+         self.prove_assignment(&assignment)
+     }
+ }
+--- a/crates/prover/src/msm.rs
++++ b/crates/prover/src/msm.rs
+@@ -70,7 +70,25 @@
+         return V::zero();
+     }
+ 
+-    msm_bigint_with_window::<V>(bases, scalars, resident_window_bits(size))
++    let started = crate::phase_timing::now();
++    let result = msm_bigint_with_window::<V>(bases, scalars, resident_window_bits(size));
++    let g2 = TypeId::of::<V>() == TypeId::of::<ark_bn254::G2Projective>();
++    use crate::phase_timing as pt;
++    let (slot, points, calls) = if g2 {
++        (pt::MSM_G2, pt::MSM_G2_POINTS, pt::MSM_G2_CALLS)
++    } else {
++        (pt::MSM_G1, pt::MSM_G1_POINTS, pt::MSM_G1_CALLS)
++    };
++    let elapsed = pt::now() - started;
++    pt::add(slot, started);
++    pt::add_value(points, size as f64);
++    pt::add_value(calls, 1.0);
++    let scalars = &scalars[..size];
++    let zeros = scalars.iter().filter(|s| s.0 == [0; 4]).count();
++    let ones = scalars.iter().filter(|s| s.0 == [1, 0, 0, 0]).count();
++    let small = scalars.iter().filter(|s| s.0[1..] == [0; 3]).count();
++    pt::log_call(g2, size, elapsed, zeros, ones, small);
++    result
+ }
+ 
+ fn resident_window_bits(points: usize) -> usize {
+--- a/crates/prover/src/groth16_prover.rs
++++ b/crates/prover/src/groth16_prover.rs
+@@ -40,12 +40,14 @@
+     num_constraints: usize,
+     full_assignment: &[Fr],
+ ) -> Result<Proof<Bn254>, SynthesisError> {
++    let started = crate::phase_timing::now();
+     let h = CircomReduction::witness_map_from_matrices::<Fr, GeneralEvaluationDomain<Fr>>(
+         matrices,
+         num_inputs,
+         num_constraints,
+         full_assignment,
+     )?;
++    crate::phase_timing::add(crate::phase_timing::WITNESS_MAP, started);
+ 
+     create_proof_from_h(pk, r, s, h, num_inputs, full_assignment)
+ }
+--- a/crates/prover/src/wasm_api.rs
++++ b/crates/prover/src/wasm_api.rs
+@@ -9,6 +9,19 @@
+     manifest::{ManifestProofStream, ZkeyChunkManifest},
+ };
+ 
++/// PoC instrumentation: accumulated [witness, prove, witnessMap, msmG1,
++/// msmG2, verify, g1Points, g2Points, g1Calls, g2Calls] since the last call.
++#[wasm_bindgen(js_name = phaseTimings)]
++pub fn phase_timings() -> Vec<f64> {
++    crate::phase_timing::take()
++}
++
++/// PoC instrumentation: per MSM call [is_g2, points, ms, zeros, ones, < 2^64].
++#[wasm_bindgen(js_name = msmCalls)]
++pub fn msm_calls() -> Vec<f64> {
++    crate::phase_timing::take_calls()
++}
++
+ /// Invalidate origin-local SAGE caches when compiler semantics change.
+ #[cfg(feature = "sparrow")]
+ #[wasm_bindgen(js_name = sageCacheVersion)]
+--- /dev/null
++++ b/crates/prover/src/phase_timing.rs
+@@ -0,0 +1,78 @@
++//! PoC instrumentation (target/claude-scratch copy only, never committed):
++//! accumulate wall time per proof phase so the MSM share of a portable WASM
++//! proof can be measured directly.
++
++use std::cell::RefCell;
++
++pub const WITNESS: usize = 0;
++pub const PROVE: usize = 1;
++pub const WITNESS_MAP: usize = 2;
++pub const MSM_G1: usize = 3;
++pub const MSM_G2: usize = 4;
++pub const VERIFY: usize = 5;
++pub const MSM_G1_POINTS: usize = 6;
++pub const MSM_G2_POINTS: usize = 7;
++pub const MSM_G1_CALLS: usize = 8;
++pub const MSM_G2_CALLS: usize = 9;
++const SLOTS: usize = 10;
++
++thread_local! {
++    static TIMES: RefCell<[f64; SLOTS]> = const { RefCell::new([0.0; SLOTS]) };
++    static CALLS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
++}
++
++/// Per MSM call: [is_g2, points, ms, zero scalars, one scalars, scalars < 2^64].
++pub fn log_call(is_g2: bool, points: usize, ms: f64, zeros: usize, ones: usize, small: usize) {
++    CALLS.with(|c| {
++        c.borrow_mut().extend([
++            is_g2 as u8 as f64,
++            points as f64,
++            ms,
++            zeros as f64,
++            ones as f64,
++            small as f64,
++        ])
++    });
++}
++
++pub fn take_calls() -> Vec<f64> {
++    CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
++}
++
++#[cfg(feature = "wasm")]
++#[wasm_bindgen::prelude::wasm_bindgen]
++extern "C" {
++    #[wasm_bindgen(js_namespace = performance, js_name = now)]
++    fn performance_now() -> f64;
++}
++
++#[cfg(feature = "wasm")]
++pub fn now() -> f64 {
++    performance_now()
++}
++
++#[cfg(not(feature = "wasm"))]
++pub fn now() -> f64 {
++    use std::sync::OnceLock;
++    use std::time::Instant;
++    static START: OnceLock<Instant> = OnceLock::new();
++    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1e3
++}
++
++pub fn add(slot: usize, started: f64) {
++    let elapsed = now() - started;
++    TIMES.with(|t| t.borrow_mut()[slot] += elapsed);
++}
++
++pub fn add_value(slot: usize, value: f64) {
++    TIMES.with(|t| t.borrow_mut()[slot] += value);
++}
++
++/// Return the accumulated values and reset them.
++pub fn take() -> Vec<f64> {
++    TIMES.with(|t| {
++        let values = t.borrow().to_vec();
++        *t.borrow_mut() = [0.0; SLOTS];
++        values
++    })
++}

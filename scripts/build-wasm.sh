@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the complete Curvy Rust core for WebAssembly and generate JS bindings.
 #
-# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized]
+# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm]
 #
 # `--threads` is available only for the `web` target and requires nightly with
 # rust-src plus a cross-origin-isolated browser at runtime. The non-threaded
@@ -12,6 +12,7 @@
 # `--signet-v2` enables only the compact witness body decoder; SPARROW implies it.
 # `--bench` adds development-only arithmetic kernels and implies SPARROW.
 # `--compact-matrix` selects the opt-in constraint representation.
+# `--simd-msm` opts into curvy-prover's SIMD batch-affine MSM (`wasm-simd-msm`).
 # `--poseidon-optimized` is retained as a compatible explicit assertion of the
 # optimized default and does not change the exported API.
 #
@@ -27,8 +28,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ "$#" -gt 7 ]; then
-  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized]" >&2
+if [ "$#" -gt 8 ]; then
+  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm]" >&2
   exit 1
 fi
 
@@ -42,6 +43,7 @@ sparrow_mode=""
 bench_mode=""
 compact_matrix_mode=""
 poseidon_optimized_mode=""
+simd_msm_mode=""
 for mode in "$@"; do
   case "$mode" in
     --threads)
@@ -78,6 +80,10 @@ for mode in "$@"; do
         exit 1
       fi
       compact_matrix_mode="--compact-matrix"
+      ;;
+    --simd-msm)
+      # Opt-in SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`).
+      simd_msm_mode="--simd-msm"
       ;;
     --poseidon-optimized)
       if [ -n "$poseidon_optimized_mode" ]; then
@@ -121,6 +127,9 @@ if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
 fi
 if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
   optional_features+=",curvy-wasm/poseidon-optimized"
+fi
+if [ "$simd_msm_mode" = "--simd-msm" ]; then
+  optional_features+=",curvy-prover/wasm-simd-msm"
 fi
 if [ "$thread_mode" = "--threads" ]; then
   prover_features="curvy-wasm/wasm-threads,curvy-prover/std,curvy-prover/wasm-threads${optional_features}"

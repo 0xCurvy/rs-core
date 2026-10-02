@@ -1,0 +1,32 @@
+[package]
+name = "wasm-field-poc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Isolated proof of concept: BN254 Fq representations and a batch-affine MSM kernel for WebAssembly"
+
+# Deliberately its own workspace, not an rs-core member, so `cargo build
+# --workspace` and CI never build it. Cargo.lock was copied from the root lock
+# and pruned by cargo, so the arkworks crates are the same 0.6.0 releases.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "poc"
+path = "src/main.rs"
+
+[dependencies]
+ark-bn254 = { version = "=0.6.0", default-features = false, features = ["curve", "std"] }
+ark-ec = { version = "=0.6.0", default-features = false, features = ["std"] }
+ark-ff = { version = "=0.6.0", default-features = false, features = ["std"] }
+ark-std = { version = "=0.6.0", default-features = false, features = ["std"] }
+
+# The production WASM build uses fat LTO, one codegen unit and opt-level 3
+# (scripts/build-wasm.sh); native uses the same here so both targets compile the
+# arithmetic identically.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

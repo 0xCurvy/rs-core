@@ -87,6 +87,10 @@ sage = ["curvy-witness/sage"]
 zkey-manifest = []
 sparrow = ["signet-v2", "sage", "zkey-manifest"]
 wasm = ["dep:wasm-bindgen"]
+# Opt-in SIMD batch-affine MSM (BN254 G1/G2) for WASM builds. Takes effect
+# only on wasm32 with `+simd128`; every other build ignores it. See
+# src/msm_simd and poc/wasm-field.
+wasm-simd-msm = []
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 
 [[bin]]
