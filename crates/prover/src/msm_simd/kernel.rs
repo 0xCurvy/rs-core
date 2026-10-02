@@ -389,6 +389,39 @@ impl<C: SWCurveConfig<BaseField = F::Ark>, F: PocField, A: BatchApply<C, F>>
         }
     }
 
+    /// Fallibly allocate a window's persistent buckets with the production
+    /// batch size (SPARROW). Batch scratch grows on demand.
+    pub fn try_new(width: usize) -> Option<Self> {
+        debug_assert!(C::COEFF_A.is_zero(), "the formulas assume a = 0");
+        let count = 1_usize << (width - 1);
+        let mut buckets = Vec::new();
+        buckets.try_reserve_exact(count).ok()?;
+        buckets.resize(count, Aff::identity());
+        let mut state = Vec::new();
+        state.try_reserve_exact(count).ok()?;
+        state.resize(count, FREE);
+        Some(Self {
+            buckets,
+            overflow: Vec::new(),
+            batch: Vec::new(),
+            deferred: Vec::new(),
+            state,
+            batch_size: batch_size(width),
+            applier: A::default(),
+            stats: Stats::default(),
+            curve: core::marker::PhantomData,
+        })
+    }
+
+    /// Drop the batch scratch, the applier's included, between SPARROW
+    /// chunks, so only the buckets stay resident. Call after [`Self::finish`].
+    pub fn release_scratch(&mut self) {
+        debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
+        self.batch = Vec::new();
+        self.deferred = Vec::new();
+        self.applier = A::default();
+    }
+
     #[inline]
     pub fn add_digit(&mut self, digit: i16, base: &Aff<F>) {
         match digit.cmp(&0) {

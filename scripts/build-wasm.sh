@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the complete Curvy Rust core for WebAssembly and generate JS bindings.
 #
-# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm]
+# Usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm] [--simd-fft] [--simd]
 #
 # `--threads` is available only for the `web` target and requires nightly with
 # rust-src plus a cross-origin-isolated browser at runtime. The non-threaded
@@ -13,6 +13,8 @@
 # `--bench` adds development-only arithmetic kernels and implies SPARROW.
 # `--compact-matrix` selects the opt-in constraint representation.
 # `--simd-msm` opts into curvy-prover's SIMD batch-affine MSM (`wasm-simd-msm`).
+# `--simd-fft` opts into its SIMD witness-map FFT (`wasm-simd-fft`); `--simd`
+# enables both. Both features are prototypes (poc/wasm-field, poc/wasm-fft).
 # `--poseidon-optimized` is retained as a compatible explicit assertion of the
 # optimized default and does not change the exported API.
 #
@@ -28,8 +30,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if [ "$#" -gt 8 ]; then
-  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm]" >&2
+if [ "$#" -gt 10 ]; then
+  echo "usage: scripts/build-wasm.sh [nodejs|web|bundler] [--threads] [--signet-v2] [--sparrow] [--bench] [--compact-matrix] [--poseidon-optimized] [--simd-msm] [--simd-fft] [--simd]" >&2
   exit 1
 fi
 
@@ -44,6 +46,7 @@ bench_mode=""
 compact_matrix_mode=""
 poseidon_optimized_mode=""
 simd_msm_mode=""
+simd_fft_mode=""
 for mode in "$@"; do
   case "$mode" in
     --threads)
@@ -85,6 +88,14 @@ for mode in "$@"; do
       # Opt-in SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`).
       simd_msm_mode="--simd-msm"
       ;;
+    --simd-fft)
+      # Opt-in SIMD witness-map FFT (curvy-prover `wasm-simd-fft`).
+      simd_fft_mode="--simd-fft"
+      ;;
+    --simd)
+      simd_msm_mode="--simd-msm"
+      simd_fft_mode="--simd-fft"
+      ;;
     --poseidon-optimized)
       if [ -n "$poseidon_optimized_mode" ]; then
         echo "--poseidon-optimized may be supplied only once" >&2
@@ -93,11 +104,15 @@ for mode in "$@"; do
       poseidon_optimized_mode="--poseidon-optimized"
       ;;
     *)
-      echo "unknown mode: $mode (use --threads, --signet-v2, --sparrow, --bench, --compact-matrix, --poseidon-optimized, or omit it)" >&2
+      echo "unknown mode: $mode (use --threads, --signet-v2, --sparrow, --bench, --compact-matrix, --poseidon-optimized, --simd-msm, --simd-fft, --simd, or omit it)" >&2
       exit 1
       ;;
   esac
 done
+if [ -n "${CURVY_WASM_SIMD_FFT:-}" ]; then
+  echo "CURVY_WASM_SIMD_FFT was replaced by --simd-fft" >&2
+  exit 1
+fi
 wasm_release_lto="${CURVY_WASM_LTO:-fat}"
 wasm_release_codegen_units="${CURVY_WASM_CODEGEN_UNITS:-1}"
 portable_rust_flags='-C target-feature=+simd128,+bulk-memory'
@@ -125,15 +140,14 @@ fi
 if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
   optional_features+=",curvy-prover/compact-matrix"
 fi
-# Prototype (poc/wasm-fft): CURVY_WASM_SIMD_FFT=1 enables the simd128 witness-map FFT.
-if [ "${CURVY_WASM_SIMD_FFT:-0}" = "1" ]; then
-  optional_features+=",curvy-prover/wasm-simd-fft"
-fi
 if [ "$poseidon_optimized_mode" = "--poseidon-optimized" ]; then
   optional_features+=",curvy-wasm/poseidon-optimized"
 fi
 if [ "$simd_msm_mode" = "--simd-msm" ]; then
   optional_features+=",curvy-prover/wasm-simd-msm"
+fi
+if [ "$simd_fft_mode" = "--simd-fft" ]; then
+  optional_features+=",curvy-prover/wasm-simd-fft"
 fi
 if [ "$thread_mode" = "--threads" ]; then
   prover_features="curvy-wasm/wasm-threads,curvy-prover/std,curvy-prover/wasm-threads${optional_features}"
@@ -246,6 +260,8 @@ sage_status="$sparrow_status"
 signet_v2_status="$(feature_status has_signet_v2)"
 compact_matrix_status="$(feature_status has_feature curvy-prover/compact-matrix)"
 threads_status="$(feature_status has_feature curvy-wasm/wasm-threads)"
+simd_msm_status="$(feature_status has_feature curvy-prover/wasm-simd-msm)"
+simd_fft_status="$(feature_status has_feature curvy-prover/wasm-simd-fft)"
 # curvy-wasm depends on curvy-core with its default features, which include
 # `poseidon-optimized`; no flag here can disable it. The flag only makes it
 # explicit in the feature list.
@@ -254,5 +270,5 @@ if has_feature curvy-wasm/poseidon-optimized; then
 else
   poseidon_optimized_status="enabled-default"
 fi
-echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, poseidon-optimized=$poseidon_optimized_status)"
+echo "built complete WASM core: $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, poseidon-optimized=$poseidon_optimized_status, simd-msm=$simd_msm_status, simd-fft=$simd_fft_status)"
 echo "cargo features: $prover_features"

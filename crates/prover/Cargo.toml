@@ -86,7 +86,10 @@ signet-v2 = ["curvy-witness/signet-v2"]
 sage = ["curvy-witness/sage"]
 zkey-manifest = []
 # Prototype: witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
-# simd128 only; a no-op elsewhere).
+# simd128 only; a no-op elsewhere). Each NTT is serial; with `parallel` the
+# three witness-map transforms run concurrently, on pools of at most 4
+# threads (larger pools keep ark-poly's parallel FFT). See src/simd_fft and
+# poc/wasm-fft.
 wasm-simd-fft = []
 sparrow = ["signet-v2", "sage", "zkey-manifest"]
 wasm = ["dep:wasm-bindgen"]

@@ -331,21 +331,32 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
             *c_i = a * b;
         });
 
+    // Move A, B and C to the coset: ifft, distribute_powers(omega_2n), fft.
     let root_of_unity = double.element(1);
-    #[cfg(all(feature = "wasm-simd-fft", target_arch = "wasm32", target_feature = "simd128"))]
-    let simd = crate::simd_fft::WitnessStep::new(&domain, root_of_unity);
-    let step = |v: &mut Vec<F>| {
-        #[cfg(all(feature = "wasm-simd-fft", target_arch = "wasm32", target_feature = "simd128"))]
-        if let Some(simd) = &simd {
-            simd.apply(v);
-            return;
+    // Opt-in SIMD transforms, bit-identical to ark-poly's. Each NTT is
+    // serial; with `parallel` the three run concurrently instead, on small
+    // pools only (see `simd_fft::MAX_WORKERS`).
+    #[cfg(all(
+        feature = "wasm-simd-fft",
+        target_arch = "wasm32",
+        target_feature = "simd128"
+    ))]
+    let transformed = crate::simd_fft::WitnessStep::new(&domain, root_of_unity)
+        .map(|simd| simd.apply3(a, b, c))
+        .is_some();
+    #[cfg(not(all(
+        feature = "wasm-simd-fft",
+        target_arch = "wasm32",
+        target_feature = "simd128"
+    )))]
+    let transformed = false;
+    if !transformed {
+        for v in [&mut *a, &mut *b, &mut *c] {
+            domain.ifft_in_place(v);
+            D::distribute_powers_and_mul_by_const(v, root_of_unity, F::one());
+            domain.fft_in_place(v);
         }
-        domain.ifft_in_place(v);
-        D::distribute_powers_and_mul_by_const(v, root_of_unity, F::one());
-        domain.fft_in_place(v);
-    };
-    step(a);
-    step(b);
+    }
 
     // `a` is no longer needed after this product. Reuse its domain-sized
     // allocation instead of asking `mul_polynomials_in_evaluation_domain`
@@ -354,8 +365,6 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
     cfg_iter_mut!(a[..])
         .zip(cfg_iter!(b))
         .for_each(|(a_i, b_i)| *a_i *= b_i);
-
-    step(c);
 
     cfg_iter_mut!(a[..])
         .zip(cfg_iter!(c))

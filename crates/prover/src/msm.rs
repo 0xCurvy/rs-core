@@ -377,27 +377,6 @@ impl<P: SWCurveConfig> AffineBuckets<P> {
         }
     }
 
-    /// Fallibly allocate the persistent buckets for a `width`-bit window,
-    /// with the production batch size. Batch scratch grows on demand.
-    #[cfg(feature = "sparrow")]
-    pub(crate) fn try_new(width: usize) -> Option<Self> {
-        let count = 1_usize << (width - 1);
-        let mut buckets = Vec::new();
-        buckets.try_reserve_exact(count).ok()?;
-        buckets.resize(count, Affine::identity());
-        let mut state = Vec::new();
-        state.try_reserve_exact(count).ok()?;
-        state.resize(count, FREE);
-        Some(Self {
-            buckets,
-            overflow: Vec::new(),
-            batch: Vec::new(),
-            deferred: Vec::new(),
-            state,
-            batch_size: batch_size(width),
-        })
-    }
-
     /// Fold `digit * base` into the window for a balanced signed digit.
     #[inline]
     pub(crate) fn add_digit(&mut self, digit: i16, base: &Affine<P>) {
@@ -583,15 +562,6 @@ impl<P: SWCurveConfig> AffineBuckets<P> {
         }
     }
 
-    /// Drop the batch scratch between SPARROW chunks, so only the buckets
-    /// stay resident. Call after [`Self::finish`].
-    #[cfg(feature = "sparrow")]
-    pub(crate) fn release_scratch(&mut self) {
-        debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
-        self.batch = Vec::new();
-        self.deferred = Vec::new();
-    }
-
     /// Running-sum reduction: `sum_k (k + 1) * bucket[k]`. Call
     /// [`Self::finish`] first.
     pub(crate) fn window_sum(&self) -> Projective<P> {
@@ -611,6 +581,82 @@ impl<P: SWCurveConfig> AffineBuckets<P> {
             }
         }
         sum.into()
+    }
+}
+
+/// One signed window of a SPARROW query: buckets that persist across chunks
+/// while each chunk of `(base, scalar)` pairs is folded in. [`AffineBuckets`]
+/// implements it with arkworks fields. Under `wasm-simd-msm` (wasm32 with
+/// simd128) SPARROW uses the SIMD kernel's buckets instead
+/// (`msm_simd::sparrow`): the same schedule with 29-bit limbs.
+#[cfg(feature = "sparrow")]
+pub(crate) trait WindowBuckets: Sized + Send + Sync {
+    type Curve: SWCurveConfig<ScalarField = Fr>;
+    /// A query base in this accumulator's representation.
+    type Base: Copy + Send + Sync;
+
+    /// Fallibly allocate the persistent buckets for a `width`-bit window,
+    /// with the production batch size. Batch scratch grows on demand.
+    fn try_new(width: usize) -> Option<Self>;
+    /// Convert a decoded query point.
+    fn base(point: &Affine<Self::Curve>) -> Self::Base;
+    /// Fold `digit * base` into the window for a balanced signed digit.
+    fn add_digit(&mut self, digit: i16, base: &Self::Base);
+    /// Apply every pending and deferred addition.
+    fn finish(&mut self);
+    /// Drop the batch scratch between chunks, so only the buckets stay
+    /// resident. Call after [`Self::finish`].
+    fn release_scratch(&mut self);
+    /// Running-sum reduction: `sum_k (k + 1) * bucket[k]`. Call
+    /// [`Self::finish`] first.
+    fn window_sum(&self) -> Projective<Self::Curve>;
+}
+
+#[cfg(feature = "sparrow")]
+impl<P: SWCurveConfig<ScalarField = Fr>> WindowBuckets for AffineBuckets<P> {
+    type Curve = P;
+    type Base = Affine<P>;
+
+    fn try_new(width: usize) -> Option<Self> {
+        let count = 1_usize << (width - 1);
+        let mut buckets = Vec::new();
+        buckets.try_reserve_exact(count).ok()?;
+        buckets.resize(count, Affine::identity());
+        let mut state = Vec::new();
+        state.try_reserve_exact(count).ok()?;
+        state.resize(count, FREE);
+        Some(Self {
+            buckets,
+            overflow: Vec::new(),
+            batch: Vec::new(),
+            deferred: Vec::new(),
+            state,
+            batch_size: batch_size(width),
+        })
+    }
+
+    #[inline(always)]
+    fn base(point: &Affine<P>) -> Affine<P> {
+        *point
+    }
+
+    #[inline]
+    fn add_digit(&mut self, digit: i16, base: &Affine<P>) {
+        AffineBuckets::add_digit(self, digit, base);
+    }
+
+    fn finish(&mut self) {
+        AffineBuckets::finish(self);
+    }
+
+    fn release_scratch(&mut self) {
+        debug_assert!(self.batch.is_empty() && self.deferred.is_empty());
+        self.batch = Vec::new();
+        self.deferred = Vec::new();
+    }
+
+    fn window_sum(&self) -> Projective<P> {
+        AffineBuckets::window_sum(self)
     }
 }
 
@@ -729,26 +775,20 @@ pub(crate) fn for_each_signed_window(
     debug_assert_eq!(carry, 0, "scalar does not fit the signed window count");
 }
 
-/// Reduce SPARROW's persistent affine windows (after [`AffineBuckets::finish`])
-/// to the MSM value.
+/// Reduce SPARROW's persistent windows (after [`WindowBuckets::finish`]) to
+/// the MSM value.
 #[cfg(feature = "sparrow")]
-pub(crate) fn reduce_affine_windows<P>(windows: &[AffineBuckets<P>], width: usize) -> Projective<P>
-where
-    P: SWCurveConfig<ScalarField = Fr>,
-{
+pub(crate) fn reduce_affine_windows<W: WindowBuckets>(
+    windows: &[W],
+    width: usize,
+) -> Projective<W::Curve> {
     // Each window's running-sum reduction is independent, so spread them
     // over the pool.
     #[cfg(feature = "parallel")]
-    let window_sums = windows
-        .par_iter()
-        .map(AffineBuckets::window_sum)
-        .collect::<Vec<_>>();
+    let window_sums = windows.par_iter().map(W::window_sum).collect::<Vec<_>>();
     #[cfg(not(feature = "parallel"))]
-    let window_sums = windows
-        .iter()
-        .map(AffineBuckets::window_sum)
-        .collect::<Vec<_>>();
-    reduce_msm_window_sums::<Projective<P>>(&window_sums, width)
+    let window_sums = windows.iter().map(W::window_sum).collect::<Vec<_>>();
+    reduce_msm_window_sums::<Projective<W::Curve>>(&window_sums, width)
 }
 
 fn reduce_msm_window_sums<V>(window_sums: &[V], width: usize) -> V

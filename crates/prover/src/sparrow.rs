@@ -14,16 +14,24 @@ pub mod manifest;
 #[cfg(feature = "bench")]
 #[doc(hidden)]
 pub mod phase_bench;
+#[cfg(all(
+    feature = "wasm",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128",
+    not(feature = "parallel")
+))]
+pub(crate) mod simd_self_test;
 
 use std::{
     io::{Read, Seek, SeekFrom},
     sync::Arc,
 };
 
-use ark_bn254::{Bn254, Fq, Fr, G1Affine, G1Projective, G2Affine, G2Projective, g1, g2};
+use ark_bn254::{Bn254, Fq, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{
     AffineRepr, CurveGroup, PrimeGroup,
-    short_weierstrass::{Affine, Projective, SWCurveConfig},
+    short_weierstrass::{Affine, Projective},
 };
 use ark_ff::{BigInt, PrimeField, UniformRand, Zero};
 use ark_groth16::{Groth16, Proof, VerifyingKey, prepare_verifying_key};
@@ -35,9 +43,37 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    ProofBundle, ProverMode, SPARROW_PROFILE, msm::AffineBuckets, proof_to_snarkjs_json,
+    ProofBundle, ProverMode, SPARROW_PROFILE, msm::WindowBuckets, proof_to_snarkjs_json,
     publics_to_json,
 };
+
+/// Persistent window buckets of SPARROW's G1 and G2 queries: arkworks'
+/// batch-affine buckets, or under `wasm-simd-msm` (wasm32 with simd128) the
+/// SIMD kernel's buckets, which keep the same schedule in 29-bit limbs.
+#[cfg(not(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+)))]
+type G1Windows = crate::msm::AffineBuckets<ark_bn254::g1::Config>;
+#[cfg(not(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+)))]
+type G2Windows = crate::msm::AffineBuckets<ark_bn254::g2::Config>;
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+type G1Windows = crate::msm_simd::SparrowG1;
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+type G2Windows = crate::msm_simd::SparrowG2;
 
 const FILE_HEADER_BYTES: usize = 12;
 const SECTION_HEADER_BYTES: usize = 12;
@@ -738,8 +774,8 @@ struct ActiveSection {
 enum SectionProcessor {
     Small(Vec<u8>),
     Coefficients(Box<CoefficientAccumulator>),
-    G1(Box<QueryAccumulator<g1::Config>>),
-    G2(Box<QueryAccumulator<g2::Config>>),
+    G1(Box<QueryAccumulator<G1Windows>>),
+    G2(Box<QueryAccumulator<G2Windows>>),
     Ignore,
 }
 
@@ -1074,39 +1110,45 @@ fn circom_witness_map(
     Ok(a)
 }
 
+/// A query point decoder (`decode_g1` or `decode_g2`).
+type DecodePoint<P> = fn(&[u8]) -> Result<Affine<P>, StreamingError>;
+
 /// Bounded-memory signed-Pippenger scheduling over arkworks group types.
 ///
 /// This layer controls batching, scalar recoding, and bucket reduction. Field
 /// arithmetic, curve addition/doubling, and the final Groth16 verification stay
-/// in `ark-bn254`/`ark-groth16`; this is not a separate BN254 implementation.
+/// in `ark-bn254`/`ark-groth16`; this is not a separate BN254 implementation
+/// (except under `wasm-simd-msm`, whose buckets use the SIMD kernel's field
+/// arithmetic; see `crate::msm_simd`).
 /// Buckets persist across chunks in affine form; each chunk's additions are
 /// applied in batch-affine form (see `crate::msm`), so every bucket is final
-/// before the next chunk starts.
-struct QueryAccumulator<P: SWCurveConfig<ScalarField = Fr>> {
+/// before the next chunk starts. Bases are converted to the buckets'
+/// representation as they are decoded.
+struct QueryAccumulator<W: WindowBuckets> {
     scalars: Arc<[Fr]>,
     scalar_offset: usize,
     expected: usize,
     seen: usize,
     record_bytes: usize,
-    decode: fn(&[u8]) -> Result<Affine<P>, StreamingError>,
-    validate: fn(&Affine<P>) -> bool,
+    decode: DecodePoint<W::Curve>,
+    validate: fn(&Affine<W::Curve>) -> bool,
     carry: Vec<u8>,
-    pairs: Vec<(Affine<P>, BigInt<4>)>,
-    buckets: Vec<AffineBuckets<P>>,
+    pairs: Vec<(W::Base, BigInt<4>)>,
+    buckets: Vec<W>,
     window_bits: usize,
     chunk_points: usize,
-    first: Option<Affine<P>>,
-    last: Option<Affine<P>>,
+    first: Option<Affine<W::Curve>>,
+    last: Option<Affine<W::Curve>>,
 }
 
-impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
+impl<W: WindowBuckets> QueryAccumulator<W> {
     fn new(
         scalars: Arc<[Fr]>,
         scalar_offset: usize,
         expected: usize,
         record_bytes: usize,
-        decode: fn(&[u8]) -> Result<Affine<P>, StreamingError>,
-        validate: fn(&Affine<P>) -> bool,
+        decode: DecodePoint<W::Curve>,
+        validate: fn(&Affine<W::Curve>) -> bool,
         config: StreamingConfig,
     ) -> Result<Self, StreamingError> {
         let scalar_end = scalar_offset
@@ -1133,7 +1175,7 @@ impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
             .try_reserve_exact(windows)
             .map_err(|_| StreamingError::InvalidZkey("cannot allocate MSM windows".into()))?;
         for _ in 0..windows {
-            buckets.push(AffineBuckets::try_new(window_bits).ok_or_else(|| {
+            buckets.push(W::try_new(window_bits).ok_or_else(|| {
                 StreamingError::InvalidZkey("cannot allocate MSM buckets".into())
             })?);
         }
@@ -1187,7 +1229,7 @@ impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
         let scalar = self.scalars[self.scalar_offset + self.seen];
         self.seen += 1;
         if !point.is_zero() && !scalar.is_zero() {
-            self.pairs.push((point, scalar.into_bigint()));
+            self.pairs.push((W::base(&point), scalar.into_bigint()));
             if self.pairs.len() == self.chunk_points {
                 self.flush();
             }
@@ -1203,7 +1245,7 @@ impl<P: SWCurveConfig<ScalarField = Fr>> QueryAccumulator<P> {
         self.pairs.clear();
     }
 
-    fn finish(mut self) -> Result<Projective<P>, StreamingError> {
+    fn finish(mut self) -> Result<Projective<W::Curve>, StreamingError> {
         if !self.carry.is_empty() || self.seen != self.expected {
             return invalid("query point count mismatch");
         }
@@ -1238,7 +1280,7 @@ pub fn bench_query_msm_g1(
     push_bytes: usize,
 ) -> Result<G1Projective, StreamingError> {
     let count = section.len() / G1_BYTES;
-    let query = QueryAccumulator::new(
+    let query = QueryAccumulator::<G1Windows>::new(
         scalars,
         0,
         count,
@@ -1260,7 +1302,7 @@ pub fn bench_query_msm_g2(
     push_bytes: usize,
 ) -> Result<G2Projective, StreamingError> {
     let count = section.len() / G2_BYTES;
-    let query = QueryAccumulator::new(
+    let query = QueryAccumulator::<G2Windows>::new(
         scalars,
         0,
         count,
@@ -1273,11 +1315,11 @@ pub fn bench_query_msm_g2(
 }
 
 #[cfg(feature = "bench")]
-fn bench_stream_query<P: SWCurveConfig<ScalarField = Fr>>(
-    mut query: QueryAccumulator<P>,
+fn bench_stream_query<W: WindowBuckets>(
+    mut query: QueryAccumulator<W>,
     section: &[u8],
     push_bytes: usize,
-) -> Result<Projective<P>, StreamingError> {
+) -> Result<Projective<W::Curve>, StreamingError> {
     for chunk in section.chunks(push_bytes.max(1)) {
         query.push(chunk)?;
     }
@@ -1287,9 +1329,9 @@ fn bench_stream_query<P: SWCurveConfig<ScalarField = Fr>>(
 /// Fold one chunk of `(base, scalar)` pairs into every signed window's affine
 /// buckets, leaving only the buckets resident. Shared by the streaming prover
 /// and `phase_bench`, so the benchmark times the production kernel.
-fn accumulate_affine_windows<P: SWCurveConfig<ScalarField = Fr>>(
-    buckets: &mut [AffineBuckets<P>],
-    pairs: &[(Affine<P>, BigInt<4>)],
+fn accumulate_affine_windows<W: WindowBuckets>(
+    buckets: &mut [W],
+    pairs: &[(W::Base, BigInt<4>)],
     window_bits: usize,
 ) {
     #[cfg(feature = "parallel")]
@@ -1663,7 +1705,8 @@ mod tests {
         };
 
         use super::{
-            G1_BYTES, G2_BYTES, QueryAccumulator, decode_g1, decode_g2, valid_g1, valid_g2,
+            G1_BYTES, G1Windows, G2_BYTES, G2Windows, QueryAccumulator, decode_g1, decode_g2,
+            valid_g1, valid_g2,
         };
 
         fn adversarial_bases<P: SWCurveConfig<ScalarField = Fr>>(
@@ -1728,7 +1771,7 @@ mod tests {
                 msm_chunk_points,
                 ..StreamingConfig::default()
             };
-            let mut query = QueryAccumulator::new(
+            let mut query = QueryAccumulator::<G1Windows>::new(
                 Arc::clone(&scalars),
                 offset,
                 size,
@@ -1743,7 +1786,7 @@ mod tests {
             }
             assert_eq!(query.finish().unwrap(), expected_g1, "G1 {config:?}");
 
-            let mut query = QueryAccumulator::new(
+            let mut query = QueryAccumulator::<G2Windows>::new(
                 Arc::clone(&scalars),
                 offset,
                 size,

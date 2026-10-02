@@ -11,7 +11,7 @@ use crate::msm_simd::simd::{self, U29x9x4};
 use crate::msm_simd::u29x9::{P, U29x9};
 
 pub trait Lanes4: PocField {
-    type V: Copy;
+    type V: Copy + Send + Sync;
     fn pack(e: &[Self; 4]) -> Self::V;
     fn unpack(v: &Self::V) -> [Self; 4];
     fn mul4(a: &Self::V, b: &Self::V) -> Self::V;

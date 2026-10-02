@@ -23,6 +23,25 @@ pub fn simd_msm_self_test(size: u32, seed: u32) -> u32 {
     crate::msm_simd::self_test::self_test(size as usize, u64::from(seed))
 }
 
+/// Development check for `wasm-simd-msm` with SPARROW: streams zkey-encoded
+/// G1/G2 queries through SPARROW's query accumulator, whose buckets are the
+/// SIMD kernel's in this build, and compares with arkworks on random and
+/// adversarial inputs, widths and chunk sizes. `size` is the adversarial
+/// query size. Returns the number of MSMs compared; throws on the first
+/// mismatch.
+#[cfg(all(
+    feature = "sparrow",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128",
+    not(feature = "parallel")
+))]
+#[wasm_bindgen(js_name = simdSparrowSelfTest)]
+pub fn simd_sparrow_self_test(size: u32, seed: u32) -> Result<u32, JsError> {
+    crate::sparrow::simd_self_test::self_test(size as usize, u64::from(seed))
+        .map_err(|error| JsError::new(&error))
+}
+
 /// Invalidate origin-local SAGE caches when compiler semantics change.
 #[cfg(feature = "sparrow")]
 #[wasm_bindgen(js_name = sageCacheVersion)]

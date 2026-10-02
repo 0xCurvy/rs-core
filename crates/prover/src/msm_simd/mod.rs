@@ -10,6 +10,9 @@
 //! for hot buckets) is the same algorithm as `msm::AffineBuckets`, and the
 //! running-sum reduction runs four bucket segments in lanes. Bases are
 //! converted from arkworks per call; scalars and results stay arkworks types.
+//! Under `sparrow`, SPARROW's persistent query buckets use the same kernel
+//! (`sparrow.rs`): they stay in this representation across chunks, and each
+//! base is converted once, as it is decoded.
 //!
 //! Only compiled for `wasm32` with `simd128`; every other build uses `msm.rs`
 //! unchanged. Under `parallel` (threaded WASM) windows run on the host's
@@ -38,11 +41,16 @@ mod u29x9;
 
 #[cfg(feature = "wasm")]
 pub(crate) mod self_test;
+#[cfg(feature = "sparrow")]
+mod sparrow;
 
 use fq2::Fq2Simd;
 use kernel::{Phases, Stats};
 use simd_msm::SimdApply;
 use u29x9::U29x9;
+
+#[cfg(feature = "sparrow")]
+pub(crate) use sparrow::{SparrowG1, SparrowG2};
 
 /// Run the SIMD kernel when `V` is BN254 G1 or G2; `None` otherwise.
 pub(crate) fn try_msm<V>(

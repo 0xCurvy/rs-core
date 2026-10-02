@@ -3,14 +3,14 @@
 use ark_bn254::{Fr, G1Affine, G2Affine};
 use ark_ec::{
     AffineRepr, CurveGroup,
-    short_weierstrass::{Affine, Projective, SWCurveConfig},
+    short_weierstrass::{Affine, Projective},
 };
 use ark_ff::{Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use sha2::{Digest, Sha256};
 
-use super::accumulate_affine_windows;
-use crate::msm::{AffineBuckets, reduce_affine_windows};
+use super::{G1Windows, G2Windows, accumulate_affine_windows};
+use crate::msm::{WindowBuckets, reduce_affine_windows};
 
 pub fn sha256(bytes: usize, rounds: usize) -> Result<u32, &'static str> {
     if bytes == 0 || bytes > 512 * 1024 * 1024 || rounds == 0 || rounds > 64 {
@@ -58,30 +58,29 @@ pub fn fft(log_size: u32, rounds: usize) -> Result<u32, &'static str> {
 }
 
 pub fn g1_msm(log_size: u32, width: usize) -> Result<u32, &'static str> {
-    let result = synthetic_msm(G1Affine::generator(), log_size, width)?;
+    let result = synthetic_msm::<G1Windows>(G1Affine::generator(), log_size, width)?;
     Ok(result.into_affine().x.into_bigint().0[0] as u32)
 }
 
 pub fn g2_msm(log_size: u32, width: usize) -> Result<u32, &'static str> {
-    let result = synthetic_msm(G2Affine::generator(), log_size, width)?;
+    let result = synthetic_msm::<G2Windows>(G2Affine::generator(), log_size, width)?;
     Ok(result.into_affine().x.c0.into_bigint().0[0] as u32)
 }
 
 /// Time SPARROW's production query kernel (batch-affine buckets, the same
-/// per-window scheduling and reduction) on one chunk of synthetic pairs. Every
-/// base is the generator, so this measures arithmetic, not point decoding.
-fn synthetic_msm<P>(
-    base: Affine<P>,
+/// per-window scheduling and reduction; the SIMD kernel's under
+/// `wasm-simd-msm`) on one chunk of synthetic pairs. Every base is the
+/// generator, so this measures arithmetic, not point decoding.
+fn synthetic_msm<W: WindowBuckets>(
+    base: Affine<W::Curve>,
     log_size: u32,
     width: usize,
-) -> Result<Projective<P>, &'static str>
-where
-    P: SWCurveConfig<ScalarField = Fr>,
-{
+) -> Result<Projective<W::Curve>, &'static str> {
     if !(10..=22).contains(&log_size) || !(4..=16).contains(&width) {
         return Err("invalid MSM benchmark dimensions");
     }
     let count = 1_usize << log_size;
+    let base = W::base(&base);
     let pairs = (0..count)
         .map(|index| {
             let scalar = Fr::from(
@@ -94,7 +93,7 @@ where
         .collect::<Vec<_>>();
     let windows = (Fr::MODULUS_BIT_SIZE as usize).div_ceil(width);
     let mut buckets = (0..windows)
-        .map(|_| AffineBuckets::try_new(width).ok_or("cannot allocate MSM buckets"))
+        .map(|_| W::try_new(width).ok_or("cannot allocate MSM buckets"))
         .collect::<Result<Vec<_>, _>>()?;
     accumulate_affine_windows(&mut buckets, &pairs, width);
     Ok(reduce_affine_windows(&buckets, width))
@@ -118,11 +117,11 @@ mod tests {
     fn synthetic_msm_runs_the_production_kernel_correctly() {
         for width in [4, 8, 13] {
             assert_eq!(
-                synthetic_msm(G1Affine::generator(), 10, width).unwrap(),
+                synthetic_msm::<G1Windows>(G1Affine::generator(), 10, width).unwrap(),
                 G1Projective::generator() * expected_scalar(10)
             );
             assert_eq!(
-                synthetic_msm(G2Affine::generator(), 10, width).unwrap(),
+                synthetic_msm::<G2Windows>(G2Affine::generator(), 10, width).unwrap(),
                 G2Projective::generator() * expected_scalar(10)
             );
         }

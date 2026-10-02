@@ -230,6 +230,7 @@ async function runProfiles(profiles, matrixMode) {
       ? { id: "all-circuits", label: "All configured circuits" }
       : { id: profiles[0].id, label: profiles[0].label },
     profiles: profiles.map(({ id, label }) => ({ id, label })),
+    build: config.build ?? null,
     settings: selectedSettings,
     pageEnvironment: pageEnvironment(),
     before,

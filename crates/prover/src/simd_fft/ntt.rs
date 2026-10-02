@@ -10,9 +10,9 @@
 //!   all four lanes (a splat), so four butterflies per vector op;
 //! - the bit reversal is folded into the unpack: vector k lands at the four
 //!   contiguous outputs 4*rev(k) .. 4*rev(k)+3 (lane order 0, 2, 1, 3).
+//!
 //! Data stays in arkworks' Montgomery integer (see fr29.rs), so packing is
 //! limb repacking only; twiddles and scale factors are in the 2^261 form.
-
 
 use ark_bn254::Fr;
 use ark_ff::{Field, One};
@@ -105,7 +105,11 @@ impl Plan {
 
 #[inline(always)]
 fn rev(k: usize, bits: u32) -> usize {
-    if bits == 0 { 0 } else { k.reverse_bits() >> (usize::BITS - bits) }
+    if bits == 0 {
+        0
+    } else {
+        k.reverse_bits() >> (usize::BITS - bits)
+    }
 }
 
 /// Pack (optionally scaling element i by c * g^i), returns the vectors.
@@ -118,14 +122,21 @@ pub fn pack(x: &[Fr], buf: &mut Vec<V>, pre: Option<(Fr, Fr)>) {
     let mut step = m;
     if let Some((g, c)) = pre {
         let gq = g.pow([q as u64]);
-        let e: Vec<[u32; 9]> = (0..4u64).map(|l| const_from_ark(&(c * gq.pow([l])))).collect();
+        let e: Vec<[u32; 9]> = (0..4u64)
+            .map(|l| const_from_ark(&(c * gq.pow([l]))))
+            .collect();
         for i in 0..9 {
             m[i] = u32x4(e[0][i], e[1][i], e[2][i], e[3][i]);
         }
         step = splat(&const_from_ark(&g));
     }
     for k in 0..q {
-        let e = [raw_from_ark(&x[k]), raw_from_ark(&x[k + q]), raw_from_ark(&x[k + 2 * q]), raw_from_ark(&x[k + 3 * q])];
+        let e = [
+            raw_from_ark(&x[k]),
+            raw_from_ark(&x[k + q]),
+            raw_from_ark(&x[k + 2 * q]),
+            raw_from_ark(&x[k + 3 * q]),
+        ];
         let mut v = [u32x4_splat(0); 9];
         for i in 0..9 {
             v[i] = u32x4(e[0][i], e[1][i], e[2][i], e[3][i]);
