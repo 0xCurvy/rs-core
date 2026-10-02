@@ -94,6 +94,79 @@ where
     None
 }
 
+/// Bucket count and batch size of [`try_sum`]'s window: round-robin digits
+/// over 512 buckets keep every batch of 128 on distinct buckets.
+const SUM_WIDTH: usize = 10;
+const SUM_BATCH: usize = 128;
+/// Points per Rayon task in [`try_sum`].
+#[cfg(feature = "parallel")]
+const SUM_TASK_POINTS: usize = 16_384;
+
+/// Sum of the bases whose scalar is one, when `V` is BN254 G1 or G2;
+/// `None` otherwise. The bases are converted as they are read and spread
+/// round-robin over one window's buckets, so the additions are
+/// batch-affine with one inversion per batch (instead of all landing in
+/// one hot bucket), and the buckets are then added up.
+pub(crate) fn try_sum<V>(bases: &[V::MulBase], scalars: &[BigInt<4>]) -> Option<V>
+where
+    V: VariableBaseMSM<ScalarField = Fr>,
+{
+    if TypeId::of::<V>() == TypeId::of::<G1Projective>() {
+        let sum = sum_ones::<g1::Config, U29x9, _>(bases, scalars, |b| downcast::<_, G1Affine>(b));
+        return Some(*downcast::<_, V>(&sum));
+    }
+    if TypeId::of::<V>() == TypeId::of::<G2Projective>() {
+        let sum =
+            sum_ones::<g2::Config, Fq2Simd, _>(bases, scalars, |b| downcast::<_, G2Affine>(b));
+        return Some(*downcast::<_, V>(&sum));
+    }
+    None
+}
+
+fn sum_ones<C, F, B>(
+    bases: &[B],
+    scalars: &[BigInt<4>],
+    affine: impl Fn(&B) -> &ark_ec::short_weierstrass::Affine<C> + Sync,
+) -> ark_ec::short_weierstrass::Projective<C>
+where
+    C: ark_ec::short_weierstrass::SWCurveConfig<BaseField = F::Ark>,
+    F: lanes::Lanes4,
+    B: Sync,
+{
+    const ONE: BigInt<4> = BigInt([1, 0, 0, 0]);
+    let part = |bases: &[B], scalars: &[BigInt<4>]| {
+        let mut window =
+            kernel::AffineBuckets::<C, F, SimdApply<F>>::with_batch_size(SUM_WIDTH, SUM_BATCH);
+        let buckets = 1_usize << (SUM_WIDTH - 1);
+        let mut next = 0;
+        for (base, scalar) in bases.iter().zip(scalars) {
+            if *scalar == ONE {
+                window.add_digit(
+                    (next % buckets) as i16 + 1,
+                    &kernel::Aff::from_ark(affine(base)),
+                );
+                next += 1;
+            }
+        }
+        window.finish();
+        window.bucket_total()
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        bases
+            .par_chunks(SUM_TASK_POINTS)
+            .zip(scalars.par_chunks(SUM_TASK_POINTS))
+            .map(|(bases, scalars)| part(bases, scalars))
+            .reduce(
+                ark_ec::short_weierstrass::Projective::<C>::default,
+                |a, b| a + b,
+            )
+    }
+    #[cfg(not(feature = "parallel"))]
+    part(bases, scalars)
+}
+
 fn downcast<T: 'static, U: 'static>(value: &T) -> &U {
     (value as &dyn Any)
         .downcast_ref::<U>()

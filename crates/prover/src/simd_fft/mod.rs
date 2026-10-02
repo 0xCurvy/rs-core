@@ -5,10 +5,14 @@
 //! `simdFftSelfTest` and `simdFftStress` check `qap::finish_evaluations` and
 //! the NTTs in a `wasm-simd-selftest` build of the shipped code).
 //!
-//! Each NTT is serial. With `parallel`, the three independent transforms
-//! (A, B, C) run concurrently on the host's Rayon pool instead, and only on
-//! pools of at most `MAX_WORKERS` threads: ark-poly's parallel FFT keeps
-//! scaling past three workers, three serial NTTs do not.
+//! The inverse transform, coset scaling and forward transform run fused,
+//! depth-first over the packed data (see ntt.rs). With `parallel`, each
+//! transform is parallel inside on the host's Rayon pool, so the step scales
+//! with the pool: 0.32-0.36x of ark-poly's parallel time on 2, 4, 8 and 13
+//! workers (2^18 and 2^19, Chromium 143, Apple M4 Pro), 0.36-0.38x serially.
+//! A, B and C are transformed in turn, so only one packed copy (36 bytes per
+//! element) is live: running the three concurrently was within 5% on 2-8
+//! workers but held three copies (+38 MB WASM heap at 2^19).
 #![allow(clippy::needless_range_loop)]
 
 mod fr29;
@@ -23,85 +27,49 @@ use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use ark_poly::EvaluationDomain;
 use core::any::{Any, TypeId};
-use core::arch::wasm32::u32x4_splat;
-
-/// Largest Rayon pool on which the SIMD transforms run. Witness-map
-/// transforms (2^18 and 2^19, Chromium 143, Apple M4 Pro) took 0.76-0.77x
-/// of ark-poly's parallel time on 2 and 4 workers but 1.35-1.42x on 8.
-#[cfg(feature = "parallel")]
-pub(crate) const MAX_WORKERS: usize = 4;
-
-/// Whether `WitnessStep::new` may return a step on this thread's pool.
-#[cfg(feature = "parallel")]
-pub(crate) fn pool_allows_simd() -> bool {
-    rayon::current_num_threads() <= MAX_WORKERS
-}
-
-#[cfg(not(feature = "parallel"))]
-pub(crate) fn pool_allows_simd() -> bool {
-    true
-}
 
 /// `ifft`, `distribute_powers(g)`, `fft` over one domain, fused: the n^-1 of
 /// the inverse transform is folded into the coset scaling.
 pub(crate) struct WitnessStep {
-    inv: ntt::Plan,
-    fwd: ntt::Plan,
-    g: Fr,
-    size_inv: Fr,
+    step: ntt::Step,
 }
 
 impl WitnessStep {
     pub(crate) fn new<F: PrimeField, D: EvaluationDomain<F>>(domain: &D, g: F) -> Option<Self> {
+        Self::with_leaf(domain, g, ntt::LEAF)
+    }
+
+    /// [`Self::new`] with an explicit leaf block size (self-test only).
+    pub(crate) fn with_leaf<F: PrimeField, D: EvaluationDomain<F>>(
+        domain: &D,
+        g: F,
+        leaf: usize,
+    ) -> Option<Self> {
         if TypeId::of::<F>() != TypeId::of::<Fr>()
             || domain.size() < 8
             || !domain.size().is_power_of_two()
             || !domain.coset_offset().is_one()
-            || !pool_allows_simd()
         {
             return None;
         }
         let cast = |x: F| -> Fr { *(&x as &dyn Any).downcast_ref::<Fr>().expect("Fr") };
-        let n = domain.size();
-        let (inv, fwd) = (cast(domain.group_gen_inv()), cast(domain.group_gen()));
-        #[cfg(feature = "parallel")]
-        let (inv, fwd) = rayon::join(|| ntt::Plan::new(n, inv), || ntt::Plan::new(n, fwd));
-        #[cfg(not(feature = "parallel"))]
-        let (inv, fwd) = (ntt::Plan::new(n, inv), ntt::Plan::new(n, fwd));
-        Some(WitnessStep {
-            inv,
-            fwd,
-            g: cast(g),
-            size_inv: cast(domain.size_inv()),
-        })
-    }
-
-    /// Applies the step to A, B and C: concurrently with `parallel`, else in
-    /// turn. Each NTT stays serial.
-    pub(crate) fn apply3<F: 'static>(&self, a: &mut Vec<F>, b: &mut Vec<F>, c: &mut Vec<F>) {
-        let [a, b, c] = [a, b, c].map(fr_vec);
-        #[cfg(feature = "parallel")]
-        rayon::join(
-            || self.apply(a),
-            || rayon::join(|| self.apply(b), || self.apply(c)),
+        let step = ntt::Step::with_leaf(
+            domain.size(),
+            cast(domain.group_gen()),
+            cast(domain.group_gen_inv()),
+            cast(g),
+            cast(domain.size_inv()),
+            leaf,
         );
-        #[cfg(not(feature = "parallel"))]
-        {
-            self.apply(a);
-            self.apply(b);
-            self.apply(c);
-        }
+        Some(WitnessStep { step })
     }
 
-    fn apply(&self, v: &mut [Fr]) {
-        // Per call, so concurrent steps never share it.
-        let mut buf = Vec::new();
-        ntt::ntt(&self.inv, v, &mut buf, None, None);
-        ntt::ntt(&self.fwd, v, &mut buf, Some((self.g, self.size_inv)), None);
-        // The packed copy is witness-derived: wipe it like `qap::WipeOnDrop`
-        // (best effort; `black_box` keeps the stores before the free).
-        buf.fill([u32x4_splat(0); 9]);
-        core::hint::black_box(&buf);
+    /// Applies the step to A, B and C in turn; each transform is parallel
+    /// under `parallel`.
+    pub(crate) fn apply3<F: 'static>(&self, a: &mut Vec<F>, b: &mut Vec<F>, c: &mut Vec<F>) {
+        for v in [a, b, c] {
+            self.step.apply(fr_vec(v));
+        }
     }
 }
 

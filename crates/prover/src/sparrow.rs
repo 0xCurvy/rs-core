@@ -1138,7 +1138,18 @@ struct QueryAccumulator<W: WindowBuckets> {
     chunk_points: usize,
     first: Option<Affine<W::Curve>>,
     last: Option<Affine<W::Curve>>,
+    /// Shortest run of whole records decoded on the Rayon pool.
+    #[cfg(feature = "parallel")]
+    parallel_min_records: usize,
 }
+
+/// Runs of fewer whole records are decoded on the calling thread. Manifest
+/// and reader pushes carry 1 MiB (16,384 G1 or 8,192 G2 records).
+#[cfg(feature = "parallel")]
+const PARALLEL_DECODE_MIN_RECORDS: usize = 256;
+/// Records per Rayon task when decoding a run.
+#[cfg(feature = "parallel")]
+const DECODE_TASK_RECORDS: usize = 256;
 
 impl<W: WindowBuckets> QueryAccumulator<W> {
     fn new(
@@ -1193,6 +1204,8 @@ impl<W: WindowBuckets> QueryAccumulator<W> {
             chunk_points: config.msm_chunk_points,
             first: None,
             last: None,
+            #[cfg(feature = "parallel")]
+            parallel_min_records: PARALLEL_DECODE_MIN_RECORDS,
         })
     }
 
@@ -1208,11 +1221,75 @@ impl<W: WindowBuckets> QueryAccumulator<W> {
                 self.carry = Vec::with_capacity(self.record_bytes);
             }
         }
-        let mut records = bytes.chunks_exact(self.record_bytes);
-        for record in &mut records {
-            self.process_record(record)?;
+        let whole = bytes.len() - bytes.len() % self.record_bytes;
+        self.process_records(&bytes[..whole])?;
+        self.carry.extend_from_slice(&bytes[whole..]);
+        Ok(())
+    }
+
+    /// Decode whole records in order. Under `parallel`, runs of records are
+    /// decoded and converted to the buckets' representation on the Rayon
+    /// pool. A run never extends past the free space of the current chunk,
+    /// so every chunk holds the same pairs in the same order, and is
+    /// accumulated at the same point, as with the serial loop.
+    fn process_records(&mut self, mut bytes: &[u8]) -> Result<(), StreamingError> {
+        while !bytes.is_empty() {
+            let records = bytes.len() / self.record_bytes;
+            #[cfg(feature = "parallel")]
+            let run = records.min(self.chunk_points - self.pairs.len());
+            #[cfg(not(feature = "parallel"))]
+            let run = records;
+            let (head, tail) = bytes.split_at(run * self.record_bytes);
+            #[cfg(feature = "parallel")]
+            if run >= self.parallel_min_records {
+                self.process_run(head)?;
+                bytes = tail;
+                continue;
+            }
+            for record in head.chunks_exact(self.record_bytes) {
+                self.process_record(record)?;
+            }
+            bytes = tail;
         }
-        self.carry.extend_from_slice(records.remainder());
+        Ok(())
+    }
+
+    /// [`Self::process_record`] for a run of whole records that fits in the
+    /// current chunk, decoded in parallel.
+    #[cfg(feature = "parallel")]
+    fn process_run(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
+        let count = bytes.len() / self.record_bytes;
+        if count > self.expected - self.seen {
+            return invalid("query contains too many points");
+        }
+        if self.first.is_none() {
+            self.first = Some((self.decode)(&bytes[..self.record_bytes])?);
+        }
+        self.last = Some((self.decode)(&bytes[bytes.len() - self.record_bytes..])?);
+        let start = self.scalar_offset + self.seen;
+        let scalars = &self.scalars[start..start + count];
+        let (decode, record_bytes) = (self.decode, self.record_bytes);
+        let parts = bytes
+            .par_chunks(DECODE_TASK_RECORDS * record_bytes)
+            .zip(scalars.par_chunks(DECODE_TASK_RECORDS))
+            .map(|(records, scalars)| {
+                let mut pairs = Vec::with_capacity(scalars.len());
+                for (record, scalar) in records.chunks_exact(record_bytes).zip(scalars) {
+                    let point = decode(record)?;
+                    if !point.is_zero() && !scalar.is_zero() {
+                        pairs.push((W::base(&point), scalar.into_bigint()));
+                    }
+                }
+                Ok(pairs)
+            })
+            .collect::<Result<Vec<_>, StreamingError>>()?;
+        self.seen += count;
+        for pairs in parts {
+            self.pairs.extend(pairs);
+        }
+        if self.pairs.len() == self.chunk_points {
+            self.flush();
+        }
         Ok(())
     }
 
@@ -1762,43 +1839,99 @@ mod tests {
         assert!(expected_g1 != G1Projective::default() && expected_g2 != G2Projective::default());
 
         let adaptive = StreamingConfig::ADAPTIVE_WINDOW_BITS;
-        for (window_bits, msm_chunk_points) in
-            [(4, 7), (8, 64), (13, 1_000), (16, 33), (adaptive, 5)]
-        {
-            let config = StreamingConfig {
-                window_bits,
-                msm_chunk_points,
-                ..StreamingConfig::default()
-            };
-            let mut query = QueryAccumulator::<G1Windows>::new(
-                Arc::clone(&scalars),
-                offset,
-                size,
-                G1_BYTES,
-                decode_g1,
-                valid_g1,
-                config,
-            )
-            .unwrap();
-            for chunk in g1_bytes.chunks(97) {
-                query.push(chunk).unwrap();
-            }
-            assert_eq!(query.finish().unwrap(), expected_g1, "G1 {config:?}");
+        // Pushes that split records, that carry runs of whole records (with
+        // and without a split record), and the whole section at once; with
+        // `parallel`, runs of 1 and 3 records already decode on the pool.
+        for (pushed_records, extra_bytes) in [(1, 33), (13, 5), (size, 0)] {
+            for parallel_min_records in [1, 3, usize::MAX] {
+                for (window_bits, msm_chunk_points) in
+                    [(4, 7), (8, 64), (13, 1_000), (16, 33), (adaptive, 5)]
+                {
+                    let config = StreamingConfig {
+                        window_bits,
+                        msm_chunk_points,
+                        ..StreamingConfig::default()
+                    };
+                    let label = format!(
+                        "{config:?}, {pushed_records} records + {extra_bytes} bytes per push, runs from {parallel_min_records}"
+                    );
+                    let mut query = QueryAccumulator::<G1Windows>::new(
+                        Arc::clone(&scalars),
+                        offset,
+                        size,
+                        G1_BYTES,
+                        decode_g1,
+                        valid_g1,
+                        config,
+                    )
+                    .unwrap();
+                    #[cfg(feature = "parallel")]
+                    {
+                        query.parallel_min_records = parallel_min_records;
+                    }
+                    for chunk in g1_bytes.chunks(pushed_records * G1_BYTES + extra_bytes) {
+                        query.push(chunk).unwrap();
+                    }
+                    assert_eq!(query.finish().unwrap(), expected_g1, "G1 {label}");
 
-            let mut query = QueryAccumulator::<G2Windows>::new(
-                Arc::clone(&scalars),
-                offset,
-                size,
-                G2_BYTES,
-                decode_g2,
-                valid_g2,
-                config,
-            )
-            .unwrap();
-            for chunk in g2_bytes.chunks(201) {
-                query.push(chunk).unwrap();
+                    let mut query = QueryAccumulator::<G2Windows>::new(
+                        Arc::clone(&scalars),
+                        offset,
+                        size,
+                        G2_BYTES,
+                        decode_g2,
+                        valid_g2,
+                        config,
+                    )
+                    .unwrap();
+                    #[cfg(feature = "parallel")]
+                    {
+                        query.parallel_min_records = parallel_min_records;
+                    }
+                    for chunk in g2_bytes.chunks(pushed_records * G2_BYTES + extra_bytes) {
+                        query.push(chunk).unwrap();
+                    }
+                    assert_eq!(query.finish().unwrap(), expected_g2, "G2 {label}");
+                }
             }
-            assert_eq!(query.finish().unwrap(), expected_g2, "G2 {config:?}");
+        }
+
+        // A noncanonical coordinate and an excess record are rejected on
+        // either decode path.
+        let mut bad = g1_bytes.clone();
+        bad[G1_BYTES * 100..G1_BYTES * 100 + 32].fill(0xff);
+        for parallel_min_records in [1, usize::MAX] {
+            let config = StreamingConfig::default();
+            let new_query = |count| {
+                QueryAccumulator::<G1Windows>::new(
+                    Arc::clone(&scalars),
+                    offset,
+                    count,
+                    G1_BYTES,
+                    decode_g1,
+                    valid_g1,
+                    config,
+                )
+                .unwrap()
+            };
+            let mut query = new_query(size);
+            #[cfg(feature = "parallel")]
+            {
+                query.parallel_min_records = parallel_min_records;
+            }
+            assert!(
+                query.push(&bad).is_err(),
+                "noncanonical, runs from {parallel_min_records}"
+            );
+            let mut query = new_query(size - 1);
+            #[cfg(feature = "parallel")]
+            {
+                query.parallel_min_records = parallel_min_records;
+            }
+            assert!(
+                query.push(&g1_bytes).is_err(),
+                "excess, runs from {parallel_min_records}"
+            );
         }
     }
 

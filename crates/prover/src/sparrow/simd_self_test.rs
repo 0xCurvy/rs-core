@@ -17,6 +17,11 @@
 //!   one bucket; at 1,500-point chunks the deferral queue spills mid-chunk at
 //!   every width, and the bucket stays hot (XYZZ overflow) across chunks.
 //!
+//! Cases rotate through three push patterns: record-splitting pushes, runs
+//! of 13 whole records plus a split one, and the whole section at once. With
+//! `parallel` the latter two decode every run of at least 1 (or 3) records
+//! on the Rayon pool, so the parallel decode meets every chunk boundary.
+//!
 //! [`stress_case`] (part of `simdMsmStress`) streams one randomized query per
 //! seed for the runner's time-bounded stress mode.
 
@@ -88,17 +93,23 @@ impl Query for g2::Config {
 }
 
 /// Stream `bases` as a zkey query section through SPARROW's accumulator and
-/// compare with arkworks.
+/// compare with arkworks. `pattern` (any number) picks the push pattern.
 fn run<P: Query>(
     bases: &[Affine<P>],
     scalars: &[Fr],
     window_bits: usize,
     chunk_points: usize,
     case: &str,
+    pattern: u32,
 ) -> Result<(), String> {
+    let (push_bytes, parallel_min_records) = match pattern % 3 {
+        0 => (P::PUSH_BYTES, usize::MAX),
+        1 => (13 * P::RECORD_BYTES + 5, 1),
+        _ => (bases.len().max(1) * P::RECORD_BYTES, 3),
+    };
     let label = || {
         format!(
-            "{} {case}: width={window_bits} chunk={chunk_points} size={}",
+            "{} {case}: width={window_bits} chunk={chunk_points} size={} push={push_bytes}",
             P::NAME,
             bases.len()
         )
@@ -129,7 +140,13 @@ fn run<P: Query>(
         config,
     )
     .map_err(|error| format!("{}: {error}", label()))?;
-    for piece in section.chunks(P::PUSH_BYTES) {
+    #[cfg(feature = "parallel")]
+    {
+        query.parallel_min_records = parallel_min_records;
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = parallel_min_records;
+    for piece in section.chunks(push_bytes) {
         query
             .push(piece)
             .map_err(|error| format!("{}: {error}", label()))?;
@@ -173,7 +190,7 @@ fn width_sweep<P: Query>(size: usize, rng: &mut StdRng) -> Result<u32, String> {
     let mut n = 0;
     for width in 4..=16 {
         for chunk in [37, size] {
-            run::<P>(&bases, &scalars, width, chunk, "random/witness")?;
+            run::<P>(&bases, &scalars, width, chunk, "random/witness", n)?;
             n += 1;
         }
     }
@@ -244,7 +261,7 @@ fn adversarial<P: Query>(size: usize, rng: &mut StdRng) -> Result<u32, String> {
             let case = format!("{base_name} x {scalar_name}");
             for width in [4, 9, 13] {
                 for chunk in [1, 5, 100] {
-                    run::<P>(bases, scalars, width, chunk, &case)?;
+                    run::<P>(bases, scalars, width, chunk, &case, n)?;
                     n += 1;
                 }
             }
@@ -254,6 +271,7 @@ fn adversarial<P: Query>(size: usize, rng: &mut StdRng) -> Result<u32, String> {
                 StreamingConfig::ADAPTIVE_WINDOW_BITS,
                 7,
                 &case,
+                n,
             )?;
             n += 1;
         }
@@ -277,7 +295,7 @@ fn hot_buckets<P: Query>(size: usize, rng: &mut StdRng) -> Result<u32, String> {
         let case = format!("hot bucket, {name}");
         for width in [4, 13, 16] {
             for chunk in [64, 1_500] {
-                run::<P>(bases, &scalars, width, chunk, &case)?;
+                run::<P>(bases, &scalars, width, chunk, &case, n)?;
                 n += 1;
             }
         }
@@ -357,7 +375,9 @@ fn stress<P: Query>(rng: &mut StdRng, max_size: usize, seed: u64) -> Result<u32,
         rng.gen_range(4..=16)
     };
     let chunk = rng.gen_range(1..=size + 8);
-    let case = format!("stress seed {seed}, bases {base_kind}, scalars {scalar_kind}");
-    run::<P>(&bases, &scalars, width, chunk, &case)?;
+    let pattern = rng.gen_range(0..3);
+    let case =
+        format!("stress seed {seed}, bases {base_kind}, scalars {scalar_kind}, pattern {pattern}");
+    run::<P>(&bases, &scalars, width, chunk, &case, pattern)?;
     Ok(1)
 }

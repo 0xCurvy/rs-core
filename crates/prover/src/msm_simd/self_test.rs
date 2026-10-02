@@ -5,7 +5,8 @@
 //!   `VariableBaseMSM` on random inputs at every width 3..=16, and on
 //!   production's adversarial inputs (repeated bases, P and -P, identities,
 //!   all-equal / zero / one / complementary / edge scalars) with batch sizes
-//!   1, 3 and default;
+//!   1, 3 and default, and the resident MSM's zero/one split with its
+//!   batch-affine ones-sum;
 //! - [`field_stress`] and [`msm_stress`] (`simdFieldStress`,
 //!   `simdMsmStress`): one randomized differential round per seed, for the
 //!   runner's time-bounded stress mode;
@@ -126,13 +127,84 @@ where
     n
 }
 
+/// The zero/one split of `msm::msm_bigint` (from 4,096 points) and its
+/// batch-affine ones-sum (`try_sum`, any size): witness-like and boundary
+/// scalars (0, 1, 2, 2^64 - 1, 2^64, r - 1), all ones on one base (bucket
+/// doublings) and on P / -P (cancellations), identity bases.
+fn split_cases<C>(rng: &mut StdRng, size: usize) -> u32
+where
+    C: SWCurveConfig<ScalarField = Fr>,
+    Projective<C>: VariableBaseMSM<MulBase = Affine<C>, ScalarField = Fr>,
+{
+    let p = Projective::<C>::rand(rng).into_affine();
+    let mut bases = random_bases::<C>(size, rng);
+    for i in (0..size).step_by(61) {
+        bases[i] = Affine::<C>::identity();
+    }
+    let modulus_minus_one = {
+        let mut v = Fr::MODULUS;
+        v.sub_with_borrow(&BigInt::from(1_u64));
+        v
+    };
+    let boundary = [
+        BigInt::from(0_u64),
+        BigInt::from(1_u64),
+        BigInt::from(2_u64),
+        BigInt::from(u64::MAX),
+        BigInt([0, 1, 0, 0]),
+        modulus_minus_one,
+    ];
+    let witness: Vec<BigInt<4>> = (0..size)
+        .map(|i| match rng.gen_range(0..10) {
+            0..=3 => BigInt::from(0_u64),
+            4..=6 => BigInt::from(1_u64),
+            7 => boundary[i % boundary.len()],
+            _ => Fr::rand(rng).into_bigint(),
+        })
+        .collect();
+    let ones = vec![BigInt::from(1_u64); size];
+    let base_sets = [
+        bases,
+        vec![p; size],
+        (0..size).map(|i| if i % 2 == 0 { p } else { -p }).collect(),
+    ];
+    let mut n = 0;
+    for bases in &base_sets {
+        for scalars in [&witness, &ones] {
+            let expected = Projective::<C>::msm_bigint(bases, scalars);
+            let got: Projective<C> = crate::msm::msm_bigint(bases, scalars);
+            assert_eq!(got, expected, "split MSM, size={size}");
+            for len in [0, 1, 3, 513, size] {
+                let ones_only: Vec<BigInt<4>> = scalars[..len]
+                    .iter()
+                    .map(|s| {
+                        if *s == BigInt::from(1_u64) {
+                            *s
+                        } else {
+                            BigInt::from(0_u64)
+                        }
+                    })
+                    .collect();
+                let expected = Projective::<C>::msm_bigint(&bases[..len], &ones_only);
+                let got = super::try_sum::<Projective<C>>(&bases[..len], &scalars[..len])
+                    .expect("BN254 group");
+                assert_eq!(got, expected, "ones sum, len={len}");
+            }
+            n += 6;
+        }
+    }
+    n
+}
+
 /// Returns the number of MSMs compared; panics on the first mismatch.
 pub(crate) fn self_test(size: usize, seed: u64) -> u32 {
     let mut rng = StdRng::seed_from_u64(seed);
     let g1 = cases::<ark_bn254::g1::Config, U29x9, SimdApply<U29x9>>(&mut rng, size);
     let g2 =
         cases::<ark_bn254::g2::Config, Fq2Simd, SimdApply<Fq2Simd>>(&mut rng, size.div_ceil(2));
-    g1 + g2
+    let split = split_cases::<ark_bn254::g1::Config>(&mut rng, 4_200)
+        + split_cases::<ark_bn254::g2::Config>(&mut rng, 4_200);
+    g1 + g2 + split
 }
 
 /// An arkworks Fq: uniform, or an edge value (0, +-1, +-2, small, 2^k).

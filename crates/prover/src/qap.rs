@@ -333,9 +333,8 @@ pub(crate) fn finish_evaluations<F: PrimeField, D: EvaluationDomain<F>>(
 
     // Move A, B and C to the coset: ifft, distribute_powers(omega_2n), fft.
     let root_of_unity = double.element(1);
-    // Opt-in SIMD transforms, bit-identical to ark-poly's. Each NTT is
-    // serial; with `parallel` the three run concurrently instead, on small
-    // pools only (see `simd_fft::MAX_WORKERS`).
+    // Opt-in SIMD transforms, bit-identical to ark-poly's; parallel under
+    // `parallel` (see `simd_fft`).
     #[cfg(all(
         feature = "wasm-simd-fft",
         target_arch = "wasm32",
