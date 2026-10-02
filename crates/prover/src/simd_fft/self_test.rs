@@ -2,8 +2,10 @@
 //! (`simdFftSelfTest`): `qap::finish_evaluations` (SIMD transforms, concurrent
 //! with `parallel`) against the ark-poly witness-map step, on random and edge
 //! inputs (zero, one, r-1, a delta; full, partial and empty constraint rows)
-//! for every domain size 2^min_log..2^max_log. Run it on a pool of at most
-//! `MAX_WORKERS` threads: on a larger one the SIMD path is not taken.
+//! for every domain size 2^min_log..2^max_log. Up to 2^16 it also runs the
+//! step alone with leaf blocks of 2, 8 and 64 vectors, so the recursive and
+//! parallel levels are reached on small domains too. Run it on several pool
+//! sizes: the schedule (not the result) depends on the worker count.
 
 use ark_bn254::Fr;
 use ark_ff::{One, UniformRand, Zero};
@@ -13,9 +15,9 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 type Domain = GeneralEvaluationDomain<Fr>;
 
-/// Returns the number of witness maps compared; throws on the first mismatch.
-/// Above 2^16 only the random full-row case runs (each case is three
-/// transforms per path).
+/// Returns the number of witness maps and steps compared; throws on the
+/// first mismatch. Above 2^16 only the random full-row case runs (each case
+/// is three transforms per path).
 #[wasm_bindgen(js_name = simdFftSelfTest)]
 pub fn simd_fft_self_test(min_log: u32, max_log: u32, seed: u32) -> u32 {
     assert!((3..=24).contains(&min_log) && min_log <= max_log && max_log <= 24);
@@ -25,11 +27,9 @@ pub fn simd_fft_self_test(min_log: u32, max_log: u32, seed: u32) -> u32 {
         let n = 1usize << log;
         let domain = Domain::new(n).expect("domain");
         let g = Domain::new(2 * n).expect("double domain").element(1);
-        // On a larger pool this compares ark-poly with itself.
-        assert_eq!(
+        assert!(
             super::WitnessStep::new(&domain, g).is_some(),
-            super::pool_allows_simd(),
-            "SIMD step availability at 2^{log}"
+            "SIMD step unavailable at 2^{log}"
         );
         let random = |rng: &mut StdRng| (0..n).map(|_| Fr::rand(rng)).collect::<Vec<_>>();
         let (a, b) = (random(&mut rng), random(&mut rng));
@@ -49,6 +49,18 @@ pub fn simd_fft_self_test(min_log: u32, max_log: u32, seed: u32) -> u32 {
                 (delta, edge, n - 3),
             ]);
         }
+        if log <= 16 {
+            let (a, b) = (&cases[0].0, &cases[0].1);
+            let c: Vec<Fr> = a.iter().zip(b).map(|(a, b)| *a * b).collect();
+            let want = [a, b, &c].map(|v| reference_step(domain, g, v));
+            for leaf in [2, 8, 64] {
+                let step = super::WitnessStep::with_leaf(&domain, g, leaf).expect("step");
+                let (mut a, mut b, mut c) = (a.clone(), b.clone(), c.clone());
+                step.apply3(&mut a, &mut b, &mut c);
+                assert!([a, b, c] == want, "step differs at 2^{log}, leaf {leaf}");
+                checks += 1;
+            }
+        }
         for (a, b, rows) in cases {
             let want = reference(domain, g, &a, &b, rows);
             let (mut a, mut b, mut c) = (a, b, Vec::new());
@@ -59,6 +71,15 @@ pub fn simd_fft_self_test(min_log: u32, max_log: u32, seed: u32) -> u32 {
         }
     }
     checks
+}
+
+/// The witness-map step for one vector on ark-poly alone.
+fn reference_step(domain: Domain, g: Fr, v: &[Fr]) -> Vec<Fr> {
+    let mut v = v.to_vec();
+    domain.ifft_in_place(&mut v);
+    Domain::distribute_powers_and_mul_by_const(&mut v, g, Fr::one());
+    domain.fft_in_place(&mut v);
+    v
 }
 
 /// `finish_evaluations` on ark-poly alone.
