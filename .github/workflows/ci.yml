@@ -332,6 +332,7 @@ jobs:
         run: |
           for features in \
             std,wasm,sparrow,wasm-simd-msm,wasm-simd-fft \
+            std,wasm,parallel,sparrow,wasm-simd-msm,wasm-simd-fft \
             std,wasm,sparrow,wasm-simd-msm,wasm-simd-fft,wasm-simd-selftest \
             std,wasm,parallel,sparrow,wasm-simd-msm,wasm-simd-fft,wasm-simd-selftest; do
             cargo clippy --locked --target wasm32-unknown-unknown -p curvy-prover --all-targets \
@@ -455,8 +456,8 @@ jobs:
       - run: npm ci --prefix tools/browser --ignore-scripts
       - run: npx --prefix tools/browser playwright install --with-deps chromium firefox
       # Self-tests and a short stress run in Chromium (threaded: two Rayon
-      # workers, where the SIMD FFT applies). The MSM speed gate runs under
-      # Node in the wasm-simd job; here it is reported only.
+      # workers). The MSM speed gate runs under Node in the wasm-simd job;
+      # here it is reported only.
       - if: matrix.selftest-build
         run: >-
           node scripts/simd-selftest.mjs --engine chromium --mode ${{ matrix.mode }}

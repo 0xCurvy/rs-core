@@ -19,25 +19,20 @@
 // that as a 2x slower MSM kernel on arm64 (poc/wasm-field/README.md), and
 // self-tests still pass because the result is identical.
 //
-// Rules, per function of the demangled module:
-// - MSM (`msm_simd::`): every function that contains extmul has zero
-//   `i64x2.mul`; no function has 81 or more `i64x2.mul` (half of one 162-product
-//   kernel copy, so a copy whose extmuls all became `i64x2.mul` cannot hide by
-//   having none left); and the namespace has at least MSM_EXTMUL_FLOOR
-//   extmuls: one copy each of `mul4` in `lanes::mul4_call` and
-//   `fq2::simd::mul4` (2 x 324) and of `sqr4` in `lanes::sqr4_call` (252).
-//   The kernels are `#[inline(never)]`, so these copies have stable names.
-//   Scalar code may still contain a few SLP-vectorized `i64x2.mul` (two scalar
-//   Montgomery steps fused); they are reported, not failed.
-// - FFT (`simd_fft::`): at least FFT_EXTMUL_FLOOR extmuls (one `mul4` copy),
-//   and at most FFT_I64X2_MUL_MAX `i64x2.mul`. KNOWN ISSUE: `mul4` is inlined
-//   into the NTT, and where its second operand is a splatted twiddle or scale
-//   factor (ntt.rs `splat`, `lanes2`) LLVM emits `i64x2.mul` for the products
-//   with it, exactly the regression above. October 2026: 648 (portable) and
-//   810 (threaded) of the 1,782 products in `ntt::dif`, `ntt::pack` and the
-//   unpack inlined into `ntt::ntt`. The allowance is the larger count, so the
-//   FFT cannot get worse unnoticed; lower it to 0 once the splats are hidden
-//   from LLVM like `p_splat`.
+// Rules, per function of the demangled module, for the MSM (`msm_simd::`)
+// and FFT (`simd_fft::`) namespaces alike: every function that contains
+// extmul has zero `i64x2.mul`; no function has 81 or more `i64x2.mul` (half
+// of one 162-product kernel copy, so a copy whose extmuls all became
+// `i64x2.mul` cannot hide by having none left); and the namespace has at
+// least its floor of extmuls. The kernels are `#[inline(never)]`, so their
+// copies have stable names:
+// - MSM_EXTMUL_FLOOR: one copy each of `mul4` in `lanes::mul4_call` and
+//   `fq2::simd::mul4` (2 x 324) and of `sqr4` in `lanes::sqr4_call` (252);
+// - FFT_EXTMUL_FLOOR: one copy of `mul4` in `ntt::mul4` (324). Its twiddle
+//   and scale operands are splats, which LLVM turned into 648-810 emulated
+//   `i64x2.mul` while `mul4` was inlined into the NTT.
+// Scalar code may still contain a few SLP-vectorized `i64x2.mul` (two scalar
+// Montgomery steps fused); they are reported, not failed.
 // Development-only self-test code (`self_test` modules, `wasm-simd-selftest`)
 // is skipped: its scalar arithmetic on constants is freely SLP-vectorized.
 import assert from 'node:assert/strict';
@@ -46,9 +41,8 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const MSM_EXTMUL_FLOOR = 2 * 324 + 252;
-const MSM_FULLY_CONVERTED = 81;
+const FULLY_CONVERTED = 81;
 const FFT_EXTMUL_FLOOR = 324;
-const FFT_I64X2_MUL_MAX = 810;
 
 const args = process.argv.slice(2);
 let expect = ['msm', 'fft'];
@@ -102,26 +96,18 @@ for (const module of modules) {
   const show = list => list.filter(f => f.extmul || f.i64x2mul)
     .map(f => `    extmul ${String(f.extmul).padStart(4)}  i64x2.mul ${String(f.i64x2mul).padStart(4)}  ${f.name.slice(0, 140)}`).join('\n');
 
-  if (expect.includes('msm')) {
-    const msm = scope('msm_simd::');
-    const extmul = msm.reduce((n, f) => n + f.extmul, 0);
-    console.log(`  MSM (msm_simd::): extmul ${extmul} (floor ${MSM_EXTMUL_FLOOR})\n${show(msm)}`);
-    if (extmul < MSM_EXTMUL_FLOOR) fail(`MSM kernels have ${extmul} i64x2.extmul, expected at least ${MSM_EXTMUL_FLOOR}: products were lost or turned into i64x2.mul`);
-    for (const f of msm) {
+  const namespaces = {msm: ['MSM', 'msm_simd::', MSM_EXTMUL_FLOOR], fft: ['FFT', 'simd_fft::', FFT_EXTMUL_FLOOR]};
+  for (const kind of expect) {
+    const [label, prefix, floor] = namespaces[kind];
+    const list = scope(prefix);
+    const extmul = list.reduce((n, f) => n + f.extmul, 0);
+    console.log(`  ${label} (${prefix}): extmul ${extmul} (floor ${floor})\n${show(list)}`);
+    if (extmul < floor) fail(`${label} kernels have ${extmul} i64x2.extmul, expected at least ${floor}: products were lost or turned into i64x2.mul`);
+    for (const f of list) {
       if (f.extmul && f.i64x2mul) fail(`${f.name}: ${f.i64x2mul} i64x2.mul next to ${f.extmul} extmul: a SIMD kernel product lost its extmul`);
-      else if (f.i64x2mul >= MSM_FULLY_CONVERTED) fail(`${f.name}: ${f.i64x2mul} i64x2.mul and no extmul: a SIMD kernel copy emitted with emulated 64-bit multiplies (or unusually heavy SLP vectorization of scalar code; inspect it)`);
-      else if (f.i64x2mul) annotate('notice', `${f.name}: ${f.i64x2mul} i64x2.mul in scalar code (SLP-vectorized), below the ${MSM_FULLY_CONVERTED} kernel threshold`);
+      else if (f.i64x2mul >= FULLY_CONVERTED) fail(`${f.name}: ${f.i64x2mul} i64x2.mul and no extmul: a SIMD kernel copy emitted with emulated 64-bit multiplies (or unusually heavy SLP vectorization of scalar code; inspect it)`);
+      else if (f.i64x2mul) annotate('notice', `${f.name}: ${f.i64x2mul} i64x2.mul in scalar code (SLP-vectorized), below the ${FULLY_CONVERTED} kernel threshold`);
     }
-  }
-  if (expect.includes('fft')) {
-    const fft = scope('simd_fft::');
-    const extmul = fft.reduce((n, f) => n + f.extmul, 0);
-    const mul = fft.reduce((n, f) => n + f.i64x2mul, 0);
-    console.log(`  FFT (simd_fft::): extmul ${extmul} (floor ${FFT_EXTMUL_FLOOR}), i64x2.mul ${mul} (allowance ${FFT_I64X2_MUL_MAX})\n${show(fft)}`);
-    if (extmul < FFT_EXTMUL_FLOOR) fail(`FFT has ${extmul} i64x2.extmul, expected at least ${FFT_EXTMUL_FLOOR}`);
-    if (mul > FFT_I64X2_MUL_MAX) fail(`FFT has ${mul} i64x2.mul, above the known ${FFT_I64X2_MUL_MAX}: more products lost their extmul`);
-    else if (mul > 0) annotate('warning', `FFT still has ${mul} emulated i64x2.mul products (known splat issue; allowance ${FFT_I64X2_MUL_MAX})`);
-    if (mul < FFT_I64X2_MUL_MAX) annotate('notice', `FFT i64x2.mul is ${mul}: lower FFT_I64X2_MUL_MAX in scripts/check-simd-codegen.mjs to ${mul}`);
   }
 }
 if (failed) process.exit(1);

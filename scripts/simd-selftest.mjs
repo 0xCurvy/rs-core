@@ -17,8 +17,7 @@
 //                              only the portable nodejs build
 //   --pkg DIR                  prover package (default crates/prover/pkg-node,
 //                              or pkg-web / pkg-web-threads in a browser)
-//   --threads N                threaded Rayon workers (default 2; the SIMD FFT
-//                              runs only on pools of at most 4)
+//   --threads N                threaded Rayon workers (default 2)
 //   --seed N --seeds N         fixed-suite seeds N, N+1, ... (default 1, 3)
 //   --stress SECONDS           time-bounded randomized stress (default 0)
 //   --stress-seed N            first stress seed (default random, printed)
