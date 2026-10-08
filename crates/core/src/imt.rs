@@ -909,7 +909,7 @@ impl IndexedMerkleTree {
 /// zero-sibling proof with `leaf == root`, verifies. Untrusted proofs against a
 /// known tree must use [`verify_proof_at_depth`].
 #[deprecated(
-    since = "0.1.0-rc.6",
+    since = "0.1.0-rc.7",
     note = "does not pin the tree depth; use verify_proof_at_depth"
 )]
 pub fn verify_proof(proof: &InclusionProof) -> bool {

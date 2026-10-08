@@ -5,9 +5,10 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Release candidates share one workspace version and may break APIs between
 candidates.
 
-## [0.1.0-rc.6] - Unreleased
+## [0.1.0-rc.7] - 2026-10-08
 
-Changes since `v0.1.0-rc.5` (`e17b711`, 17 August 2026). Background:
+Changes since `v0.1.0-rc.6` (`49c62e7`, 2 September 2026), which was `v0.1.0-rc.5`
+with the one change listed under it. Background:
 [docs/security.md](docs/security.md), [docs/optimizations.md](docs/optimizations.md),
 [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -107,7 +108,7 @@ Changes since `v0.1.0-rc.5` (`e17b711`, 17 August 2026). Background:
 - Node release staging pins `cargo-xwin` and flags the Windows binary as untested.
 - Documentation moved to `docs/`; the handover document was removed and raw benchmark results are no longer tracked.
 
-### Migrating from rc.5
+### Migrating from rc.5 or rc.6
 
 Merkle verification takes the depth you expect (production notes trees use
 depth 30, `NOTES_TREE_DEPTH`):
@@ -152,4 +153,11 @@ Rename `CircuitProver` to `ResidentProver` (Rust and Node) and
 `await ResidentProver.create(options)` and `await prover.close()` when replacing
 a key.
 
-[0.1.0-rc.6]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.5...HEAD
+## [0.1.0-rc.6] - 2026-09-02
+
+### Changed
+
+- Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
+
+[0.1.0-rc.7]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.6...v0.1.0-rc.7
+[0.1.0-rc.6]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.5...v0.1.0-rc.6

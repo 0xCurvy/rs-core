@@ -20,9 +20,9 @@ poseidon-optimized = ["curvy-core/poseidon-optimized"]
 
 [dependencies]
 zeroize.workspace = true
-curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
-curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness", features = ["sage"] }
-curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", default-features = false, features = ["std", "sage"] }
+curvy-core = { version = "=0.1.0-rc.7", path = "../../crates/core" }
+curvy-witness = { version = "=0.1.0-rc.7", path = "../../crates/witness", features = ["sage"] }
+curvy-prover = { version = "=0.1.0-rc.7", path = "../../crates/prover", default-features = false, features = ["std", "sage"] }
 serde_json.workspace = true
 
 [dev-dependencies]

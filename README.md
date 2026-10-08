@@ -42,16 +42,16 @@ Most native applications only need `curvy-core`:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.6"
+curvy-core = "=0.1.0-rc.7"
 ```
 
 Add witness evaluation or local proving only when your application needs it:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.6"
-curvy-witness = "=0.1.0-rc.6"
-curvy-prover = "=0.1.0-rc.6"
+curvy-core = "=0.1.0-rc.7"
+curvy-witness = "=0.1.0-rc.7"
+curvy-prover = "=0.1.0-rc.7"
 ```
 
 Rust 1.94 or newer is required.
@@ -227,14 +227,14 @@ existing Rayon pool:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.6", features = ["parallel"] }
-curvy-prover = { version = "=0.1.0-rc.6", features = ["parallel"] }
+curvy-core = { version = "=0.1.0-rc.7", features = ["parallel"] }
+curvy-prover = { version = "=0.1.0-rc.7", features = ["parallel"] }
 ```
 
 After publication, the executable can instead be installed from crates.io:
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.0-rc.6 \
+cargo install --locked curvy-prover --version 0.1.0-rc.7 \
   --bin curvy-native-prover
 ```
 

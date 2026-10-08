@@ -18,9 +18,9 @@ compact-matrix = ["curvy-prover/compact-matrix"]
 poseidon-optimized = ["curvy-core/poseidon-optimized"]
 
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
-curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", features = ["parallel", "signet-v2", "sage", "zkey-manifest"] }
-curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness", features = ["sage"] }
+curvy-core = { version = "=0.1.0-rc.7", path = "../../crates/core" }
+curvy-prover = { version = "=0.1.0-rc.7", path = "../../crates/prover", features = ["parallel", "signet-v2", "sage", "zkey-manifest"] }
+curvy-witness = { version = "=0.1.0-rc.7", path = "../../crates/witness", features = ["sage"] }
 napi.workspace = true
 napi-derive.workspace = true
 rayon.workspace = true
