@@ -78,7 +78,7 @@ rayon = "1.12.0"
 wasm-bindgen-rayon = "=1.3.0"
 napi = { version = "=3.12.1", default-features = false, features = ["napi8"] }
 napi-derive = "=3.6.3"
-napi-build = "=2.4.1"
+napi-build = "=2.6.0"
 # DEV-ONLY second Poseidon oracle: a Circom-compatible light-poseidon fork on
 # Arkworks 0.6. Never a production dependency.
 pso-poseidon = "=0.4.0"
