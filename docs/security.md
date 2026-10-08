@@ -129,8 +129,9 @@ depend on the private witness; keep them out of untrusted telemetry.
   destructors (`try_with`).
 - Node loader: only published targets, ignores `NAPI_RS_NATIVE_LIBRARY_PATH`,
   spawns no subprocess, checks package and binary versions.
-- Dependencies are exact-pinned with a committed `Cargo.lock`. `cargo deny`
-  enforces RustSec advisories, a permissive-license allowlist, no wildcard
+- Dependency versions are fixed by a committed `Cargo.lock` and `--locked`
+  builds; manifest requirements are caret except for the toolchain-coupled
+  crates (see the root `Cargo.toml`). `cargo deny` enforces RustSec advisories, a permissive-license allowlist, no wildcard
   versions, crates.io only and no unknown git sources. One documented exception:
   `RUSTSEC-2024-0388` (`derivative`, build-time only, via arkworks 0.6).
 - GitHub Actions are pinned to commits; release Dockerfile images are pinned by
