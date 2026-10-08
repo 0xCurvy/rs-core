@@ -88,13 +88,8 @@ previous host hook. A host that later replaces this process hook must preserve
 that redaction. Malformed inputs follow checked error paths without panicking.
 
 `get_meta` retains its compatibility return `[k, v, K, V]`, which contains private
-keys, as do `new_meta` and `scan`. Do not log these outputs. String-array results
-are sized before encoding and written once into the exact allocation returned to
-the caller, so encoding leaves no reallocated partial copies; the source strings
-are wiped after encoding and the returned buffer by `curvy_string_free`. Other
-string and byte outputs are likewise wiped by their matching free functions. This
-does not erase host copies, compiler temporaries, or intermediate strings built
-inside the core before they reach the C boundary.
+keys, as do `new_meta` and `scan`. Do not log these outputs. Release every string
+and byte output with its matching free function.
 ## Byte-based signer handles
 
 `curvy_seed_signer_new` imports a 32-byte seed; `curvy_scalar_signer_new` imports

@@ -20,17 +20,14 @@ layer you need:
 | `curvy-prover` | Authenticated graph evaluation plus snarkjs `.zkey` parsing and self-verified arkworks Groth16 proofs; it also provides the native prover executable and prover WASM module | [docs.rs/curvy-prover](https://docs.rs/curvy-prover) |
 | `curvy-wasm` | JavaScript bindings for the `curvy-core` cryptography and tree APIs | [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) |
 
-> The crates are release candidates. Pin the exact version until the stable API is
-published.
+> The crates share one workspace version and pin each other exactly. Depend on the
+> same version of each.
 
 Repository documentation:
 
 | Document | Contents |
 |---|---|
 | [CHANGELOG.md](CHANGELOG.md) | Release notes, breaking changes and migration steps |
-| [docs/security.md](docs/security.md) | Trust boundaries, constant-time and zeroization scope, audit history, known limitations |
-| [docs/benchmarks.md](docs/benchmarks.md) | Consolidated measurements and how to re-run them |
-| [docs/optimizations.md](docs/optimizations.md) | Performance decisions: kept, opt-in and rejected |
 | [crates/prover/SPARROW.md](crates/prover/SPARROW.md) | Bounded-memory streaming prover integration |
 | [crates/signet/README.md](crates/signet/README.md) | Producing and validating witness-graph artifacts |
 | [bindings/ffi](bindings/ffi/README.md), [bindings/node](bindings/node/README.md), [bindings/wasm](bindings/wasm/README.md) | C ABI, native Node and npm WASM contracts |
@@ -42,16 +39,16 @@ Most native applications only need `curvy-core`:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.7"
+curvy-core = "=0.1.1"
 ```
 
 Add witness evaluation or local proving only when your application needs it:
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.0-rc.7"
-curvy-witness = "=0.1.0-rc.7"
-curvy-prover = "=0.1.0-rc.7"
+curvy-core = "=0.1.1"
+curvy-witness = "=0.1.1"
+curvy-prover = "=0.1.1"
 ```
 
 Rust 1.94 or newer is required.
@@ -146,10 +143,7 @@ proving-key coordinates or graph data are parsed. The graph and `.zkey` must be
 the matching pair supplied by the Curvy deployment you are interacting with;
 they are not bundled into these crates. Native file-backed callers should use
 `ResidentProver::from_artifacts_reader` to avoid retaining a complete zkey byte
-buffer beside the parsed proving key. See
-[docs/benchmarks.md](docs/benchmarks.md) for the production-key
-whole/stream comparison and [docs/optimizations.md](docs/optimizations.md) for
-the performance decisions behind the defaults.
+buffer beside the parsed proving key.
 
 ## Build targets
 
@@ -227,14 +221,14 @@ existing Rayon pool:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.0-rc.7", features = ["parallel"] }
-curvy-prover = { version = "=0.1.0-rc.7", features = ["parallel"] }
+curvy-core = { version = "=0.1.1", features = ["parallel"] }
+curvy-prover = { version = "=0.1.1", features = ["parallel"] }
 ```
 
 After publication, the executable can instead be installed from crates.io:
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.0-rc.7 \
+cargo install --locked curvy-prover --version 0.1.1 \
   --bin curvy-native-prover
 ```
 
@@ -296,8 +290,6 @@ development arithmetic kernels used by the browser benchmark; do not use it for
 application builds. Compact matrices are available with `--compact-matrix`.
 Optimized Poseidon is the default; the compatible `--poseidon-optimized` flag
 may still be supplied explicitly. Neither changes the generated JavaScript API.
-Production-key results and size tradeoffs are recorded in
-[docs/benchmarks.md](docs/benchmarks.md).
 
 #### Node.js target
 

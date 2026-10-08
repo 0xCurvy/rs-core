@@ -12,9 +12,6 @@ Use the HAWK `ResidentProver` when the host has enough memory to load the full
 proving key and benefits from reusing it. Use lower-level `Prover` only when the
 host already owns a `.wtns` assignment.
 
-Measured memory and latency comparisons are in the workspace
-[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#3-sparrow-streaming).
-
 ## Enable SPARROW
 
 SPARROW and SAGE are excluded from the default crate and WASM builds.
@@ -23,16 +20,16 @@ For native Rust:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.0-rc.7", features = ["sparrow"] }
-curvy-witness = { version = "=0.1.0-rc.7", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.1", features = ["sparrow"] }
+curvy-witness = { version = "=0.1.1", features = ["sage", "signet-v2"] }
 ```
 
 Add `parallel` when the application has a host-initialized Rayon pool:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.0-rc.7", features = ["parallel", "sparrow"] }
-curvy-witness = { version = "=0.1.0-rc.7", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.1", features = ["parallel", "sparrow"] }
+curvy-witness = { version = "=0.1.1", features = ["sage", "signet-v2"] }
 ```
 
 For direct WASM builds:
@@ -241,8 +238,7 @@ Record the following values with benchmark and deployment metadata:
 
 Change a pin only when repeated self-verifying runs show an improvement larger
 than normal thermal and scheduling noise. The benchmark package contains the
-window sweep and end-to-end comparison tools described in the workspace
-[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#3-sparrow-streaming).
+window sweep and end-to-end comparison tools.
 
 ## Security boundary
 
@@ -270,8 +266,7 @@ same zkey.
 SPARROW retains arkworks for BN254 field arithmetic, group operations,
 randomness, Groth16 proof construction, and final verification. The Curvy-owned
 surface covers artifact framing, authentication order, SAGE and QAP evaluation,
-scalar recoding, bucket scheduling, and allocation lifetimes. This boundary
-supports review but is not a claim of an external security audit.
+scalar recoding, bucket scheduling, and allocation lifetimes.
 
 ## Verification
 

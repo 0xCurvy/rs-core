@@ -6,7 +6,10 @@ COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+# The image keeps Cargo in /usr/local/cargo and only that bin directory is on
+# PATH; `cargo install` below writes to the new CARGO_HOME, so add its bin too.
 ENV CARGO_HOME=/root/.cargo
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \

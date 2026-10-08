@@ -2,15 +2,22 @@
 
 All notable changes to the `rs-core` crates, bindings and packages are recorded
 here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Release candidates share one workspace version and may break APIs between
-candidates.
+Every crate, binding and package shares one workspace version. The 0.1.0 release
+candidates could break APIs from one candidate to the next.
+
+## [0.1.1] - 2026-10-08
+
+The first release after the 0.1.0 release candidates; there was no 0.1.0. The
+library is the same as `0.1.0-rc.7`.
+
+### Fixed
+
+- Node release image: the pinned `cargo-xwin` is on `PATH`, so the Windows binary builds.
 
 ## [0.1.0-rc.7] - 2026-10-08
 
 Changes since `v0.1.0-rc.6` (`49c62e7`, 2 September 2026), which was `v0.1.0-rc.5`
-with the one change listed under it. Background:
-[docs/security.md](docs/security.md), [docs/optimizations.md](docs/optimizations.md),
-[docs/benchmarks.md](docs/benchmarks.md).
+with the one change listed under it.
 
 ### Breaking
 
@@ -55,9 +62,9 @@ with the one change listed under it. Background:
 - Node: `NotesFrontier`, the constant-space form of the notes tree (`production`, `fromSnapshot`, `snapshot`, `depth`, `append`, `buildPendingCommitment` and packed variants); it returns the same pending-commitment input as `IndexedMerkleTree`.
 - Node: `batchProfile` option reads artifacts under the batch-prover budget (`Limits::batch_prover()`); the default stays the client budget.
 - Rust: `NotesFrontier::append_with_siblings` returns the inclusion siblings of a leaf as it is appended.
-- Tools: release bundle validator (`tools/artifacts`), leakage harness and weekly workflow (`tools/leakage`), browser proof checks (`tools/browser`).
+- Tools: release bundle validator (`tools/artifacts`), timing test harness (`tools/leakage`), browser proof checks (`tools/browser`).
 - Tools: parser fuzz workspace (`fuzz/`) reaching authenticated parsers, the SAGE compiler and compressed programs.
-- Docs: `CHANGELOG.md` and `docs/benchmarks.md`, `docs/optimizations.md`, `docs/security.md`.
+- Docs: `CHANGELOG.md`.
 
 ### Fixed
 
@@ -76,20 +83,6 @@ with the one change listed under it. Background:
 - Witness: JSON `-0` is accepted as zero; echoed names in `InputLength` errors are bounded to 128 bytes.
 - Node: panics in the async initializer are caught.
 
-### Security
-
-- BabyJubjub signing, nonce/response arithmetic and `ephemeral_pub_key` use fixed-width `crypto-bigint` 0.7.5 and complete projective formulas.
-- Poseidon and decimal-to-field conversion use fixed-width BN254 arithmetic.
-- The default zkey reader rechecks every buffered chunk against the authenticated digest.
-- Streaming domains are bounded to 2^22 and to the authenticated zkey length / 64 before allocation.
-- Node artifact reads, batch sizes, C decimals and witness JSON are bounded before parsing.
-- Errors no longer echo secrets or invalid field values; guarded C panics record only the source location.
-- C secret-bearing JSON and byte outputs are built in exact-size buffers so no partial copies are left behind.
-- Best-effort zeroization covers signing, hashing, cipher, witness, QAP and MSM-scalar buffers (complete erasure is not claimed).
-- Random nonzero scalars use masked rejection sampling instead of reduction.
-- Node loader ignores library-path overrides, spawns no subprocess and checks package and binary versions.
-- Release path uses `--ignore-scripts` and digest-pinned Docker images.
-
 ### Changed
 
 - `curvy-core`: `poseidon-optimized` is the default; `default-features = false` keeps the direct schedule.
@@ -98,15 +91,18 @@ with the one change listed under it. Background:
 - `curvy-prover`: serial MSM windows follow ln(points) + 2, capped at 16.
 - `curvy-prover`: with `parallel`, SPARROW bucket window reduction runs on the Rayon pool.
 - `curvy-prover`: the default serial build (no `parallel`/`compact-matrix`: default Rust, C FFI, portable and Node WASM) uses Curvy's proof assembly and batch-affine MSMs instead of stock `ark-groth16`; serial proofs 16–22% faster natively and 14–23% in portable browsers.
-- `curvy-prover`: BN254 MSMs from 4,096 points (and every SPARROW query) accumulate batch-affine buckets with one shared inversion per batch; parallel and SPARROW adaptive windows widened. Resident G1 21–37% and G2 34–50% faster, SPARROW query MSM 37–53% faster; whole production proofs 18–32% faster (`docs/benchmarks.md` §9).
+- `curvy-prover`: BN254 MSMs from 4,096 points (and every SPARROW query) accumulate batch-affine buckets with one shared inversion per batch; parallel and SPARROW adaptive windows widened. Resident G1 21–37% and G2 34–50% faster, SPARROW query MSM 37–53% faster; whole production proofs 18–32% faster.
 - `curvy-prover`: shared artifact authentication lives in `artifacts`; WASM bindings moved to `wasm_api.rs`.
 - Node: compact matrices are the default; tree operations remain serial.
+- Node: the loader ignores `NAPI_RS_NATIVE_LIBRARY_PATH` and loads only the published platform packages.
+- Prover: streaming domains above 2^22 are rejected.
+- Error messages no longer include the rejected input.
 - CI builds and proves the shipped threaded and portable WASM packages and runs browser proofs.
 - CI lints and tests serial, parallel and default-only feature sets separately.
 - CI runs Rust checks as parallel matrix jobs, tests the Node binding natively on Windows and macOS, fuzzes the nested-matrix zkey parser, runs the SIGNET generator smoke and lints workflows with actionlint.
 - Release workflow (still disabled) derives the npm dist-tag, waits for CI, runs the 160k Poseidon gate and publishes the smoke-tested tarball.
 - Node release staging pins `cargo-xwin` and flags the Windows binary as untested.
-- Documentation moved to `docs/`; the handover document was removed and raw benchmark results are no longer tracked.
+- Raw benchmark results are no longer tracked.
 
 ### Migrating from rc.5 or rc.6
 
@@ -159,5 +155,6 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.1]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.7...v0.1.1
 [0.1.0-rc.7]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.6...v0.1.0-rc.7
 [0.1.0-rc.6]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.5...v0.1.0-rc.6

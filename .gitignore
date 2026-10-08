@@ -41,8 +41,9 @@ __pycache__/
 *.py[cod]
 /tools/leakage/pkg/
 
-# Raw benchmark and leakage runs stay local; summarize them in docs/benchmarks.md.
+# Raw benchmark runs and the maintainers' measurement notes stay local.
 /tools/benchmarks/results/
+/docs/
 
 # macOS / IDE metadata.
 .DS_Store

@@ -44,11 +44,8 @@ and SHA-256 integers. Errors do not repeat the input. Poseidon requires 1–16
 inputs. Reducing field strings are limited to 4096 characters; raw integers must
 fit 256 bits and use at most 78 decimal digits. Valid results are unchanged.
 
-`version()` reports the compiled workspace version. Rust-owned decimal/key
-strings and witness JSON copies are wiped on normal return or error; JavaScript
-strings, returned private data, and wasm-bindgen conversion temporaries are
-outside that guarantee. The compatibility `get_meta` result includes both private
-keys; treat it, `new_meta`, `scan`, and full-witness exports as secret data.
+`version()` reports the compiled workspace version. The compatibility
+`get_meta` result includes both private keys; treat it, `new_meta`, `scan`, and full-witness exports as secret data.
 Unexpected `WebAssembly.RuntimeError` still requires discarding that instance;
 checked input errors are ordinary `Error` values and the instance remains usable.
 
@@ -88,10 +85,6 @@ the owned key; subsequent method calls throw. Callers must erase their input
 buffers themselves and avoid converting keys to JavaScript strings.
 `ephemeralPubKeyBytes` accepts a 32-byte little-endian scalar, including zero,
 and returns `[x, y]`. String-based APIs remain available.
-
-Erasure covers owned buffers, not caller copies, compiler spills or runtime
-copies. WASM timing resistance is best-effort at the engine level; source-level
-fixed schedules do not establish a JIT-independent timing guarantee.
 
 See the [application migration guide](../../bindings/SIGNER_MIGRATION.md) for
 profile mapping, storage and worker ownership, cleanup and integration checks.

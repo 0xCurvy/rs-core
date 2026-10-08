@@ -200,14 +200,16 @@ try {
   console.log(`  staged at: ${releaseDir}`);
   console.log("  npm packages to publish: 5 (users install only the root package)");
   for (const target of targets.filter((candidate) => candidate.untested)) warnUntested(target);
+  // npm refuses a prerelease without a dist-tag, and a prerelease must never become `latest`.
+  const distTag = packed.version.includes("-") ? "next" : "latest";
   console.log("\nPublish manually from the staging directory, platform packages first:");
   console.log(`  cd ${releaseDir}`);
   for (const target of targets) {
     console.log(
-      `  npm publish ./npm/${target.npmDirectory} --ignore-scripts --access public --tag next --provenance=false`,
+      `  npm publish ./npm/${target.npmDirectory} --ignore-scripts --access public --tag ${distTag} --provenance=false`,
     );
   }
-  console.log("  npm publish . --ignore-scripts --access public --tag next --provenance=false");
+  console.log(`  npm publish . --ignore-scripts --access public --tag ${distTag} --provenance=false`);
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }

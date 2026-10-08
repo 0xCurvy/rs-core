@@ -16,7 +16,7 @@ as the standalone prover WASM module.
 
 ```toml
 [dependencies]
-curvy-prover = "=0.1.0-rc.7"
+curvy-prover = "=0.1.1"
 ```
 
 ## Prove from circuit input JSON
@@ -58,7 +58,7 @@ Witness-only WASM callers can use `WasmWitnessGraph.calculatePacked`; the C ABI
 offers `curvy_witness_graph_calculate_packed`. Both return concatenated
 canonical 32-byte big-endian field elements and avoid decimal JSON output.
 
-## Cryptographic and audit boundary
+## Arithmetic and artifact authentication
 
 The prover intentionally keeps BN254 field arithmetic, curve operations, and
 final verification in arkworks. Proof assembly is a small Curvy layer with
@@ -88,11 +88,6 @@ authentication, then checks each chunk of the second response before forwarding 
 to Rust. Use this adapter or the pinned-manifest adapter; the raw WASM framing
 methods require the caller to authenticate bytes before supplying them. SPARROW
 rejects domains above 2^22 before allocating its QAP arrays.
-
-This separation keeps the project-owned audit surface focused on artifact
-framing, witness/QAP evaluation, scalar recoding, bucket scheduling, and
-lifecycle management. It does not mean the crate has received an external
-security audit. The arithmetic layer remains in arkworks.
 
 ## Features and execution targets
 
@@ -153,9 +148,7 @@ by compiler semantics and is evicted if its metadata, digest, source binding, or
 decoder validation fails.
 
 See [SPARROW.md](SPARROW.md) for artifact publication, native and browser flows,
-the SAGE cache protocol, tuning, and the security boundary. See the workspace
-[benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md)
-for whole-key, SPARROW, and SAGE cache measurements.
+the SAGE cache protocol, tuning, and the security boundary.
 
 ## Published examples
 
@@ -196,22 +189,13 @@ The experimental `scratch` feature adds `ProofWorkspace` and
 Each active proof needs exclusive mutable workspaces. Construct them with
 explicit maximum retained byte counts; a zero limit retains nothing. The limits
 apply to idle capacity, not active peak memory. Owned buffers are zeroized on
-success, error, panic unwinding, and drop; caller inputs and temporary copies
-inside dependencies are outside this guarantee. MSM bucket reuse is not enabled.
-Default APIs retain no workspaces between proofs. They still wipe, on a best
-effort basis, the QAP and MSM-scalar buffers this crate allocates for a proof;
-copies inside arkworks (FFT and field temporaries) are not reached, so no
-path claims complete erasure. See the
-workspace [measurements](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md)
-and [promotion decisions](https://github.com/0xCurvy/rs-core/blob/main/docs/optimizations.md).
+success, error, panic unwinding, and drop. MSM bucket reuse is not enabled.
+Default APIs retain no workspaces between proofs.
 
 The complete `prove_assignment`, `prove_json`, and `prove_wtns` APIs self-verify.
 Low-level `Prover::prove` and `prove_with_workspace` return a proof without
 verification; their callers must verify it. Direct assignments must begin with
 the constant one signal.
 
-The source repository's
-[security model and audit history](https://github.com/0xCurvy/rs-core/blob/main/docs/security.md)
-summarizes the QAP/MSM arithmetic review, parser fuzzing, and release gates.
 [Release validation tooling](../../tools/artifacts/README.md) stages and validates
 the exact bundle against its independently pinned PTAU and reference witness.

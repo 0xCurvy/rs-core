@@ -406,8 +406,6 @@ proof (1.52 s) bounds what any WASM arithmetic work can reach.
   bounds are argued and edge-tested and every benchmarked MSM matched
   arkworks, but production should also fuzz the field operations and the
   kernel natively and in WASM, with arkworks kept as the oracle.
-- **Side channels:** unchanged. The MSM is already variable-time on
-  witness-derived digits; the new field operations are branch-free.
 - **Maintenance:** BN254-specific, WASM-only arithmetic beside arkworks,
   including generated code.
 - **Memory:** per-call conversion adds a transient copy of the largest query

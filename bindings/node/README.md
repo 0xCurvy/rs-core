@@ -138,8 +138,7 @@ allocate.
 ## Resident loading options
 
 Native Node builds now use compact constraint matrices by default. The Rust,
-C, and WASM package defaults remain separate. Measurements and their scope are
-in [the repository benchmarks](https://github.com/0xCurvy/rs-core/blob/main/docs/benchmarks.md#4-resident-loading-and-node-concurrency).
+C, and WASM package defaults remain separate.
 
 For one-pass key loading, supply `zkeyManifestPath` and
 `zkeyManifestSha256` together. On this path the manifest pin is the sole trust
@@ -164,19 +163,13 @@ SAGE remains an explicit choice.
 input byte budgets also scale with that bound. Rejection preserves the live tree.
 Synchronous exports include an unwind guard in addition to input validation.
 
-Security resource limits: `buildPendingCommitment` and its packed variant accept
-1–4096 slots, checked before parsing or padding. Zkeys must be regular files no
-larger than 4 GiB; the read limit continues to apply if a file grows. Synchronous
-exports catch Rust unwinds, but allocation aborts cannot be caught: the bounds
-prevent the reported oversized-batch path before allocation.
+Zkeys must be regular files no larger than 4 GiB; the read limit continues to
+apply if a file grows.
 
 The repository-owned loader selects only published platform targets. It ignores
 `NAPI_RS_NATIVE_LIBRARY_PATH`, invokes no subprocesses, and always checks both
 package and compiled binary versions. Build with the package's `npm run build`
-script (`napi --no-js`) to preserve this loader. Queued proof JSON and calculated
-assignments are cleared when their Rust ownership ends; caller JavaScript copies
-remain caller-owned. Proof timings depend on the private witness and should not
-be sent to untrusted telemetry.
+script (`napi --no-js`) to preserve this loader.
 
 ## Releasing
 
