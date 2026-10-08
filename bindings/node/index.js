@@ -44,4 +44,5 @@ if (typeof Symbol.dispose === "symbol") {
 module.exports = binding;
 module.exports.ResidentProver = ResidentProver;
 module.exports.IndexedMerkleTree = binding.IndexedMerkleTree;
+module.exports.NotesFrontier = binding.NotesFrontier;
 module.exports.rsCoreVersion = binding.rsCoreVersion;

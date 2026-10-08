@@ -74,6 +74,36 @@ strings. `IndexedMerkleTree.fromPackedLeaves`, `rootPacked`, and
 `buildPendingCommitmentPacked` use concatenated canonical 32-byte big-endian
 BN254 field elements; the original JSON methods remain compatible.
 
+## Notes frontier
+
+`NotesFrontier` is the constant-space form of the notes tree: the completed
+subtrees along its right-hand edge and the leaf count, at most 1,015 bytes as a
+depth-30 snapshot. `append` and `appendPacked` add leaves, and
+`buildPendingCommitment` and its packed counterpart return the same circuit
+input as `IndexedMerkleTree` does for the same tree and notes. A batch prover
+only ever appends, so it can hold a frontier instead of every leaf.
+
+```js
+const { NotesFrontier } = require("@0xcurvy/rs-core-node");
+
+// From the snapshot the indexer stores with each block ...
+const frontier = NotesFrontier.fromSnapshot(snapshotBytes);
+// ... or rebuilt from the committed notes, a page at a time.
+const rebuilt = NotesFrontier.production();
+for (const page of pages) rebuilt.appendPacked(page);
+
+const before = frontier.snapshot();
+const input = frontier.buildPendingCommitment(batchSize, JSON.stringify(noteIds));
+// If the commit built from `input` does not land, go back:
+const undone = NotesFrontier.fromSnapshot(before);
+```
+
+A frontier is only as right as the snapshot or leaves it came from: compare
+`root()` and `leafCount` with the contract before proving. It holds no leaves,
+so it cannot prove that an earlier leaf is in the tree, and it cannot tell that a
+note id is already in it; only a repeat inside one batch is rejected. One
+`append` call takes at most 1,048,576 leaves, all or none. Depth is at most 31.
+
 ## Supported artifacts
 
 All artifact bytes are authenticated before use. A graph/zkey pair must match
@@ -96,6 +126,15 @@ The prebuilt release targets are:
 
 All binaries use Node-API 8.
 
+## Artifact budget
+
+Artifacts are read under the client budget by default: a witness graph of at
+most 64 MiB and 2,000,000 nodes. Set `batchProfile: true` for the batch-prover
+budget of 96 MiB and 8,000,000 nodes, which the 20- and 50-note
+pending-commitment circuits need. Leave it off in a process that does not load
+those circuits: the budget is also the most an artifact can make the process
+allocate.
+
 ## Resident loading options
 
 Native Node builds now use compact constraint matrices by default. The Rust,
@@ -117,7 +156,7 @@ For faster subsequent startup, derive a cache with `derive_sage_cache`, then
 supply `sageProgramPath` and `sageProgramSha256` together. Keep
 `witnessGraphSha256` pinned to the original graph; `witnessGraphPath` is optional
 when loading a compiled program. The cache pin and source pin are both checked.
-`witnessBackend` reports `graph` or `sage`. Client artifact limits still apply.
+`witnessBackend` reports `graph` or `sage`. The artifact budget in force still applies.
 SAGE remains an explicit choice.
 
 `buildPendingCommitment` and its packed counterpart accept `batchSize` in

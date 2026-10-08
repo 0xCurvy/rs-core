@@ -51,6 +51,9 @@ Changes since `v0.1.0-rc.5` (`e17b711`, 17 August 2026). Background:
 - Node: `zkeyManifestPath`/`zkeyManifestSha256`, `useSage` and `sageProgramPath`/`sageProgramSha256` options.
 - Node: `mode`, `profile`, `witnessBackend` and `verifyingKeyDigest` getters; resident key reported to V8 as external memory.
 - Node: packed tree methods `IndexedMerkleTree.fromPackedLeaves`, `rootPacked` and `buildPendingCommitmentPacked`.
+- Node: `NotesFrontier`, the constant-space form of the notes tree (`production`, `fromSnapshot`, `snapshot`, `depth`, `append`, `buildPendingCommitment` and packed variants); it returns the same pending-commitment input as `IndexedMerkleTree`.
+- Node: `batchProfile` option reads artifacts under the batch-prover budget (`Limits::batch_prover()`); the default stays the client budget.
+- Rust: `NotesFrontier::append_with_siblings` returns the inclusion siblings of a leaf as it is appended.
 - Tools: release bundle validator (`tools/artifacts`), leakage harness and weekly workflow (`tools/leakage`), browser proof checks (`tools/browser`).
 - Tools: parser fuzz workspace (`fuzz/`) reaching authenticated parsers, the SAGE compiler and compressed programs.
 - Docs: `CHANGELOG.md` and `docs/benchmarks.md`, `docs/optimizations.md`, `docs/security.md`.

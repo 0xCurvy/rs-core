@@ -37,6 +37,68 @@ export declare class IndexedMerkleTree {
 }
 
 /**
+ * Constant-space frontier of the notes tree: the completed subtrees along its
+ * right-hand edge, at most one per level, and the leaf count.
+ *
+ * It appends leaves and builds the pending-notes-commitment circuit input
+ * exactly as [`IndexedMerkleTree`] does, but holds no leaf, so its size does
+ * not depend on how many notes the tree contains (a depth-30 snapshot is at
+ * most 1,015 bytes). A prover that only ever appends needs nothing more.
+ *
+ * Two things it cannot do, because it has forgotten the leaves: prove that an
+ * earlier leaf is in the tree, and notice that a note id is already in it.
+ * Only a repeat inside one batch is rejected here.
+ */
+export declare class NotesFrontier {
+  /**
+   * An empty frontier. `shardHeight` must match whoever else reads the
+   * snapshot; it does not affect roots or commitment inputs.
+   */
+  constructor(depth: number, shardHeight: number)
+  /** An empty frontier with the production notes-tree geometry. */
+  static production(): NotesFrontier
+  /**
+   * Restore a frontier from `snapshot()` bytes. The indexer stores the same
+   * format with each block, so a prover can start from the block whose root
+   * the chain has instead of replaying every leaf.
+   */
+  static fromSnapshot(snapshot: Buffer): NotesFrontier
+  /** The canonical versioned snapshot of this frontier. */
+  snapshot(): Buffer
+  root(): string
+  /** Return the root as one canonical 32-byte big-endian field element. */
+  rootPacked(): Buffer
+  get leafCount(): number
+  /**
+   * Depth of the tree this frontier belongs to. A restored snapshot carries
+   * its own, so check it against the depth the caller expects.
+   */
+  get depth(): number
+  /**
+   * Append leaves in order, all or none. This is how a frontier is rebuilt
+   * from the committed notes, a page at a time, when no snapshot is at hand.
+   */
+  append(leavesJson: string): void
+  /**
+   * Packed counterpart to `append`. Each leaf is a canonical 32-byte
+   * big-endian BN254 field element.
+   */
+  appendPacked(leaves: Buffer): void
+  /**
+   * Advance the frontier transactionally and return the same circuit input
+   * `IndexedMerkleTree.buildPendingCommitment` returns for the same tree
+   * and notes. Take `snapshot()` first to be able to go back if the commit
+   * built from this input does not land.
+   */
+  buildPendingCommitment(batchSize: number, pendingNoteIdsJson: string): PendingCommitmentInput
+  /**
+   * Packed counterpart to `buildPendingCommitment`. Each pending note id is
+   * a canonical 32-byte big-endian BN254 field element.
+   */
+  buildPendingCommitmentPacked(batchSize: number, pendingNoteIds: Buffer): PendingCommitmentInput
+}
+
+/**
  * HAWK resident prover. Circuit identity and dimensions come only from the
  * authenticated witness graph and zkey, so the same API serves every Circom
  * circuit accepted by `curvy-prover`.
@@ -117,6 +179,14 @@ export interface ResidentProverOptions {
    * excess requests reject immediately. Must be between 1 and 64.
    */
   maxPendingProofs?: number
+  /**
+   * Accept artifacts up to the batch-prover budget (8,000,000 graph nodes,
+   * a 96 MiB graph) instead of the client budget (2,000,000 nodes, 64 MiB).
+   * The 20- and 50-note pending-commitment circuits need it. Defaults to
+   * false, so a process that never loads those circuits does not widen what
+   * it will allocate for an artifact.
+   */
+  batchProfile?: boolean
 }
 
 export declare function rsCoreVersion(): string
