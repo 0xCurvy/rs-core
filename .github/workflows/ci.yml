@@ -548,8 +548,12 @@ jobs:
         with:
           toolchain: 1.94.0
       # circom v2.2.3: the tag's commit, built with circom's own Cargo.lock.
-      # rust-cache keeps ~/.cargo/bin, so warm runs skip the build.
+      # rust-cache keeps ~/.cargo/bin, so warm runs skip the build. The toolchain
+      # action's `-D warnings` is cleared for this step only: it would fail the
+      # install on lints in circom's own code.
       - run: cargo install --locked --git https://github.com/iden3/circom --rev ad44e915a12bb047b05745c2884aad9cc8326bc6 circom
+        env:
+          RUSTFLAGS: ""
       - run: test "$(circom --version)" = "circom compiler 2.2.3"
       - run: crates/signet/scripts/smoke-generator.sh
       # The smoke builds without --locked; a drifted lockfile would mean it
