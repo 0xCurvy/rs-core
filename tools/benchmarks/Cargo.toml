@@ -11,7 +11,33 @@ rust-version.workspace = true
 ark-bn254.workspace = true
 ark-ec.workspace = true
 ark-ff.workspace = true
-curvy-prover = { path = "../../crates/prover", features = ["bench", "parallel"] }
+# Keep the direct Poseidon schedule as this package's baseline. The
+# `poseidon-optimized` benchmark feature turns the production default back on.
+curvy-core = { path = "../../crates/core", default-features = false }
+curvy-prover = { path = "../../crates/prover", features = ["bench"] }
 curvy-witness = { path = "../../crates/witness", features = ["sage", "signet-v2"] }
 rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+
+[features]
+default = ["parallel"]
+parallel = ["curvy-prover/parallel"]
+scratch = ["curvy-prover/scratch"]
+compact-matrix = ["curvy-prover/compact-matrix"]
+zkey-single-pass = ["curvy-prover/zkey-single-pass"]
+poseidon-optimized = ["curvy-core/poseidon-optimized"]
+
+# `curvy_prover::proof_bench` exists only with the prover's `parallel` feature.
+[[bin]]
+name = "proof_msm_schedule"
+required-features = ["parallel"]
+
+[[bin]]
+name = "matrix_evaluation"
+required-features = ["parallel"]
+
+[[bin]]
+name = "msm_accumulation"
+required-features = ["parallel"]

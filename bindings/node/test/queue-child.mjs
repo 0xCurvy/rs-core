@@ -1,0 +1,11 @@
+import { stat } from "node:fs/promises";
+import { createRequire } from "node:module";
+const binding = createRequire(import.meta.url)("../index.js");
+const options = JSON.parse(process.argv[2]);
+const prover = new binding.ResidentProver({ ...options, maxPendingProofs: 64 });
+let completed = 0;
+const requests = Array.from({ length: 32 }, () => prover.prove('{"a":"3","b":"11"}').then(() => completed++));
+await stat(options.zkeyPath);
+const completedAtIO = completed;
+await Promise.all(requests);
+console.log(JSON.stringify({ completedAtIO, completed }));

@@ -1,0 +1,27 @@
+[package]
+name = "wasm-fft-poc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Isolated proof of concept: BN254 Fr radix-2 NTT with 4-lane simd128 9x29 Montgomery arithmetic"
+
+# Own workspace, not an rs-core member. Cargo.lock copied from the root lock.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "poc"
+path = "src/main.rs"
+
+[dependencies]
+ark-bn254 = { version = "=0.6.0", default-features = false, features = ["scalar_field", "std"] }
+ark-ff = { version = "=0.6.0", default-features = false, features = ["std"] }
+ark-poly = { version = "=0.6.0", default-features = false, features = ["std"] }
+ark-std = { version = "=0.6.0", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

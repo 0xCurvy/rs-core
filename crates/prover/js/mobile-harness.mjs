@@ -230,6 +230,7 @@ async function runProfiles(profiles, matrixMode) {
       ? { id: "all-circuits", label: "All configured circuits" }
       : { id: profiles[0].id, label: profiles[0].label },
     profiles: profiles.map(({ id, label }) => ({ id, label })),
+    build: config.build ?? null,
     settings: selectedSettings,
     pageEnvironment: pageEnvironment(),
     before,
@@ -398,9 +399,11 @@ async function refreshCacheStatus() {
     profile.sourceGraphSha256,
     profile.batchProfile,
   );
-  const sageStatus = sage
-    ? `derived SAGE cached (${formatBytes(sage.bytes)})`
-    : "derived SAGE compiles on first run";
+  const sageStatus = !profile.sageProgramSha256
+    ? "no SAGE program pin; SAGE compiles on every run"
+    : sage
+      ? `derived SAGE cached (${formatBytes(sage.bytes)})`
+      : "derived SAGE compiles on first run";
   elements["progress-detail"].textContent =
     `${cachedCount}/${artifacts.length} source artifacts cached ` +
     `(${formatBytes(cachedBytes)} / ${formatBytes(totalArtifactBytes(profile))}); ${sageStatus}`;

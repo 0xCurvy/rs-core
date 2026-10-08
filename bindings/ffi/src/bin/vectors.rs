@@ -241,6 +241,7 @@ fn main() {
     assert_eq!(
         unsafe {
             curvy_verify_merkle_proof(
+                8,
                 leaf3.as_ptr(),
                 leaf3.len(),
                 2,

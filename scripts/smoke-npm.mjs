@@ -3,15 +3,20 @@
 //
 // Usage: node scripts/smoke-npm.mjs <dir-with-the-package-installed>
 //
-// The portable entries are instantiated for real. The threaded entries cannot
-// be imported here at all - their Rayon snippet registers a worker message
-// handler on `self` at module scope, which exists in browsers and workers but
-// not in Node - so they are checked structurally instead.
+// The portable entries are instantiated for real, and the portable prover runs
+// a complete self-verified Groth16 proof of the multiplier fixture from this
+// checkout's crates/prover/testdata. The threaded entries cannot be imported
+// here at all - their Rayon snippet registers a worker message handler on
+// `self` at module scope, which exists in browsers and workers but not in Node -
+// so they are checked structurally instead. CI proves the identical threaded
+// build in browsers (tools/browser/check.mjs threaded).
 
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { checkResidentProver } from "../tools/browser/node-proof-check.mjs";
 
 const projectDir = resolve(process.argv[2] ?? ".");
 const require = createRequire(join(projectDir, "smoke-npm.mjs"));
@@ -26,14 +31,16 @@ for (const [subpath, binary] of [
   await entry.default({ module_or_path: bytes });
 
   if (subpath === "core") {
-    // Poseidon over a known pair - a wrong or half-linked binary fails here
-    // rather than in a consumer.
+    // Poseidon over a known pair (the circomlib vector) - a wrong or
+    // half-linked binary fails here rather than in a consumer.
     const digest = entry.poseidon(["1", "2"]);
-    if (!/^\d+$/.test(digest)) throw new Error(`core poseidon returned ${digest}`);
-  } else if (typeof entry.WasmCircuitProver !== "function") {
-    throw new Error("prover is missing WasmCircuitProver");
+    const expected = "7853200120776062878684798364095072458815029376092732009249414926327459813530";
+    if (digest !== expected) throw new Error(`core poseidon returned ${digest}, expected ${expected}`);
+    console.log(`${subpath.padEnd(14)} instantiated`);
+  } else {
+    const proof = checkResidentProver(entry);
+    console.log(`${subpath.padEnd(14)} proved publicSignals=${JSON.stringify(proof.publicSignals)} (self-verified)`);
   }
-  console.log(`${subpath.padEnd(14)} instantiated`);
 }
 
 for (const [subpath, binary] of [

@@ -23,6 +23,19 @@ layer you need:
 > The crates are release candidates. Pin the exact version until the stable API is
 published.
 
+Repository documentation:
+
+| Document | Contents |
+|---|---|
+| [CHANGELOG.md](CHANGELOG.md) | Release notes, breaking changes and migration steps |
+| [docs/security.md](docs/security.md) | Trust boundaries, constant-time and zeroization scope, audit history, known limitations |
+| [docs/benchmarks.md](docs/benchmarks.md) | Consolidated measurements and how to re-run them |
+| [docs/optimizations.md](docs/optimizations.md) | Performance decisions: kept, opt-in and rejected |
+| [crates/prover/SPARROW.md](crates/prover/SPARROW.md) | Bounded-memory streaming prover integration |
+| [crates/signet/README.md](crates/signet/README.md) | Producing and validating witness-graph artifacts |
+| [bindings/ffi](bindings/ffi/README.md), [bindings/node](bindings/node/README.md), [bindings/wasm](bindings/wasm/README.md) | C ABI, native Node and npm WASM contracts |
+| [tools/artifacts/README.md](tools/artifacts/README.md) | Release bundle validation |
+
 ## Install
 
 Most native applications only need `curvy-core`:
@@ -100,8 +113,14 @@ compatibility.
 `curvy-prover` combines that graph with the matching snarkjs `.zkey` and returns a
 self-verified Groth16 proof in snarkjs JSON format:
 
+- `ResidentProver` is the **HAWK** profile (High-throughput Authenticated
+  Whole-Key prover): authenticate and load once, then reuse the parsed key.
+- `StreamingProver` is the **SPARROW** profile (Streaming Prover Architecture
+  for Resource-Restricted One-pass Workflows): authenticate chunks and process
+  the key sequentially with bounded memory.
+
 ```rust
-use curvy_prover::CircuitProver;
+use curvy_prover::ResidentProver;
 
 fn prove(
     zkey: &[u8],
@@ -110,7 +129,7 @@ fn prove(
     graph_sha256: &str,
     inputs: &str,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let prover = CircuitProver::from_artifacts(
+    let prover = ResidentProver::from_artifacts(
         zkey,
         zkey_sha256,
         graph,
@@ -125,7 +144,12 @@ fn prove(
 Both artifact hashes are required. Authentication happens before unchecked
 proving-key coordinates or graph data are parsed. The graph and `.zkey` must be
 the matching pair supplied by the Curvy deployment you are interacting with;
-they are not bundled into these crates.
+they are not bundled into these crates. Native file-backed callers should use
+`ResidentProver::from_artifacts_reader` to avoid retaining a complete zkey byte
+buffer beside the parsed proving key. See
+[docs/benchmarks.md](docs/benchmarks.md) for the production-key
+whole/stream comparison and [docs/optimizations.md](docs/optimizations.md) for
+the performance decisions behind the defaults.
 
 ## Build targets
 
@@ -196,9 +220,10 @@ Merkle parent construction, proving-key point conversion, and parallel-enabled
 arkworks proving operations. Witness-graph evaluation itself remains
 deterministic and single-threaded.
 
-For Cargo consumers, both crates keep parallelism opt-in. The ordinary prover
-uses stock serial `ark-groth16` by default. Enable `parallel` for Curvy's
-ark-groth16-compatible proof path scheduled on the host's existing Rayon pool:
+For Cargo consumers, both crates keep parallelism opt-in. The prover always
+uses Curvy's ark-groth16-compatible proof path with batch-affine MSMs; by
+default it runs on one thread. Enable `parallel` to schedule it on the host's
+existing Rayon pool:
 
 ```toml
 [dependencies]
@@ -213,7 +238,7 @@ cargo install --locked curvy-prover --version 0.1.0-rc.6 \
   --bin curvy-native-prover
 ```
 
-That command installs the stock serial prover. Add `--features parallel` to
+That command installs the single-threaded prover. Add `--features parallel` to
 install the global-pool multithreaded build used by `scripts/build-native.sh`.
 
 `cargo install` places the executable at
@@ -230,8 +255,10 @@ curvy-native-prover <zkey> <zkey-sha256> <graph.bin> <graph-sha256> \
 On a build with `parallel`, set `CURVY_PROVER_NUM_THREADS` to an integer from 1
 through 64. It defaults to one so container CPU quotas do not accidentally
 create an oversized Rayon pool. A serial build rejects values greater than one.
-The executable authenticates and parses artifacts through `CircuitProver`; it
-does not introduce a second witness runtime or graph format.
+The executable runs `ResidentProver` in `resident` mode under the HAWK profile;
+it does not introduce a second witness runtime or graph format. Its timing JSON
+includes `proverMode` and `profile` so operational data uses the same terms as
+the API.
 
 ```bash
 CURVY_PROVER_NUM_THREADS=8 curvy-native-prover \
@@ -266,7 +293,11 @@ SIGNET decoder. For explicit development or constrained-memory SPARROW builds,
 use `--sparrow` (which implies SIGNET v2); combine either flag with `--threads`
 for the threaded web target. `--bench` implies SPARROW and adds only the
 development arithmetic kernels used by the browser benchmark; do not use it for
-application builds.
+application builds. Compact matrices are available with `--compact-matrix`.
+Optimized Poseidon is the default; the compatible `--poseidon-optimized` flag
+may still be supplied explicitly. Neither changes the generated JavaScript API.
+Production-key results and size tradeoffs are recorded in
+[docs/benchmarks.md](docs/benchmarks.md).
 
 #### Node.js target
 
@@ -398,12 +429,49 @@ cross-origin isolation.
 - `curvy-core/parallel` enables Rayon for independent stealth scans and bulk
   Merkle-tree construction. It is disabled by default for direct Cargo users;
   `scripts/build-native.sh` enables it.
-- `curvy-prover` enables only native `std` by default and therefore uses stock
-  serial `ark-groth16`. Its `parallel`, `signet-v2`, `sparrow`, `bench`, `wasm`,
+- `curvy-prover` enables only native `std` by default and proves on one
+  thread. Its `parallel`, `signet-v2`, `sparrow`, `bench`, `wasm`,
   and `wasm-threads` features are explicit opt-ins; `sparrow` and the
   development-only `bench` feature enable SAGE.
 - `curvy-wasm/wasm-threads` enables Rayon-backed browser workers and requires a
   cross-origin-isolated page.
+
+## Maintaining
+
+- Plain `cargo build` and `cargo test` cover only the default members,
+  `curvy-core` and `curvy-witness`. Use `cargo test --workspace --all-targets
+  --locked`, and the per-feature runs in `.github/workflows/ci.yml`: feature
+  unification in a workspace build can hide regressions in a crate's default or
+  serial configuration.
+- Committed golden vectors (`crates/*/testdata`) are cross-language protocol
+  oracles. Change one only together with a documented upstream reference change.
+- Four crates are published: `curvy-core`, `curvy-witness`, `curvy-prover` and
+  `curvy-wasm`. The SIGNET producer, bindings, benchmarks and debug CLI are not
+  crates.io packages. `crates/signet/generator` is outside the workspace; CI
+  runs `crates/signet/scripts/smoke-generator.sh` (needs `circom`), and you can
+  run it locally after changing the generator.
+
+### Releasing
+
+Nothing publishes automatically. The npm WASM workflow is
+`.github/workflows/release.yml.disabled`, crates.io publishing is manual, and the
+native Node packages are staged with `npm run build:release` in `bindings/node`
+(see its README). Pushing a tag alone does nothing.
+
+1. Bump `[workspace.package].version` in `Cargo.toml` and the exact internal
+   dependency versions in `crates/prover`, `crates/wasm`, `bindings/ffi` and
+   `bindings/node` (`Cargo.toml`).
+2. In `bindings/node`, run `npm version <version> --no-git-tag-version`, rebuild,
+   and update the version assertion in `test/binding.test.mjs`.
+3. Regenerate `Cargo.lock` and `fuzz/Cargo.lock` through Cargo and update the
+   exact-version snippets in the READMEs and `crates/prover/SPARROW.md`;
+   `git grep -n '<old version>'` should then match only `CHANGELOG.md`.
+4. Date the `CHANGELOG.md` entry, run the full CI-equivalent gates, and inspect
+   `cargo package -p <crate> --list` for each published crate.
+5. Publish `curvy-core`, then `curvy-witness`; once both resolve on crates.io,
+   publish `curvy-prover` and `curvy-wasm`. For Node, publish the platform
+   packages before the root loader.
+6. Tag the clean release commit with an annotated `v<version>` tag.
 
 ## License
 

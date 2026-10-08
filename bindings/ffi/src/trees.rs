@@ -11,10 +11,13 @@ use std::ffi::c_int;
 use curvy_core::field::{Fr, fr_from_be_32_checked, fr_to_be_32};
 use curvy_core::imt::{
     InclusionProof, IndexedMerkleTree, NotesFrontier, OrderedMerkleTree, ShardedNotesTree,
-    verify_proof,
+    verify_proof_at_depth,
 };
 
-use crate::abi::{CurvyBytes, CurvyStatus, bytes_in, bytes_out, guard, set_last_error};
+use crate::abi::{
+    CurvyBytes, CurvyStatus, Failure, bytes_in, bytes_out, failed, free_status, guard,
+    guard_result, invalid, null_output, set_last_error,
+};
 use crate::registry::Registry;
 
 static MERKLE: Registry<IndexedMerkleTree> = Registry::new();
@@ -25,17 +28,20 @@ static PROOFS: Registry<InclusionProof> = Registry::new();
 
 // Field packing
 
-fn decode_field(bytes: &[u8], what: &str) -> Result<Fr, String> {
-    fr_from_be_32_checked(bytes)
-        .ok_or_else(|| format!("{what} must be one canonical 32-byte big-endian field element"))
+fn decode_field(bytes: &[u8], what: &str) -> Result<Fr, Failure> {
+    fr_from_be_32_checked(bytes).ok_or_else(|| {
+        invalid(format_args!(
+            "{what} must be one canonical 32-byte big-endian field element"
+        ))
+    })
 }
 
-fn decode_fields(bytes: &[u8], what: &str) -> Result<Vec<Fr>, String> {
+fn decode_fields(bytes: &[u8], what: &str) -> Result<Vec<Fr>, Failure> {
     if !bytes.len().is_multiple_of(32) {
-        return Err(format!(
+        return Err(invalid(format_args!(
             "packed {what} length {} is not divisible by 32",
             bytes.len()
-        ));
+        )));
     }
     bytes
         .chunks_exact(32)
@@ -62,7 +68,7 @@ fn push_u32(buffer: &mut Vec<u8>, value: u32) {
 fn with_handle<T, R>(
     registry: &Registry<T>,
     handle: u64,
-    body: impl FnOnce(&T) -> Result<R, String>,
+    body: impl FnOnce(&T) -> Result<R, Failure>,
     finish: impl FnOnce(R) -> CurvyStatus,
 ) -> CurvyStatus {
     guard(|| match registry.with(handle, body) {
@@ -71,17 +77,14 @@ fn with_handle<T, R>(
             CurvyStatus::InvalidHandle
         }
         Some(Ok(value)) => finish(value),
-        Some(Err(message)) => {
-            set_last_error(message);
-            CurvyStatus::Error
-        }
+        Some(Err(failure)) => failure.report(),
     })
 }
 
 fn with_handle_mut<T, R>(
     registry: &Registry<T>,
     handle: u64,
-    body: impl FnOnce(&mut T) -> Result<R, String>,
+    body: impl FnOnce(&mut T) -> Result<R, Failure>,
     finish: impl FnOnce(R) -> CurvyStatus,
 ) -> CurvyStatus {
     guard(|| match registry.with_mut(handle, body) {
@@ -90,43 +93,39 @@ fn with_handle_mut<T, R>(
             CurvyStatus::InvalidHandle
         }
         Some(Ok(value)) => finish(value),
-        Some(Err(message)) => {
-            set_last_error(message);
-            CurvyStatus::Error
-        }
+        Some(Err(failure)) => failure.report(),
     })
 }
 
 fn handle_out(handle: u64, out: *mut u64) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
-    unsafe { *out = handle };
+    unsafe { std::ptr::write_unaligned(out, handle) };
     CurvyStatus::Ok
 }
 
 fn u32_out(value: u32, out: *mut u32) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
-    unsafe { *out = value };
+    unsafe { std::ptr::write_unaligned(out, value) };
     CurvyStatus::Ok
 }
 
 /// Validates the out-pointer before allocating or registering a handle.
 fn construct<T>(
     registry: &'static Registry<T>,
-    build: impl FnOnce() -> Result<T, String>,
+    build: impl FnOnce() -> Result<T, Failure>,
     out: *mut u64,
 ) -> CurvyStatus {
-    if out.is_null() {
-        return CurvyStatus::InvalidArgument;
-    }
-    guard(|| match build() {
-        Ok(value) => handle_out(registry.insert(value), out),
-        Err(message) => {
-            set_last_error(message);
-            CurvyStatus::Error
+    guard(|| {
+        if out.is_null() {
+            return null_output();
+        }
+        match build() {
+            Ok(value) => handle_out(registry.insert(value), out),
+            Err(failure) => failure.report(),
         }
     })
 }
@@ -153,10 +152,17 @@ pub extern "C" fn curvy_notes_shard_size() -> u32 {
     curvy_core::NOTES_SHARD_SIZE as u32
 }
 
+/// Verifies a packed inclusion proof against a tree of the expected `depth`.
+///
+/// Writes `1` only when `siblings` holds exactly `depth` packed fields and the
+/// path from `leaf` at `index` reaches `root`. A proof for another depth,
+/// including a truncated proof whose `leaf` is an internal node, writes `0`.
+///
 /// # Safety
 /// All buffer pointers must describe readable regions of the given lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn curvy_verify_merkle_proof(
+    depth: u32,
     leaf: *const u8,
     leaf_len: usize,
     index: u32,
@@ -166,43 +172,37 @@ pub unsafe extern "C" fn curvy_verify_merkle_proof(
     root_len: usize,
     out: *mut c_int,
 ) -> CurvyStatus {
-    guard(|| {
-        let (Ok(leaf), Ok(siblings), Ok(root)) = (
-            unsafe { bytes_in(leaf, leaf_len) },
-            unsafe { bytes_in(siblings, siblings_len) },
-            unsafe { bytes_in(root, root_len) },
-        ) else {
-            return CurvyStatus::InvalidArgument;
-        };
-        let proof = match (
-            decode_field(leaf, "leaf"),
-            decode_fields(siblings, "siblings"),
-            decode_field(root, "root"),
-        ) {
-            (Ok(leaf), Ok(siblings), Ok(root)) => InclusionProof {
-                leaf,
+    guard_result(
+        || {
+            let leaf =
+                unsafe { bytes_in(leaf, leaf_len) }.map_err(|_| invalid("invalid leaf buffer"))?;
+            let siblings = unsafe { bytes_in(siblings, siblings_len) }
+                .map_err(|_| invalid("invalid siblings buffer"))?;
+            let root =
+                unsafe { bytes_in(root, root_len) }.map_err(|_| invalid("invalid root buffer"))?;
+            Ok(InclusionProof {
+                leaf: decode_field(leaf, "leaf")?,
                 index: index as usize,
-                siblings,
-                root,
-            },
-            (Err(message), _, _) | (_, Err(message), _) | (_, _, Err(message)) => {
-                set_last_error(message);
-                return CurvyStatus::Error;
+                siblings: decode_fields(siblings, "siblings")?,
+                root: decode_field(root, "root")?,
+            })
+        },
+        |proof| {
+            if out.is_null() {
+                return null_output();
             }
-        };
-        if out.is_null() {
-            return CurvyStatus::InvalidArgument;
-        }
-        unsafe { *out = c_int::from(verify_proof(&proof)) };
-        CurvyStatus::Ok
-    })
+            let valid = verify_proof_at_depth(&proof, depth as usize);
+            unsafe { std::ptr::write_unaligned(out, c_int::from(valid)) };
+            CurvyStatus::Ok
+        },
+    )
 }
 
 // Inclusion proofs
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_proof_free(handle: u64) {
-    PROOFS.remove(handle);
+pub extern "C" fn curvy_proof_free(handle: u64) -> CurvyStatus {
+    guard(|| free_status(PROOFS.remove(handle)))
 }
 
 #[unsafe(no_mangle)]
@@ -251,7 +251,7 @@ pub extern "C" fn curvy_proof_siblings(handle: u64, out: *mut CurvyBytes) -> Cur
 pub extern "C" fn curvy_merkle_new(depth: u32, out: *mut u64) -> CurvyStatus {
     construct(
         &MERKLE,
-        || IndexedMerkleTree::new(depth as usize).map_err(|e| e.to_string()),
+        || IndexedMerkleTree::new(depth as usize).map_err(failed),
         out,
     )
 }
@@ -269,17 +269,17 @@ pub unsafe extern "C" fn curvy_merkle_from_leaves(
         &MERKLE,
         || {
             let bytes = unsafe { bytes_in(packed_leaves, len) }
-                .map_err(|_| "invalid leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid leaves buffer"))?;
             IndexedMerkleTree::from_leaves(depth as usize, &decode_fields(bytes, "leaves")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         out,
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_merkle_free(handle: u64) {
-    MERKLE.remove(handle);
+pub extern "C" fn curvy_merkle_free(handle: u64) -> CurvyStatus {
+    guard(|| free_status(MERKLE.remove(handle)))
 }
 
 #[unsafe(no_mangle)]
@@ -332,17 +332,17 @@ pub unsafe extern "C" fn curvy_merkle_insert(
     out: *mut u32,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &MERKLE,
         handle,
         |tree| {
             let bytes =
-                unsafe { bytes_in(leaf, len) }.map_err(|_| "invalid leaf buffer".to_string())?;
+                unsafe { bytes_in(leaf, len) }.map_err(|_| invalid("invalid leaf buffer"))?;
             tree.insert(decode_field(bytes, "leaf")?)
                 .map(|index| index as u32)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |value| u32_out(value, out),
     )
@@ -361,9 +361,9 @@ pub unsafe extern "C" fn curvy_merkle_insert_many(
         handle,
         |tree| {
             let bytes = unsafe { bytes_in(packed_leaves, len) }
-                .map_err(|_| "invalid leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid leaves buffer"))?;
             tree.insert_many(&decode_fields(bytes, "leaves")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -385,16 +385,16 @@ pub unsafe extern "C" fn curvy_merkle_get_index(
         handle,
         |tree| {
             let bytes =
-                unsafe { bytes_in(leaf, len) }.map_err(|_| "invalid leaf buffer".to_string())?;
+                unsafe { bytes_in(leaf, len) }.map_err(|_| invalid("invalid leaf buffer"))?;
             Ok(tree
                 .get_index(decode_field(bytes, "leaf")?)
                 .map_or(-1_i64, |index| index as i64))
         },
         |value| {
             if out.is_null() {
-                return CurvyStatus::InvalidArgument;
+                return null_output();
             }
-            unsafe { *out = value };
+            unsafe { std::ptr::write_unaligned(out, value) };
             CurvyStatus::Ok
         },
     )
@@ -405,10 +405,7 @@ pub extern "C" fn curvy_merkle_truncate(handle: u64, leaf_count: u32) -> CurvySt
     with_handle_mut(
         &MERKLE,
         handle,
-        |tree| {
-            tree.truncate(leaf_count as usize)
-                .map_err(|e| e.to_string())
-        },
+        |tree| tree.truncate(leaf_count as usize).map_err(failed),
         |()| CurvyStatus::Ok,
     )
 }
@@ -423,16 +420,16 @@ pub unsafe extern "C" fn curvy_merkle_proof(
     out: *mut u64,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle(
         &MERKLE,
         handle,
         |tree| {
             let bytes =
-                unsafe { bytes_in(leaf, len) }.map_err(|_| "invalid leaf buffer".to_string())?;
+                unsafe { bytes_in(leaf, len) }.map_err(|_| invalid("invalid leaf buffer"))?;
             tree.create_proof(decode_field(bytes, "leaf")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |proof| handle_out(PROOFS.insert(proof), out),
     )
@@ -441,15 +438,12 @@ pub unsafe extern "C" fn curvy_merkle_proof(
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_merkle_proof_at(handle: u64, index: u32, out: *mut u64) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle(
         &MERKLE,
         handle,
-        |tree| {
-            tree.create_proof_at(index as usize)
-                .map_err(|e| e.to_string())
-        },
+        |tree| tree.create_proof_at(index as usize).map_err(failed),
         |proof| handle_out(PROOFS.insert(proof), out),
     )
 }
@@ -460,7 +454,7 @@ pub extern "C" fn curvy_merkle_proof_at(handle: u64, index: u32, out: *mut u64) 
 pub extern "C" fn curvy_ordered_new(depth: u32, out: *mut u64) -> CurvyStatus {
     construct(
         &ORDERED,
-        || OrderedMerkleTree::new(depth as usize).map_err(|e| e.to_string()),
+        || OrderedMerkleTree::new(depth as usize).map_err(failed),
         out,
     )
 }
@@ -478,17 +472,17 @@ pub unsafe extern "C" fn curvy_ordered_from_leaves(
         &ORDERED,
         || {
             let bytes = unsafe { bytes_in(packed_leaves, len) }
-                .map_err(|_| "invalid leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid leaves buffer"))?;
             OrderedMerkleTree::from_leaves(depth as usize, &decode_fields(bytes, "leaves")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         out,
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_ordered_free(handle: u64) {
-    ORDERED.remove(handle);
+pub extern "C" fn curvy_ordered_free(handle: u64) -> CurvyStatus {
+    guard(|| free_status(ORDERED.remove(handle)))
 }
 
 #[unsafe(no_mangle)]
@@ -531,17 +525,17 @@ pub unsafe extern "C" fn curvy_ordered_insert(
     out: *mut u32,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &ORDERED,
         handle,
         |tree| {
             let bytes =
-                unsafe { bytes_in(leaf, len) }.map_err(|_| "invalid leaf buffer".to_string())?;
+                unsafe { bytes_in(leaf, len) }.map_err(|_| invalid("invalid leaf buffer"))?;
             tree.insert(decode_field(bytes, "leaf")?)
                 .map(|index| index as u32)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |value| u32_out(value, out),
     )
@@ -560,9 +554,9 @@ pub unsafe extern "C" fn curvy_ordered_insert_many(
         handle,
         |tree| {
             let bytes = unsafe { bytes_in(packed_leaves, len) }
-                .map_err(|_| "invalid leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid leaves buffer"))?;
             tree.insert_many(&decode_fields(bytes, "leaves")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -571,15 +565,12 @@ pub unsafe extern "C" fn curvy_ordered_insert_many(
 #[unsafe(no_mangle)]
 pub extern "C" fn curvy_ordered_proof_at(handle: u64, index: u32, out: *mut u64) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle(
         &ORDERED,
         handle,
-        |tree| {
-            tree.create_proof_at(index as usize)
-                .map_err(|e| e.to_string())
-        },
+        |tree| tree.create_proof_at(index as usize).map_err(failed),
         |proof| handle_out(PROOFS.insert(proof), out),
     )
 }
@@ -590,7 +581,7 @@ pub extern "C" fn curvy_ordered_proof_at(handle: u64, index: u32, out: *mut u64)
 pub extern "C" fn curvy_sharded_new(depth: u32, shard_height: u32, out: *mut u64) -> CurvyStatus {
     construct(
         &SHARDED,
-        || ShardedNotesTree::new(depth as usize, shard_height as usize).map_err(|e| e.to_string()),
+        || ShardedNotesTree::new(depth as usize, shard_height as usize).map_err(failed),
         out,
     )
 }
@@ -607,8 +598,8 @@ pub unsafe extern "C" fn curvy_sharded_restore(
         &SHARDED,
         || {
             let bytes = unsafe { bytes_in(snapshot, len) }
-                .map_err(|_| "invalid snapshot buffer".to_string())?;
-            ShardedNotesTree::from_snapshot_bytes(bytes).map_err(|e| e.to_string())
+                .map_err(|_| invalid("invalid snapshot buffer"))?;
+            ShardedNotesTree::from_snapshot_bytes(bytes).map_err(failed)
         },
         out,
     )
@@ -630,24 +621,24 @@ pub unsafe extern "C" fn curvy_sharded_restore_parts(
         &SHARDED,
         || {
             let roots = unsafe { bytes_in(completed_roots, completed_roots_len) }
-                .map_err(|_| "invalid completed roots buffer".to_string())?;
+                .map_err(|_| invalid("invalid completed roots buffer"))?;
             let leaves = unsafe { bytes_in(live_leaves, live_leaves_len) }
-                .map_err(|_| "invalid live leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid live leaves buffer"))?;
             ShardedNotesTree::from_parts(
                 depth as usize,
                 shard_height as usize,
                 decode_fields(roots, "completed shard roots")?,
                 decode_fields(leaves, "live leaves")?,
             )
-            .map_err(|e| e.to_string())
+            .map_err(failed)
         },
         out,
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_sharded_free(handle: u64) {
-    SHARDED.remove(handle);
+pub extern "C" fn curvy_sharded_free(handle: u64) -> CurvyStatus {
+    guard(|| free_status(SHARDED.remove(handle)))
 }
 
 // Keep these explicit because cbindgen does not expand macros.
@@ -727,7 +718,7 @@ pub extern "C" fn curvy_sharded_snapshot(handle: u64, out: *mut CurvyBytes) -> C
     with_handle(
         &SHARDED,
         handle,
-        |tree| tree.encode_snapshot().map_err(|e| e.to_string()),
+        |tree| tree.encode_snapshot().map_err(failed),
         |value| bytes_out(value, out),
     )
 }
@@ -757,7 +748,7 @@ pub extern "C" fn curvy_sharded_completed_shard_root(
         |tree| {
             tree.completed_shard_root(shard_index as usize)
                 .map(|root| fr_to_be_32(&root).to_vec())
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |value| bytes_out(value, out),
     )
@@ -785,10 +776,9 @@ pub unsafe extern "C" fn curvy_sharded_append(
         &SHARDED,
         handle,
         |tree| {
-            let bytes = unsafe { bytes_in(note_id, len) }
-                .map_err(|_| "invalid note id buffer".to_string())?;
-            tree.append(decode_field(bytes, "note id")?)
-                .map_err(|e| e.to_string())
+            let bytes =
+                unsafe { bytes_in(note_id, len) }.map_err(|_| invalid("invalid note id buffer"))?;
+            tree.append(decode_field(bytes, "note id")?).map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -807,9 +797,9 @@ pub unsafe extern "C" fn curvy_sharded_append_many(
         handle,
         |tree| {
             let bytes = unsafe { bytes_in(packed_note_ids, len) }
-                .map_err(|_| "invalid note ids buffer".to_string())?;
+                .map_err(|_| invalid("invalid note ids buffer"))?;
             tree.append_many(&decode_fields(bytes, "note ids")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -828,10 +818,10 @@ pub unsafe extern "C" fn curvy_sharded_mark_owned(
         &SHARDED,
         handle,
         |tree| {
-            let bytes = unsafe { bytes_in(note_id, len) }
-                .map_err(|_| "invalid note id buffer".to_string())?;
+            let bytes =
+                unsafe { bytes_in(note_id, len) }.map_err(|_| invalid("invalid note id buffer"))?;
             tree.mark_owned(decode_field(bytes, "note id")?, leaf_index as usize)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -847,21 +837,21 @@ pub unsafe extern "C" fn curvy_sharded_unmark_owned(
     out: *mut c_int,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &SHARDED,
         handle,
         |tree| {
-            let bytes = unsafe { bytes_in(note_id, len) }
-                .map_err(|_| "invalid note id buffer".to_string())?;
+            let bytes =
+                unsafe { bytes_in(note_id, len) }.map_err(|_| invalid("invalid note id buffer"))?;
             Ok(tree.unmark_owned(decode_field(bytes, "note id")?))
         },
         |removed| {
             if out.is_null() {
-                return CurvyStatus::InvalidArgument;
+                return null_output();
             }
-            unsafe { *out = c_int::from(removed) };
+            unsafe { std::ptr::write_unaligned(out, c_int::from(removed)) };
             CurvyStatus::Ok
         },
     )
@@ -883,15 +873,15 @@ pub unsafe extern "C" fn curvy_sharded_adopt_frozen_witness(
         handle,
         |tree| {
             let note_bytes = unsafe { bytes_in(note_id, note_id_len) }
-                .map_err(|_| "invalid note id buffer".to_string())?;
+                .map_err(|_| invalid("invalid note id buffer"))?;
             let sibling_bytes = unsafe { bytes_in(siblings, siblings_len) }
-                .map_err(|_| "invalid siblings buffer".to_string())?;
+                .map_err(|_| invalid("invalid siblings buffer"))?;
             tree.adopt_frozen_witness(
                 decode_field(note_bytes, "note id")?,
                 leaf_index as usize,
                 decode_fields(sibling_bytes, "within-shard siblings")?,
             )
-            .map_err(|e| e.to_string())
+            .map_err(failed)
         },
         |()| CurvyStatus::Ok,
     )
@@ -904,7 +894,7 @@ pub extern "C" fn curvy_sharded_rewind_live_to(
     out: *mut CurvyBytes,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &SHARDED,
@@ -912,7 +902,7 @@ pub extern "C" fn curvy_sharded_rewind_live_to(
         |tree| {
             tree.rewind_live_to(leaf_count as usize)
                 .map(|removed| pack_fields(&removed))
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |value| bytes_out(value, out),
     )
@@ -928,16 +918,16 @@ pub unsafe extern "C" fn curvy_sharded_witness(
     out: *mut u64,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle(
         &SHARDED,
         handle,
         |tree| {
-            let bytes = unsafe { bytes_in(note_id, len) }
-                .map_err(|_| "invalid note id buffer".to_string())?;
+            let bytes =
+                unsafe { bytes_in(note_id, len) }.map_err(|_| invalid("invalid note id buffer"))?;
             tree.witness(decode_field(bytes, "note id")?)
-                .map_err(|e| e.to_string())
+                .map_err(failed)
         },
         |proof| handle_out(PROOFS.insert(proof), out),
     )
@@ -984,7 +974,7 @@ pub extern "C" fn curvy_sharded_drain_dirty_owned_notes(
     out: *mut CurvyBytes,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &SHARDED,
@@ -1000,7 +990,7 @@ pub extern "C" fn curvy_sharded_drain_dirty_owned_notes(
 pub extern "C" fn curvy_frontier_new(depth: u32, shard_height: u32, out: *mut u64) -> CurvyStatus {
     construct(
         &FRONTIER,
-        || NotesFrontier::new(depth as usize, shard_height as usize).map_err(|e| e.to_string()),
+        || NotesFrontier::new(depth as usize, shard_height as usize).map_err(failed),
         out,
     )
 }
@@ -1022,16 +1012,16 @@ pub unsafe extern "C" fn curvy_frontier_restore(
         &FRONTIER,
         || {
             let bytes = unsafe { bytes_in(snapshot, len) }
-                .map_err(|_| "invalid snapshot buffer".to_string())?;
-            NotesFrontier::from_snapshot_bytes(bytes).map_err(|e| e.to_string())
+                .map_err(|_| invalid("invalid snapshot buffer"))?;
+            NotesFrontier::from_snapshot_bytes(bytes).map_err(failed)
         },
         out,
     )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn curvy_frontier_free(handle: u64) {
-    FRONTIER.remove(handle);
+pub extern "C" fn curvy_frontier_free(handle: u64) -> CurvyStatus {
+    guard(|| free_status(FRONTIER.remove(handle)))
 }
 
 // Keep these explicit because cbindgen does not expand macros.
@@ -1119,17 +1109,17 @@ pub unsafe extern "C" fn curvy_frontier_append(
     out: *mut CurvyBytes,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &FRONTIER,
         handle,
         |frontier| {
             let bytes =
-                unsafe { bytes_in(leaf, len) }.map_err(|_| "invalid leaf buffer".to_string())?;
+                unsafe { bytes_in(leaf, len) }.map_err(|_| invalid("invalid leaf buffer"))?;
             let append = frontier
                 .append(decode_field(bytes, "leaf")?)
-                .map_err(|e| e.to_string())?;
+                .map_err(failed)?;
             let mut buffer = Vec::with_capacity(41);
             push_u32(&mut buffer, append.leaf_index as u32);
             match append.completed_shard {
@@ -1165,17 +1155,17 @@ pub unsafe extern "C" fn curvy_frontier_append_many(
     out: *mut CurvyBytes,
 ) -> CurvyStatus {
     if out.is_null() {
-        return CurvyStatus::InvalidArgument;
+        return null_output();
     }
     with_handle_mut(
         &FRONTIER,
         handle,
         |frontier| {
             let bytes = unsafe { bytes_in(packed_leaves, len) }
-                .map_err(|_| "invalid leaves buffer".to_string())?;
+                .map_err(|_| invalid("invalid leaves buffer"))?;
             let shards = frontier
                 .append_many(&decode_fields(bytes, "leaves")?)
-                .map_err(|e| e.to_string())?;
+                .map_err(failed)?;
             let mut buffer = Vec::with_capacity(4 + shards.len() * 36);
             push_u32(&mut buffer, shards.len() as u32);
             for shard in shards {

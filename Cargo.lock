@@ -11,6 +11,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -566,6 +567,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -638,6 +640,7 @@ dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -768,6 +771,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "crypto-bigint"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+dependencies = [
+ "cpubits",
+ "ctutils",
+ "num-traits",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -817,9 +832,12 @@ dependencies = [
  "ark-bn254",
  "ark-ec",
  "ark-ff 0.6.0",
+ "curvy-core",
  "curvy-prover",
  "curvy-witness",
  "rayon",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
 ]
 
@@ -832,6 +850,7 @@ dependencies = [
  "ark-ec",
  "ark-ff 0.6.0",
  "ark-secp256k1",
+ "crypto-bigint",
  "ctr",
  "getrandom 0.2.17",
  "hkdf",
@@ -866,6 +885,15 @@ dependencies = [
  "curvy-witness",
  "serde_json",
  "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
+name = "curvy-leakage"
+version = "0.1.0-rc.6"
+dependencies = [
+ "curvy-core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -874,11 +902,13 @@ version = "0.1.0-rc.6"
 dependencies = [
  "curvy-core",
  "curvy-prover",
+ "curvy-witness",
  "napi",
  "napi-build",
  "napi-derive",
  "rayon",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -903,6 +933,7 @@ dependencies = [
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
+ "zeroize",
 ]
 
 [[package]]
@@ -928,8 +959,11 @@ name = "curvy-wasm"
 version = "0.1.0-rc.6"
 dependencies = [
  "curvy-core",
+ "js-sys",
+ "num-bigint 0.5.1",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
+ "zeroize",
 ]
 
 [[package]]
@@ -940,9 +974,11 @@ dependencies = [
  "ark-ff 0.6.0",
  "num-bigint 0.5.1",
  "ruzstd",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -995,6 +1031,7 @@ dependencies = [
  "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -1286,6 +1323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
 dependencies = [
  "typenum",
+ "zeroize",
 ]
 
 [[package]]

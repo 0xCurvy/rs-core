@@ -37,6 +37,12 @@ bindings/node/THIRD-PARTY-NOTICES.md
 
 # Local JavaScript tooling.
 node_modules
+__pycache__/
+*.py[cod]
+/tools/leakage/pkg/
+
+# Raw benchmark and leakage runs stay local; summarize them in docs/benchmarks.md.
+/tools/benchmarks/results/
 
 # macOS / IDE metadata.
 .DS_Store

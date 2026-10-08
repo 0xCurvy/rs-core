@@ -19,6 +19,61 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Publish only a commit that CI (ci.yml) fully passed on main. CI runs for
+  # pushes to main, so the tagged SHA must be the head of such a push. An
+  # in-progress run (tag pushed together with main) is waited for.
+  ci-passed:
+    name: CI passed for the tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful ci.yml push run on main for this SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for attempt in $(seq 1 70); do
+            runs="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --branch main --event push \
+              --limit 20 --json headSha,status,conclusion,url)"
+            if jq -e --arg sha "$GITHUB_SHA" \
+              'any(.[]; .headSha == $sha and .status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null; then
+              jq -r --arg sha "$GITHUB_SHA" \
+                'first(.[] | select(.headSha == $sha and .conclusion == "success")) | "CI passed: \(.url)"' <<<"$runs"
+              exit 0
+            fi
+            if ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::no successful ci.yml push run on main for $GITHUB_SHA; tag a commit whose main CI run passed"
+              exit 1
+            fi
+            echo "CI for $GITHUB_SHA is still running (check $attempt); waiting"
+            sleep 60
+          done
+          echo "::error::timed out waiting for CI on $GITHUB_SHA"
+          exit 1
+
+  # Full differential gate for the generated Poseidon schedule: 10,000
+  # deterministic random inputs per arity against the direct reference. It is
+  # #[ignore]d in ordinary test runs because of its cost.
+  poseidon-gate:
+    name: Poseidon 160k release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.94.0
+      - name: Optimized Poseidon matches the reference on 160k cases
+        shell: bash
+        run: |
+          cargo test -p curvy-core --release --locked --lib -- --ignored --exact \
+            poseidon::optimized_tests::optimized_schedule_matches_160k_reference_cases | tee poseidon-gate.log
+          # A renamed test would otherwise "pass" with zero tests run.
+          grep -q '^test result: ok\. 1 passed' poseidon-gate.log
+
   wasm-portable:
     name: Build portable WASM
     runs-on: ubuntu-latest
@@ -65,7 +120,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    needs: [wasm-portable, wasm-threaded]
+    needs: [ci-passed, poseidon-gate, wasm-portable, wasm-threaded]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -77,7 +132,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
 
       # Releases come off main. CI (ci.yml) only runs on main and pull
@@ -98,27 +153,57 @@ jobs:
           name: wasm-web-threads
           path: crates
 
-      - run: node scripts/build-npm.mjs --pack
-
-      - name: Tag must match the workspace version
+      - name: Pack
+        id: pack
         run: |
-          version="$(node -p "require('./dist/npm/package.json').version")"
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package version v$version" && exit 1
+          node scripts/build-npm.mjs --pack
+          shopt -s nullglob
+          tarballs=(0xcurvy-rs-core-wasm-*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one packed tarball, found ${#tarballs[@]}" && exit 1
+          fi
+          tarball="$GITHUB_WORKSPACE/${tarballs[0]}"
+          version="$(tar -xOzf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
+          # npm refuses a prerelease without an explicit dist-tag, and a
+          # prerelease must never become `latest`. Same `next` tag as
+          # scripts/build-node-release.mjs uses for the native packages.
+          if [[ "${version%%+*}" == *-* ]]; then dist_tag=next; else dist_tag=latest; fi
+          {
+            echo "tarball=$tarball"
+            echo "sha256=$(sha256sum "$tarball" | cut -d' ' -f1)"
+            echo "version=$version"
+            echo "dist-tag=$dist_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "packed $tarball (version $version, dist-tag $dist_tag)"
+
+      - name: Tag must match the packed version
+        env:
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package version v$VERSION" && exit 1
           fi
 
       - name: Smoke-test the packed tarball
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           install_dir="$(mktemp -d)"
           cd "$install_dir"
           npm init -y > /dev/null
-          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/0xcurvy-rs-core-wasm-*.tgz
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL"
           node "$GITHUB_WORKSPACE/scripts/smoke-npm.mjs" "$install_dir"
 
       # Version immutability is the registry's job: a re-run of the same tag
-      # fails here instead of silently replacing a published artifact.
+      # fails here instead of silently replacing a published artifact. The
+      # file published is the exact tarball smoke-tested above, not a re-pack.
       - name: Publish
-        working-directory: dist/npm
-        run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          TARBALL_SHA256: ${{ steps.pack.outputs.sha256 }}
+          DIST_TAG: ${{ steps.pack.outputs.dist-tag }}
+        # Configure the package's trusted publisher for this workflow before
+        # enabling it. No long-lived publish token is loaded into the runner.
+        run: |
+          echo "$TARBALL_SHA256  $TARBALL" | sha256sum --check --strict
+          npm publish "$TARBALL" --ignore-scripts --provenance --tag "$DIST_TAG"

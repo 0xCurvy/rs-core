@@ -1,0 +1,52 @@
+[package]
+name = "curvy-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+curvy-prover = { path = "../crates/prover", features = ["zkey-manifest", "zkey-single-pass", "sparrow"] }
+curvy-witness = { path = "../crates/witness", features = ["sage", "signet-v2"] }
+sha2 = "=0.11.0"
+
+[features]
+default = ["compact-matrix"]
+# The zkey constraint-matrix backend is a compile-time choice in curvy-prover.
+# The default build fuzzes the compact CSR parser; `--no-default-features`
+# fuzzes the nested `parse_matrices` path that Rust, C and WASM ship by default.
+compact-matrix = ["curvy-prover/compact-matrix"]
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "graph"
+path = "fuzz_targets/graph.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sage"
+path = "fuzz_targets/sage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prover_formats"
+path = "fuzz_targets/prover_formats.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "input_json"
+path = "fuzz_targets/input_json.rs"
+test = false
+doc = false
+bench = false

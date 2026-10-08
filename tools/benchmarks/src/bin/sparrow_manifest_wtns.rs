@@ -3,10 +3,8 @@
 use std::{env, fs, fs::File, time::Instant};
 
 use curvy_prover::{
-    sparrow::{
-        SparrowConfig,
-        manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
-    },
+    ProverMode, SPARROW_PROFILE, StreamingConfig,
+    sparrow::manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
     wtns::read_wtns,
 };
 
@@ -19,10 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()?;
-    let mut config = SparrowConfig::native_adaptive();
+    let mut config = StreamingConfig::native_adaptive();
     if let Some(value) = args.get(7) {
         config.window_bits = if value == "adaptive" {
-            SparrowConfig::ADAPTIVE_WINDOW_BITS
+            StreamingConfig::ADAPTIVE_WINDOW_BITS
         } else {
             value.parse()?
         };
@@ -55,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proof_ms = proof_started.elapsed().as_secs_f64() * 1_000.0;
 
     let adaptive_window = config.uses_adaptive_window();
+    println!("prover_mode={}", ProverMode::Streaming);
+    println!("profile={SPARROW_PROFILE}");
     println!("threads={threads}");
     println!(
         "window_policy={}",

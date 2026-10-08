@@ -146,22 +146,60 @@ fn compress_with_system_zstd(bytes: &[u8], level: i32) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // Feed stdin from its own thread while this one drains stdout. Writing all of
-    // stdin first deadlocks once zstd's pending output fills the stdout pipe: zstd
-    // blocks writing, we block writing, and neither runs again (it hung the
-    // pending-notes-commitment (50, 30) export). Dropping `stdin` at the end of the
-    // writer closes it, which is what lets zstd finish.
     let mut stdin = child.stdin.take()?;
-    let output = std::thread::scope(|scope| {
+    // Drain stdout while feeding stdin. Writing the entire artifact first can
+    // deadlock once incompressible output fills the child's stdout pipe: zstd
+    // blocks on output while the parent blocks on input. Production v1 graphs
+    // are large enough to cross that boundary even though smaller fixtures are
+    // not.
+    let (output, wrote_input) = std::thread::scope(|scope| {
         let writer = scope.spawn(move || stdin.write_all(bytes));
-        let output = child.wait_with_output();
-        let written = writer.join();
-        match (output, written) {
-            (Ok(output), Ok(Ok(()))) => Some(output),
-            _ => None,
-        }
-    })?;
+        let output = child.wait_with_output().ok();
+        let wrote_input = writer.join().ok().and_then(Result::ok).is_some();
+        (output, wrote_input)
+    });
+    if !wrote_input {
+        return None;
+    }
+    let output = output?;
     output.status.success().then_some(output.stdout)
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use std::io::Read;
+    use std::process::Command;
+
+    use super::compress_with_system_zstd;
+
+    #[test]
+    fn system_zstd_drains_large_output_while_writing() {
+        if !Command::new("zstd")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+
+        // Deterministic, effectively incompressible output well above ordinary
+        // pipe capacity. The old write-then-drain implementation deadlocked on
+        // this shape and on the 50-note production SIGNET v1 artifact.
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut source = vec![0_u8; 2 * 1024 * 1024];
+        for chunk in source.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        let compressed = compress_with_system_zstd(&source, 1).expect("system zstd");
+        let mut decoder =
+            ruzstd::decoding::StreamingDecoder::new(compressed.as_slice()).expect("zstd frame");
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).expect("decode frame");
+        assert_eq!(decoded, source);
+    }
 }
 
 /// Which body encoding the artifact uses.
@@ -225,19 +263,63 @@ pub enum SignetError {
 
 /// Decode a 64-character hex digest.
 pub fn decode_sha256(value: &str) -> Result<[u8; 32], SignetError> {
-    if value.len() != 64 {
+    // Check every byte before decoding: a length check alone admits multibyte
+    // UTF-8 (slicing would then split a character and panic), and
+    // `u8::from_str_radix` would accept a leading `+`.
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(SignetError::InvalidR1csDigest);
     }
     let mut decoded = [0_u8; 32];
-    for (index, byte) in decoded.iter_mut().enumerate() {
-        let offset = index * 2;
-        *byte = u8::from_str_radix(&value[offset..offset + 2], 16)
-            .map_err(|_| SignetError::InvalidR1csDigest)?;
+    for (byte, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *byte = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(decoded)
+}
+
+/// One ASCII hex digit. The caller has already rejected anything else.
+fn hex_nibble(digit: u8) -> u8 {
+    match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        _ => digit - b'A' + 10,
+    }
 }
 
 /// Render a digest the way the artifact tables and pins spell it.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_sha256_round_trips_either_case() {
+        let digest: [u8; 32] = std::array::from_fn(|index| (index * 37 + 5) as u8);
+        assert_eq!(decode_sha256(&hex(&digest)).unwrap(), digest);
+        assert_eq!(
+            decode_sha256(&hex(&digest).to_ascii_uppercase()).unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn decode_sha256_rejects_non_hex_without_panicking() {
+        // 64 bytes but 33 characters: slicing at byte 2 would split the first `é`.
+        let multibyte = format!("a{}a", "é".repeat(31));
+        assert_eq!(multibyte.len(), 64);
+        // `u8::from_str_radix` accepts a sign, so "+1" alone would decode as 0x01.
+        let signed = "+1".repeat(32);
+        let short = "0".repeat(63);
+        let long = "0".repeat(65);
+        let spaced = format!(" {}", "0".repeat(63));
+        let letter = format!("g{}", "0".repeat(63));
+        for value in [&multibyte, &signed, &short, &long, &spaced, &letter] {
+            assert!(
+                matches!(decode_sha256(value), Err(SignetError::InvalidR1csDigest)),
+                "{value:?} must be rejected"
+            );
+        }
+    }
 }

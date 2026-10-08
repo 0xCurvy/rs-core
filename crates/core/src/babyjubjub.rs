@@ -24,9 +24,8 @@ pub struct BabyJubScalar(BigUint);
 /// A canonical non-zero scalar in `[1, l)`, stored as fixed-width little-endian
 /// bytes so the owned key material can be cleared on drop.
 ///
-/// Point multiplication converts this value to `BigUint` and is not
-/// constant-time. Do not use this implementation where hostile co-resident code
-/// can observe timing or shared hardware state.
+/// Secret multiplication uses fixed-width RustCrypto arithmetic and a fixed
+/// 256-bit schedule. Public verification retains the variable-time oracle.
 pub struct BabyJubSecretScalar([u8; 32]);
 
 /// A checked affine point in the prime-order BabyJubJub subgroup.
@@ -112,6 +111,9 @@ fn parse_scalar_decimal(s: &str) -> Result<BigUint, BabyJubError> {
     if s.len() > 1 && s.starts_with('0') {
         return Err(BabyJubError::NonCanonicalScalarDecimal);
     }
+    if s.len() > 76 {
+        return Err(BabyJubError::ScalarOutOfRange);
+    }
     BigUint::parse_bytes(s.as_bytes(), 10).ok_or(BabyJubError::InvalidScalarDecimal)
 }
 
@@ -159,11 +161,39 @@ impl BabyJubSecretScalar {
     }
 
     pub fn try_from_dec(s: &str) -> Result<Self, BabyJubError> {
-        Self::try_from_biguint(parse_scalar_decimal(s)?)
+        use crate::encoding::{DecimalU256Error, try_dec_to_le_32};
+        let bytes = try_dec_to_le_32(s).map_err(|error| match error {
+            DecimalU256Error::InvalidDecimal => BabyJubError::InvalidScalarDecimal,
+            DecimalU256Error::OutOfRange => BabyJubError::ScalarOutOfRange,
+        })?;
+        if s.len() > 1 && s.starts_with('0') {
+            return Err(BabyJubError::NonCanonicalScalarDecimal);
+        }
+        if !crate::secret_arithmetic::valid_secret(&bytes) {
+            return Err(if *bytes == [0; 32] {
+                BabyJubError::ZeroSecretScalar
+            } else {
+                BabyJubError::ScalarOutOfRange
+            });
+        }
+        Ok(Self(*bytes))
     }
 
-    pub fn try_from_le_bytes(bytes: [u8; 32]) -> Result<Self, BabyJubError> {
-        Self::try_from_biguint(BigUint::from_bytes_le(&bytes))
+    pub fn try_from_le_bytes(mut bytes: [u8; 32]) -> Result<Self, BabyJubError> {
+        if !crate::secret_arithmetic::valid_secret(&bytes) {
+            // Rejected input only: classify zero vs out-of-range like
+            // `try_from_dec`, with a branch-free fold over the bytes.
+            let zero = bytes.iter().fold(0u8, |acc, byte| acc | byte) == 0;
+            #[cfg(feature = "leakage")]
+            let zero = crate::leakage::public_flag(zero);
+            bytes.zeroize();
+            return Err(if zero {
+                BabyJubError::ZeroSecretScalar
+            } else {
+                BabyJubError::ScalarOutOfRange
+            });
+        }
+        Ok(Self(bytes))
     }
 
     #[inline]
@@ -315,10 +345,8 @@ pub fn mul_point_escalar(base: Point, e: &BigUint) -> Point {
 
 /// Direct public-key derivation from a canonical non-zero subgroup scalar.
 pub fn public_key_from_scalar(scalar: &BabyJubSecretScalar) -> BabyJubPoint {
-    BabyJubPoint::from_subgroup_non_identity_unchecked(mul_point_escalar(
-        *BASE8,
-        &scalar.to_biguint(),
-    ))
+    let bytes = zeroize::Zeroizing::new(scalar.to_le_32());
+    BabyJubPoint::from_subgroup_non_identity_unchecked(crate::secret_arithmetic::base_mul(&bytes))
 }
 
 #[cfg(test)]
@@ -342,6 +370,31 @@ mod tests {
         );
         assert_eq!(
             BabyJubSecretScalar::try_from_dec("1").unwrap().to_dec(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn secret_scalar_byte_import_classifies_zero_like_decimal_import() {
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes([0; 32]).err(),
+            Some(BabyJubError::ZeroSecretScalar)
+        );
+        let order = BabyJubScalar(SUB_ORDER.clone()).to_le_32();
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes(order).err(),
+            Some(BabyJubError::ScalarOutOfRange)
+        );
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes([0xff; 32]).err(),
+            Some(BabyJubError::ScalarOutOfRange)
+        );
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        assert_eq!(
+            BabyJubSecretScalar::try_from_le_bytes(one)
+                .unwrap()
+                .to_dec(),
             "1"
         );
     }

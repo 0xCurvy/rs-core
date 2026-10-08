@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Curvy SPARROW window sweep</title>
+<style>body{font:16px system-ui;max-width:900px;margin:48px auto;padding:0 24px}button{font:inherit;padding:12px 20px}pre{white-space:pre-wrap}</style>
+<h1>SPARROW window sweep</h1>
+<button id="run">Run window sweep</button>
+<pre id="result" role="status">Ready</pre>
+<script type="module">
+// One-pass manifest SPARROW proofs at several fixed MSM window widths in one
+// page. Requires a `scripts/build-wasm.sh web [--threads] --sparrow` package
+// and a serve.mjs case with manifestUrl/manifestSha256. Widths are rotated per
+// sample (and by `offset`) so every width sees each position equally often.
+import { proveManifestResponse, sha256Hex } from '/crates/prover/js/sparrow-cache-api.mjs';
+const query = new URLSearchParams(location.search);
+const result = document.querySelector('#result');
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const fetchBytes = async (url) => {
+  const response = await fetch(url);
+  check(response.ok, `fetch failed: ${url} (${response.status})`);
+  return new Uint8Array(await response.arrayBuffer());
+};
+document.querySelector('#run').onclick = async () => {
+  document.querySelector('#run').disabled = true;
+  try {
+    const mode = query.get('mode') || 'portable';
+    check(['threaded', 'portable'].includes(mode), 'unknown mode');
+    check(crossOriginIsolated, 'cross-origin isolation is required');
+    const wasm = await import(`/crates/prover/pkg-web${mode === 'threaded' ? '-threads' : ''}/curvy_prover.js`);
+    check((typeof wasm.initThreadPool === 'function') === (mode === 'threaded'), `${mode} mode loaded the wrong package build`);
+    check(typeof wasm.WasmStreamingProver === 'function', 'package was not built with --sparrow');
+    const {memory} = await wasm.default();
+    const threads = mode === 'threaded' ? Number(query.get('threads') || 4) : 1;
+    if (mode === 'threaded') await wasm.initThreadPool(threads);
+    const widths = (query.get('widths') || '11,12,13,14').split(',').map(Number);
+    check(widths.every(w => Number.isInteger(w) && w >= 4 && w <= 16), 'invalid widths');
+    const samples = Number(query.get('samples') || 2);
+    const offset = Number(query.get('offset') || 0);
+    const chunkPoints = Number(query.get('chunk') || 65536);
+    const scenarios = await (await fetch('/benchmark/config.json')).json();
+    const data = scenarios.find(s => String(s.notes) === query.get('scenario'));
+    check(data && data.manifestUrl, 'unknown scenario or missing manifest');
+    const graph = await fetchBytes(data.graphUrl);
+    const manifest = await fetchBytes(data.manifestUrl);
+    const zkeyBlob = await (await fetch(data.zkeyUrl)).blob();
+    const inputJson = JSON.stringify(data.input);
+    result.textContent = 'Compiling SAGE';
+    const compileStarted = performance.now();
+    const compiler = wasm.WasmStreamingProver.fromSignetWithConfig(graph, data.graphSha256, data.zkeySha256, false, 13, chunkPoints);
+    const program = compiler.compiledSageProgram();
+    compiler.free();
+    const compileMs = performance.now() - compileStarted;
+    // Benchmark-only self-pin: the program was just derived from the
+    // authenticated graph in this page.
+    const programSha256 = await sha256Hex(program);
+    const prove = async (width) => {
+      const prover = wasm.WasmStreamingProver.fromCompiledSageWithConfig(
+        program, programSha256, data.graphSha256, data.zkeySha256, false, width, chunkPoints);
+      try {
+        const started = performance.now();
+        const bundle = await proveManifestResponse(prover, inputJson, manifest, data.manifestSha256, new Response(zkeyBlob));
+        const elapsed = performance.now() - started;
+        check(bundle.proof.protocol === 'groth16', 'wrong protocol');
+        check(JSON.stringify(bundle.publicSignals) === JSON.stringify(data.expectedPublics), 'public signals mismatch');
+        return elapsed;
+      } finally { prover.free(); }
+    };
+    result.textContent = 'Warm-up';
+    const warmupMs = await prove(widths[offset % widths.length]);
+    const runs = [];
+    for (let sample = 0; sample < samples; sample++) {
+      for (let k = 0; k < widths.length; k++) {
+        const width = widths[(k + sample + offset) % widths.length];
+        result.textContent = `Sample ${sample + 1}/${samples}, width ${width}`;
+        runs.push({sample, position: k, width, proofMs: await prove(width)});
+      }
+    }
+    const report = {passed: true, mode, threads, scenario: data.notes, crossOriginIsolated, userAgent: navigator.userAgent,
+      chunkPoints, widths, samples, offset, compileMs, programBytes: program.byteLength, warmupMs, runs,
+      wasmMemoryPeakBytes: memory.buffer.byteLength};
+    result.textContent = JSON.stringify(report, null, 2);
+    result.dataset.state = 'passed';
+  } catch (error) {
+    result.textContent = JSON.stringify({passed: false, error: String(error), stack: error.stack}, null, 2);
+    result.dataset.state = 'failed';
+  }
+};
+</script>

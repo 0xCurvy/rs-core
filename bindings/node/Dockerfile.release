@@ -1,8 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-bookworm AS build
-
-ARG RUST_VERSION=1.94.0
+FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS node_runtime
+FROM rust@sha256:a86cada82e36ebd7a9bffed7548792c55a952fdb20718eea9278a936bcb76e62 AS build
+COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+ENV CARGO_HOME=/root/.cargo
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -16,17 +20,21 @@ RUN apt-get update \
       pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
-      https://sh.rustup.rs \
-      | sh -s -- --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path -y
+ARG NODE_RELEASE_TARGET
+# `napi build --cross-compile` otherwise runs an unpinned, unlocked
+# `cargo install cargo-xwin` on every build. Preinstall a pinned release before
+# copying the source so this layer stays cached; napi detects and reuses it.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    if [ "${NODE_RELEASE_TARGET}" = windows-x64 ]; then \
+      cargo install --locked cargo-xwin --version 0.23.1; \
+    fi
 
-ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .
 
-RUN cd bindings/node && npm ci
+RUN cd bindings/node && npm ci --ignore-scripts
 
-ARG NODE_RELEASE_TARGET
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/target \
@@ -46,6 +54,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
         rust_target=x86_64-pc-windows-msvc; \
         output=curvy_rs_core_node.win32-x64-msvc.node; \
         cross_flag=--cross-compile; \
+        command -v cargo-xwin; \
         ;; \
       *) \
         echo "unsupported NODE_RELEASE_TARGET=${NODE_RELEASE_TARGET}" >&2; \

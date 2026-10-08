@@ -12,13 +12,24 @@ rust-version.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = ["compact-matrix"]
+compact-matrix = ["curvy-prover/compact-matrix"]
+poseidon-optimized = ["curvy-core/poseidon-optimized"]
+
 [dependencies]
 curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
-curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", features = ["parallel"] }
+curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", features = ["parallel", "signet-v2", "sage", "zkey-manifest"] }
+curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness", features = ["sage"] }
 napi.workspace = true
 napi-derive.workspace = true
 rayon.workspace = true
 serde_json.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# Rust unit tests run outside Node and do not own any JavaScript references.
+napi = { workspace = true, features = ["noop", "dyn-symbols"] }
 
 [build-dependencies]
 napi-build.workspace = true

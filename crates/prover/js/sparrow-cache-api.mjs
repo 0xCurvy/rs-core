@@ -1,7 +1,8 @@
-// Cache API adapter for WasmSparrowProver. The large zkey paths never
+// Cache API adapter for WasmStreamingProver. The large zkey paths never
 // call Response.arrayBuffer(): only framing records or browser-supplied body
 // chunks cross the JS/WASM boundary. Small graphs, derived SAGE programs, and
-// manifests use byte slices because their Rust parsers currently do the same.
+// manifests use byte slices because their Rust parsers currently do the same;
+// source artifacts are buffered only up to ARTIFACT_BYTE_LIMITS.
 
 const SAGE_CACHE_LAYOUT_VERSION = 1;
 const SAGE_CACHE_PREFIX = "/__curvy_derived/sage/";
@@ -10,16 +11,153 @@ const PROGRAM_HASH_HEADER = "x-curvy-sage-program-sha256";
 const PROGRAM_BYTES_HEADER = "x-curvy-sage-program-bytes";
 const COMPILER_VERSION_HEADER = "x-curvy-sage-compiler-version";
 const PROFILE_HEADER = "x-curvy-sage-limits-profile";
+const MIB = 1024 * 1024;
 
-export async function cachedArtifactBytes(cache, url) {
+/**
+ * Ceilings for artifacts this adapter reads into memory. They mirror the Rust
+ * limits (`curvy_witness::Limits` graph and input JSON bytes for the client and
+ * batch profiles) so an oversized response is rejected while it streams rather
+ * than after it has been buffered. A chunk manifest is 60 bytes plus 32 per
+ * chunk; 4 MiB covers an 8 GiB zkey at the smallest 64 KiB chunk size.
+ */
+export const ARTIFACT_BYTE_LIMITS = Object.freeze({
+  clientGraph: 64 * MIB,
+  batchGraph: 96 * MIB,
+  manifest: 4 * MIB,
+  inputJson: 16 * MIB,
+});
+const DEFAULT_ARTIFACT_MAX_BYTES = ARTIFACT_BYTE_LIMITS.clientGraph;
+
+/**
+ * Read a small artifact through Cache API, fetching it on a miss.
+ *
+ * The body is streamed under `maxBytes`. With `expectedSha256`, a cached copy
+ * that fails the pin is evicted and fetched once from the network, and network
+ * bytes are cached only after they match. Without a pin the bytes are not
+ * authenticated here: pass them to an authenticating parser, or use
+ * `authenticatedCachedArtifact` so a rejected cache entry is replaced.
+ */
+export async function cachedArtifactBytes(
+  cache,
+  url,
+  { maxBytes = DEFAULT_ARTIFACT_MAX_BYTES, expectedSha256 = null, onStatus = () => {} } = {},
+) {
+  const pin = expectedSha256 == null ? null : normalizeSha256(expectedSha256, "artifact SHA-256");
+  return authenticatedCachedArtifact(
+    cache,
+    url,
+    async (bytes) => {
+      if (pin) {
+        const actual = await sha256Hex(bytes);
+        if (actual !== pin) throw new Error(`artifact digest mismatch: expected ${pin}, got ${actual}`);
+      }
+      return bytes;
+    },
+    { maxBytes, onStatus },
+  );
+}
+
+/**
+ * Read an artifact through Cache API and return `authenticate(bytes)`.
+ *
+ * A cached copy that exceeds `maxBytes` or that `authenticate` rejects is
+ * evicted and fetched once from the network. Network bytes are stored only
+ * after `authenticate` accepts them, so a failed check never leaves them
+ * cached.
+ */
+export async function authenticatedCachedArtifact(
+  cache,
+  url,
+  authenticate,
+  { maxBytes = DEFAULT_ARTIFACT_MAX_BYTES, onStatus = () => {} } = {},
+) {
+  const limit = byteLimit(maxBytes);
   const request = new Request(url);
-  let response = await cache.match(request);
-  if (!response) {
-    response = await fetch(request);
-    if (!response.ok) throw new Error(`artifact fetch failed (${response.status}): ${url}`);
-    await cache.put(request, response.clone());
+  const cached = await cache.match(request);
+  if (cached) {
+    try {
+      return await authenticate(await boundedBytes(cached, limit, url));
+    } catch (error) {
+      onStatus(`Cached artifact was rejected; refetching (${errorMessage(error)}): ${url}`);
+      await cache.delete(request);
+    }
   }
-  return new Uint8Array(await response.arrayBuffer());
+
+  // After an eviction, bypass the HTTP cache as well: this is the one retry.
+  const response = await fetch(request, cached ? { cache: "no-store" } : undefined);
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`artifact fetch failed (${response.status}): ${url}`);
+  }
+  const bytes = await boundedBytes(response, limit, url);
+  const result = await authenticate(bytes);
+  try {
+    await cache.put(
+      request,
+      new Response(bytes, {
+        headers: {
+          "content-length": String(bytes.byteLength),
+          "content-type": response.headers.get("content-type") || "application/octet-stream",
+        },
+      }),
+    );
+  } catch (error) {
+    onStatus(`Artifact was authenticated but could not be cached (${errorMessage(error)}): ${url}`);
+  }
+  return result;
+}
+
+/**
+ * Buffer a response body, rejecting a declared or streamed length above
+ * `maxBytes` before the excess is retained.
+ */
+async function boundedBytes(response, maxBytes, label) {
+  const declared = response.headers.get("content-length");
+  let capacity = Math.min(maxBytes, 64 * 1024);
+  if (declared !== null && /^\d+$/.test(declared.trim())) {
+    const length = Number(declared);
+    if (length > maxBytes) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`artifact declares ${length} bytes, above the ${maxBytes}-byte limit: ${label}`);
+    }
+    capacity = length;
+  }
+  if (!response.body) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  let buffer = new Uint8Array(capacity);
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > maxBytes - length) {
+        throw new Error(`artifact exceeds the ${maxBytes}-byte limit: ${label}`);
+      }
+      if (length + value.byteLength > buffer.byteLength) {
+        const grown = new Uint8Array(
+          Math.min(maxBytes, Math.max(length + value.byteLength, buffer.byteLength * 2)),
+        );
+        grown.set(buffer.subarray(0, length));
+        buffer = grown;
+      }
+      buffer.set(value, length);
+      length += value.byteLength;
+    }
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  return length === buffer.byteLength ? buffer : buffer.slice(0, length);
+}
+
+function byteLimit(maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("maxBytes must be a positive safe integer");
+  }
+  return maxBytes;
 }
 
 /**
@@ -28,26 +166,39 @@ export async function cachedArtifactBytes(cache, url) {
  *
  * The cache is deliberately keyed by source digest, compiler-cache version,
  * and limits profile. Its stored digest detects truncation/storage corruption;
- * Rust additionally validates the program format, every index/dimension, and
- * the embedded source digest. This is origin-local derived state, not a new
- * protocol artifact.
+ * Warm loads require expectedSageProgramSha256 from trusted deployment metadata
+ * or retained trusted process state. Without it, compile the authenticated graph
+ * again and leave the derived cache untouched (`cacheStored: false`): an entry
+ * that no warm load may read is not worth its quota or its write. The embedded
+ * source digest does not prove correct compilation.
+ *
+ * A cached source graph that fails SIGNET authentication or `graphMaxBytes`
+ * (by default the Rust graph limit for the selected profile) is evicted and
+ * fetched once from the network.
  */
-export async function loadOrCompileSageProver({
+export async function loadOrCompileStreamingProver({
   wasm,
   cache,
   graphUrl,
   expectedSourceGraphSha256,
   expectedZkeySha256,
+  expectedSageProgramSha256 = null,
   batchProfile = false,
   windowBits = 13,
   msmChunkPoints = 65_536,
+  graphMaxBytes = batchProfile ? ARTIFACT_BYTE_LIMITS.batchGraph : ARTIFACT_BYTE_LIMITS.clientGraph,
   onStatus = () => {},
 }) {
   const sourceHash = normalizeSha256(expectedSourceGraphSha256, "source graph SHA-256");
+  // Validated up front so a malformed pin is not mistaken for a rejected graph
+  // and does not evict a good cached copy.
+  normalizeSha256(expectedZkeySha256, "zkey SHA-256");
   const compilerVersion = cacheVersion(wasm);
   const profile = batchProfile ? "batch" : "client";
   const request = sageCacheRequest(sourceHash, compilerVersion, profile);
-  const cached = await cache.match(request);
+  const trustedProgramHash = expectedSageProgramSha256 == null ? null
+    : normalizeSha256(expectedSageProgramSha256, "SAGE program SHA-256");
+  const cached = trustedProgramHash ? await cache.match(request) : null;
   if (cached) {
     const metadata = sageResponseMetadata(cached);
     if (
@@ -57,7 +208,7 @@ export async function loadOrCompileSageProver({
     ) {
       const program = new Uint8Array(await cached.arrayBuffer());
       const actualHash = await sha256Hex(program);
-      if (metadata.bytes === program.byteLength && metadata.programHash === actualHash) {
+      if (metadata.bytes === program.byteLength && metadata.programHash === actualHash && actualHash === trustedProgramHash) {
         try {
           const prover = constructCompiledProver({
             wasm,
@@ -73,6 +224,7 @@ export async function loadOrCompileSageProver({
             prover,
             cacheHit: true,
             cacheStored: true,
+            programPinned: true,
             programBytes: program.byteLength,
             programSha256: actualHash,
             compilerVersion,
@@ -90,16 +242,20 @@ export async function loadOrCompileSageProver({
   }
 
   onStatus("Compiling SAGE from the authenticated source graph");
-  let graphBytes = await cachedArtifactBytes(cache, graphUrl);
-  let prover = wasm.WasmSparrowProver.fromSignetWithConfig(
-    graphBytes,
-    sourceHash,
-    expectedZkeySha256,
-    batchProfile,
-    windowBits,
-    msmChunkPoints,
+  let prover = await authenticatedCachedArtifact(
+    cache,
+    graphUrl,
+    (graphBytes) =>
+      wasm.WasmStreamingProver.fromSignetWithConfig(
+        graphBytes,
+        sourceHash,
+        expectedZkeySha256,
+        batchProfile,
+        windowBits,
+        msmChunkPoints,
+      ),
+    { maxBytes: graphMaxBytes, onStatus },
   );
-  graphBytes = null;
 
   let program;
   try {
@@ -109,6 +265,10 @@ export async function loadOrCompileSageProver({
     throw error;
   }
   const programHash = await sha256Hex(program);
+  if (trustedProgramHash && programHash !== trustedProgramHash) {
+    prover.free?.();
+    throw new Error("compiled SAGE program does not match the trusted program pin");
+  }
 
   // The first proof uses the same decoder as every warm load. Explicitly free
   // the compiler-produced instance before decoding so both SAGE graphs are not
@@ -125,34 +285,39 @@ export async function loadOrCompileSageProver({
     msmChunkPoints,
   });
 
-  let cacheStored = true;
+  let cacheStored = false;
   let cacheWriteError = null;
-  try {
-    await deleteCachedSagePrograms(cache, sourceHash, batchProfile);
-    await cache.put(
-      request,
-      new Response(program, {
-        headers: {
-          "cache-control": "private, max-age=31536000, immutable",
-          "content-type": "application/octet-stream",
-          [SOURCE_HASH_HEADER]: sourceHash,
-          [PROGRAM_HASH_HEADER]: programHash,
-          [PROGRAM_BYTES_HEADER]: String(program.byteLength),
-          [COMPILER_VERSION_HEADER]: String(compilerVersion),
-          [PROFILE_HEADER]: profile,
-        },
-      }),
-    );
-  } catch (error) {
-    cacheStored = false;
-    cacheWriteError = errorMessage(error);
-    onStatus(`SAGE compiled successfully but could not be cached (${cacheWriteError})`);
+  if (!trustedProgramHash) {
+    onStatus("No trusted SAGE program pin was supplied; the derived program is not cached");
+  } else {
+    try {
+      await deleteCachedSagePrograms(cache, sourceHash, batchProfile);
+      await cache.put(
+        request,
+        new Response(program, {
+          headers: {
+            "cache-control": "private, max-age=31536000, immutable",
+            "content-type": "application/octet-stream",
+            [SOURCE_HASH_HEADER]: sourceHash,
+            [PROGRAM_HASH_HEADER]: programHash,
+            [PROGRAM_BYTES_HEADER]: String(program.byteLength),
+            [COMPILER_VERSION_HEADER]: String(compilerVersion),
+            [PROFILE_HEADER]: profile,
+          },
+        }),
+      );
+      cacheStored = true;
+    } catch (error) {
+      cacheWriteError = errorMessage(error);
+      onStatus(`SAGE compiled successfully but could not be cached (${cacheWriteError})`);
+    }
   }
 
   return {
     prover,
     cacheHit: false,
     cacheStored,
+    programPinned: Boolean(trustedProgramHash),
     cacheWriteError,
     programBytes: program.byteLength,
     programSha256: programHash,
@@ -198,7 +363,7 @@ function constructCompiledProver({
   windowBits,
   msmChunkPoints,
 }) {
-  return wasm.WasmSparrowProver.fromCompiledSageWithConfig(
+  return wasm.WasmStreamingProver.fromCompiledSageWithConfig(
     program,
     programHash,
     sourceHash,
@@ -259,22 +424,102 @@ function errorMessage(error) {
   return error?.message || String(error);
 }
 
-export async function authenticateResponse(prover, response, observe = () => {}) {
+// Kept outside CacheStorage: only a successful whole-file authentication
+// authorizes these fixed-size chunk hashes for the following parse pass.
+const authenticatedResponses = new WeakMap();
+const AUTH_CHUNK_BYTES = 64 * 1024;
+async function* fixedChunks(response) {
   requireBody(response);
   const reader = response.body.getReader();
+  let buffer = new Uint8Array(AUTH_CHUNK_BYTES);
+  let filled = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      prover.authenticateZkeyChunk(value);
-      observe();
+      let offset = 0;
+      while (offset < value.length) {
+        const count = Math.min(buffer.length - filled, value.length - offset);
+        buffer.set(value.subarray(offset, offset + count), filled);
+        filled += count;
+        offset += count;
+        if (filled === buffer.length) {
+          yield buffer;
+          buffer = new Uint8Array(AUTH_CHUNK_BYTES);
+          filled = 0;
+        }
+      }
     }
-  } finally {
-    reader.releaseLock();
-  }
-  return prover.finishZkeyAuthentication();
+    if (filled) yield buffer.slice(0, filled);
+  } finally { reader.releaseLock(); }
 }
 
+/**
+ * Run the whole-file zkey authentication pass and retain its chunk hashes for
+ * `proveResponse`.
+ *
+ * A prover is pinned to one zkey digest, so once a pass has succeeded another
+ * one could only reproduce the same hashes: a redundant call leaves the
+ * authenticated state intact, does not read `response`, and returns the
+ * recorded byte count. Otherwise any partial or failed earlier pass is reset
+ * and this one starts from byte 0. Retained hashes are replaced only after the
+ * new pass succeeds.
+ */
+export async function authenticateResponse(prover, response, observe = () => {}) {
+  const recorded = authenticatedResponses.get(prover);
+  if (recorded && prover.zkeyAuthenticated) {
+    await response?.body?.cancel().catch(() => {});
+    return recorded.bytes;
+  }
+  requireBody(response);
+  prover.resetZkeyAuthentication();
+  const hashes = [];
+  for await (const chunk of fixedChunks(response)) {
+    hashes.push(await sha256Hex(chunk));
+    prover.authenticateZkeyChunk(chunk);
+    observe();
+  }
+  const bytes = prover.finishZkeyAuthentication();
+  authenticatedResponses.set(prover, { hashes, bytes });
+  return bytes;
+}
+
+function authenticatedChunkHashes(prover) {
+  const recorded = authenticatedResponses.get(prover);
+  if (!recorded || !prover.zkeyAuthenticated) {
+    throw new Error("authenticate this zkey response before proving");
+  }
+  return recorded.hashes;
+}
+
+function checkedResponse(hashes, response) {
+  const chunks = fixedChunks(response);
+  let index = 0;
+  return new Response(new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await chunks.next();
+        if (done) {
+          if (index !== hashes.length) throw new Error("zkey changed after authentication: truncated");
+          controller.close();
+        } else {
+          if (index >= hashes.length || await sha256Hex(value) !== hashes[index++]) {
+            throw new Error("zkey changed after authentication: chunk mismatch");
+          }
+          controller.enqueue(value);
+        }
+      } catch (error) { await chunks.return(); controller.error(error); }
+    },
+    async cancel() { await chunks.return(); },
+  }));
+}
+
+/**
+ * Parse an authenticated zkey response into a proof. Any failure after the
+ * proof begins aborts it, so a reusable prover can prove again. After a
+ * one-shot begin the SAGE graph is already released and a new prover is
+ * required (`prover.graphReleased`).
+ */
 export async function proveResponse(
   prover,
   inputJson,
@@ -283,9 +528,12 @@ export async function proveResponse(
   oneShot = false,
 ) {
   requireBody(response);
+  // Check every JavaScript-side precondition before a one-shot begin can
+  // release the SAGE graph.
+  const hashes = authenticatedChunkHashes(prover);
   if (oneShot) prover.beginOneShotProof(inputJson);
   else prover.beginProof(inputJson);
-  const stream = new ExactStreamReader(response.body.getReader());
+  const stream = new ExactStreamReader(checkedResponse(hashes, response).body.getReader());
   try {
     const fileHeader = await stream.readExact(12);
     prover.beginZkey(fileHeader);
@@ -305,11 +553,20 @@ export async function proveResponse(
     }
     if (!(await stream.atEnd())) throw new Error("trailing bytes after zkey sections");
     return JSON.parse(prover.finishProof());
+  } catch (error) {
+    abortQuietly(prover);
+    await stream.cancel(error);
+    throw error;
   } finally {
     stream.release();
   }
 }
 
+/**
+ * Prove from a cached zkey with the whole-file two-pass protocol. The
+ * authentication pass runs only while this prover has not completed one, so
+ * repeated proofs on a reusable prover read the zkey once per proof.
+ */
 export async function proveCachedZkey({
   prover,
   inputJson,
@@ -318,18 +575,25 @@ export async function proveCachedZkey({
   observe = () => {},
   oneShot = false,
 }) {
-  const authenticated = await cache.match(request);
-  if (!authenticated) throw new Error(`zkey is not cached: ${request}`);
-  await authenticateResponse(prover, authenticated, observe);
+  if (!authenticatedResponses.has(prover) || !prover.zkeyAuthenticated) {
+    const authenticated = await cache.match(request);
+    if (!authenticated) throw new Error(`zkey is not cached: ${request}`);
+    await authenticateResponse(prover, authenticated, observe);
+  }
 
-  // Cache.match returns a fresh Response with a fresh body. Reopening is
-  // load-bearing: the Rust state machine also hashes this proof pass and will
-  // not release a proof if it differs from the authenticated pass.
+  // Cache.match returns a fresh Response with a fresh body. The checked
+  // adapter validates each second-pass chunk against private hashes from the
+  // authenticated pass before exposing it to the Rust parser.
   const proofPass = await cache.match(request);
   if (!proofPass) throw new Error(`zkey disappeared from cache: ${request}`);
   return proveResponse(prover, inputJson, proofPass, observe, oneShot);
 }
 
+/**
+ * One-pass proof against a pinned chunk manifest. The begin call releases the
+ * SAGE graph; any later failure aborts the proof and leaves the prover in that
+ * released state (`prover.graphReleased`).
+ */
 export async function proveManifestResponse(
   prover,
   inputJson,
@@ -340,9 +604,9 @@ export async function proveManifestResponse(
 ) {
   requireBody(response);
   prover.beginOneShotManifestProof(inputJson, manifestBytes, expectedManifestSha256);
-  const { chunkBytes, zkeyBytes } = manifestLayout(manifestBytes);
   const stream = new ExactStreamReader(response.body.getReader());
   try {
+    const { chunkBytes, zkeyBytes } = manifestLayout(manifestBytes);
     let remaining = zkeyBytes;
     while (remaining > 0) {
       const take = Math.min(remaining, chunkBytes);
@@ -353,10 +617,14 @@ export async function proveManifestResponse(
       observe();
     }
     if (!(await stream.atEnd())) throw new Error("zkey stream exceeds manifest size");
+    return JSON.parse(prover.finishManifestProof());
+  } catch (error) {
+    abortQuietly(prover);
+    await stream.cancel(error);
+    throw error;
   } finally {
     stream.release();
   }
-  return JSON.parse(prover.finishManifestProof());
 }
 
 export async function proveCachedZkeyOnePass({
@@ -438,8 +706,23 @@ export class ExactStreamReader {
     return chunk === null;
   }
 
+  /** Stop reading after a failure; never throws. */
+  async cancel(reason) {
+    this.pending = null;
+    await this.reader.cancel(reason).catch(() => {});
+  }
+
   release() {
     this.reader.releaseLock();
+  }
+}
+
+// Report the failure that stopped the stream, not a secondary abort error.
+function abortQuietly(prover) {
+  try {
+    prover.abortProof();
+  } catch {
+    // A freed or foreign prover cannot be aborted; the original error stands.
   }
 }
 

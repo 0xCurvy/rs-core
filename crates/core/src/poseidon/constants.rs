@@ -10,7 +10,12 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-use crate::field::{Fr, fr_from_dec};
+use super::Element;
+#[cfg(any(test, feature = "leakage"))]
+use crate::field::Fr;
+use crate::field::fr_from_dec;
+#[cfg(not(feature = "poseidon-optimized"))]
+use crate::secret_field::Element as SecretField;
 
 const CONSTANTS_JSON: &str = include_str!("../../testdata/poseidon_constants.json");
 
@@ -31,18 +36,21 @@ struct RawFile {
 }
 
 /// Parsed Poseidon parameters for one arity.
-pub struct Params {
+pub struct Params<T> {
     /// State width = arity + 1.
     pub t: usize,
     /// Number of partial rounds (R_P) for this width.
     pub n_rounds_p: usize,
     /// Flat round constants, length `(N_ROUNDS_F + n_rounds_p) * t`.
-    pub c: Vec<Fr>,
+    pub c: Vec<T>,
     /// `t x t` MDS matrix.
-    pub m: Vec<Vec<Fr>>,
+    pub m: Vec<Vec<T>>,
 }
 
-static PARAMS: LazyLock<BTreeMap<usize, Params>> = LazyLock::new(|| {
+#[cfg(not(feature = "poseidon-optimized"))]
+static PARAMS: LazyLock<BTreeMap<usize, Params<SecretField>>> = LazyLock::new(load);
+
+fn load<T: Element>() -> BTreeMap<usize, Params<T>> {
     let raw: RawFile =
         serde_json::from_str(CONSTANTS_JSON).expect("poseidon_constants.json must parse");
     raw.arities
@@ -56,12 +64,12 @@ static PARAMS: LazyLock<BTreeMap<usize, Params>> = LazyLock::new(|| {
                 "arity {arity}: unexpected C length",
             );
             assert_eq!(a.m.len(), a.t, "arity {arity}: M must be t x t");
-            let c = a.c.iter().map(|s| fr_from_dec(s)).collect();
+            let c = a.c.iter().map(|s| T::from_ark(fr_from_dec(s))).collect();
             let m =
                 a.m.iter()
                     .map(|row| {
                         assert_eq!(row.len(), a.t, "arity {arity}: M row must have t entries");
-                        row.iter().map(|s| fr_from_dec(s)).collect()
+                        row.iter().map(|s| T::from_ark(fr_from_dec(s))).collect()
                     })
                     .collect();
             (
@@ -75,11 +83,20 @@ static PARAMS: LazyLock<BTreeMap<usize, Params>> = LazyLock::new(|| {
             )
         })
         .collect()
-});
+}
 
 /// Parameters for the given arity (`1..=16`).
-pub fn params(arity: usize) -> &'static Params {
+#[cfg(not(feature = "poseidon-optimized"))]
+pub fn params(arity: usize) -> &'static Params<SecretField> {
     PARAMS
         .get(&arity)
         .unwrap_or_else(|| panic!("no Poseidon parameters for arity {arity}"))
+}
+
+#[cfg(any(test, feature = "leakage"))]
+static PUBLIC_PARAMS: LazyLock<BTreeMap<usize, Params<Fr>>> = LazyLock::new(load);
+
+#[cfg(any(test, feature = "leakage"))]
+pub fn public_params(arity: usize) -> &'static Params<Fr> {
+    PUBLIC_PARAMS.get(&arity).expect("Poseidon arity 1..=16")
 }

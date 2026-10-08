@@ -133,6 +133,35 @@ fn mul_point_escalar_matches_zk_kit() {
 }
 
 #[test]
+fn ephemeral_public_key_matches_affine_oracle_at_u256_boundaries() {
+    let one = BigUint::from(1_u8);
+    let mut scalars = vec![
+        BigUint::from(0_u8),
+        &*SUB_ORDER - &one,
+        SUB_ORDER.clone(),
+        &*SUB_ORDER + &one,
+        (&one << 256) - &one,
+        BigUint::from_bytes_le(&[0xaa; 32]),
+        BigUint::from_bytes_le(&[0x55; 32]),
+    ];
+    for bit in [0, 1, 63, 64, 127, 128, 191, 192, 250, 251, 254, 255] {
+        scalars.push(&one << bit);
+    }
+    for scalar in scalars {
+        assert_eq!(
+            ephemeral_pub_key(&scalar),
+            mul_point_escalar(*BASE8, &scalar)
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "ephemeral scalar exceeds 256 bits")]
+fn ephemeral_public_key_rejects_oversized_scalars_before_truncation() {
+    ephemeral_pub_key(&(BigUint::from(1_u8) << 256));
+}
+
+#[test]
 fn derive_secret_scalar_matches_zk_kit() {
     let v = load();
     assert!(!v.derive_secret_scalar.is_empty());

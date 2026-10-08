@@ -142,19 +142,36 @@ pub struct SeedNoteSigner {
 impl SeedNoteSigner {
     /// Derives the public point from a validated seed.
     pub fn new(private_key_hex: &str) -> Result<Self, HexDecodeError> {
-        let private_key = from_hex_exact::<32>(private_key_hex)?;
-        Ok(Self {
+        let private_key = zeroize::Zeroizing::new(from_hex_exact::<32>(private_key_hex)?);
+        Ok(Self::from_bytes(*private_key))
+    }
+
+    /// Imports a 32-byte signing seed.
+    pub fn from_bytes(private_key: [u8; 32]) -> Self {
+        Self {
             public_key: derive_public_key(&private_key),
             private_key,
-        })
+        }
+    }
+
+    /// Signs a raw unsigned 256-bit message.
+    ///
+    /// # Panics
+    /// Panics when `message >= 2^256`.
+    pub fn sign_raw(&self, message: &BigUint) -> Signature {
+        crate::eddsa::sign(message, &self.private_key)
     }
 
     /// Restores callers that store the public point separately. Prefer [`Self::new`].
-    fn from_parts(private_key_hex: &str, public_key: (Fr, Fr)) -> Result<Self, HexDecodeError> {
-        Ok(Self {
-            private_key: from_hex_exact::<32>(private_key_hex)?,
-            public_key,
-        })
+    fn from_parts(
+        private_key_hex: &str,
+        public_key: (Fr, Fr),
+    ) -> Result<Self, ScalarSignatureError> {
+        let signer = Self::new(private_key_hex)?;
+        if signer.public_key != public_key {
+            return Err(ScalarSignatureError::PublicKeyMismatch);
+        }
+        Ok(signer)
     }
 }
 
@@ -170,10 +187,7 @@ impl NoteSigner for SeedNoteSigner {
     }
 
     fn sign(&self, message: Fr) -> Result<Signature, ScalarSignatureError> {
-        Ok(crate::eddsa::sign(
-            &fr_to_biguint(&message),
-            &self.private_key,
-        ))
+        Ok(self.sign_raw(&fr_to_biguint(&message)))
     }
 }
 
@@ -208,8 +222,30 @@ pub struct WithdrawalWitness {
     pub token_id: String,
 }
 
+/// Largest input-note count a withdrawal witness can sign.
+///
+/// The signing message is `[..nullifiers, destinationAddress, withdrawnAmount,
+/// tokenId]`, so one Poseidon input is spent per note plus three fixed fields.
+/// Poseidon accepts at most 16 inputs, leaving 13 notes.
+pub const MAX_WITHDRAWAL_INPUT_NOTES: usize = 13;
+
+/// Smallest output-note count an aggregation witness can sign: the output-note
+/// id hash needs at least one input.
+pub const MIN_AGGREGATION_OUTPUT_NOTES: usize = 1;
+
+/// Largest output-note count an aggregation witness can sign.
+///
+/// Aggregation hashes the output-note ids, and separately the flattened
+/// `(amount, token)` pairs of the output notes plus the fee note - `2 * (n + 1)`
+/// inputs. That second hash is the tighter bound, leaving 7 output notes.
+pub const MAX_AGGREGATION_OUTPUT_NOTES: usize = 7;
+
 /// `generateWithdrawalCircuitInputsFromNotes` + `flattenWithdrawalCircuitInputs`.
 /// Signing message: `Poseidon([...nullifiers, destinationAddress, withdrawnAmount, tokenId])`.
+///
+/// Returns [`ScalarSignatureError::UnsupportedNoteCount`] for more than
+/// [`MAX_WITHDRAWAL_INPUT_NOTES`] notes rather than overflowing Poseidon's
+/// arity bound.
 pub fn build_withdrawal(
     notes: &[Note],
     owner_key_hex: &str,
@@ -240,6 +276,13 @@ pub fn build_withdrawal_with_signer(
     destination_address: Fr,
     token_id: Fr,
 ) -> Result<WithdrawalWitness, ScalarSignatureError> {
+    if notes.len() > MAX_WITHDRAWAL_INPUT_NOTES {
+        return Err(ScalarSignatureError::UnsupportedNoteCount {
+            notes: notes.len(),
+            min: 0,
+            max: MAX_WITHDRAWAL_INPUT_NOTES,
+        });
+    }
     let total: Fr = notes.iter().fold(Fr::ZERO, |a, n| a + n.amount);
     let mut msg: Vec<Fr> = notes.iter().map(|n| n.nullifier()).collect();
     msg.push(destination_address);
@@ -318,6 +361,10 @@ pub fn build_aggregation(
 
 /// Build an aggregation witness using either a seed-backed or scalar-backed
 /// signer. The witness public key is always obtained from the signer.
+///
+/// Returns [`ScalarSignatureError::UnsupportedNoteCount`] unless the output-note
+/// count is within [`MIN_AGGREGATION_OUTPUT_NOTES`]`..=`[`MAX_AGGREGATION_OUTPUT_NOTES`],
+/// rather than overflowing Poseidon's arity bound.
 #[allow(clippy::too_many_arguments)]
 pub fn build_aggregation_with_signer(
     input_notes: &[Note],
@@ -330,6 +377,14 @@ pub fn build_aggregation_with_signer(
     gas_fee: Fr,
     fee_note_public_key: (Fr, Fr),
 ) -> Result<AggregationWitness, ScalarSignatureError> {
+    if !(MIN_AGGREGATION_OUTPUT_NOTES..=MAX_AGGREGATION_OUTPUT_NOTES).contains(&output_notes.len())
+    {
+        return Err(ScalarSignatureError::UnsupportedNoteCount {
+            notes: output_notes.len(),
+            min: MIN_AGGREGATION_OUTPUT_NOTES,
+            max: MAX_AGGREGATION_OUTPUT_NOTES,
+        });
+    }
     let enc_notes: Vec<Note> = output_notes
         .iter()
         .chain(std::iter::once(fee_note))
@@ -438,6 +493,117 @@ pub fn build_pending_commitment(
 }
 
 #[cfg(test)]
+mod note_count_tests {
+    use super::*;
+    use crate::eddsa::ScalarSigningKey;
+    use crate::field::Bn254Fr;
+
+    fn signer() -> ScalarSigningKey {
+        ScalarSigningKey::from_decimal("123456789012345678901234567890123456789")
+            .expect("valid scalar signing key")
+    }
+
+    fn notes(signer: &ScalarSigningKey, count: usize) -> Vec<Note> {
+        let owner = KnownOwner::new(
+            *signer.verifying_key(),
+            Bn254Fr::try_from_dec("777").expect("canonical shared secret"),
+        );
+        (0..count)
+            .map(|index| {
+                owner.note(
+                    Fr::from(index as u64 + 1),
+                    Fr::from(1_u64),
+                    (Fr::from(11_u64), Fr::from(12_u64)),
+                    Fr::ZERO,
+                )
+            })
+            .collect()
+    }
+
+    fn withdraw(signer: &ScalarSigningKey, notes: &[Note]) -> Result<(), ScalarSignatureError> {
+        build_withdrawal_with_signer(
+            notes,
+            signer,
+            &[],
+            Fr::ZERO,
+            Fr::from(42_u64),
+            Fr::from(1_u64),
+        )
+        .map(|_| ())
+    }
+
+    fn aggregate(
+        signer: &ScalarSigningKey,
+        output_notes: &[Note],
+        fee_note: &Note,
+    ) -> Result<(), ScalarSignatureError> {
+        build_aggregation_with_signer(
+            &[],
+            &[],
+            output_notes,
+            fee_note,
+            signer,
+            Fr::ZERO,
+            Fr::ZERO,
+            Fr::ZERO,
+            (Fr::ZERO, Fr::ZERO),
+        )
+        .map(|_| ())
+    }
+
+    /// The signing message spends one Poseidon input per note plus three fixed
+    /// fields, so the note count must stop at 13 rather than trip Poseidon's
+    /// arity assertion.
+    #[test]
+    fn withdrawal_takes_the_maximum_note_count_and_refuses_one_more() {
+        let key = signer();
+        assert!(withdraw(&key, &notes(&key, MAX_WITHDRAWAL_INPUT_NOTES)).is_ok());
+
+        let error = withdraw(&key, &notes(&key, MAX_WITHDRAWAL_INPUT_NOTES + 1))
+            .expect_err("one note past the arity bound must be an error, not a panic");
+        assert!(matches!(
+            error,
+            ScalarSignatureError::UnsupportedNoteCount { max, .. }
+                if max == MAX_WITHDRAWAL_INPUT_NOTES
+        ));
+        assert!(error.to_string().contains("unsupported note count 14"));
+    }
+
+    /// `2 * (outputs + 1)` encrypted fields is the tighter of aggregation's two
+    /// hashes, so the output-note count must stop at 7.
+    #[test]
+    fn aggregation_takes_the_maximum_output_notes_and_refuses_one_more() {
+        let key = signer();
+        let built = notes(&key, MAX_AGGREGATION_OUTPUT_NOTES + 1);
+        let fee_note = built[0].clone();
+        assert!(aggregate(&key, &built[..MAX_AGGREGATION_OUTPUT_NOTES], &fee_note).is_ok());
+
+        let error = aggregate(&key, &built, &fee_note)
+            .expect_err("one output note past the arity bound must be an error, not a panic");
+        assert!(matches!(
+            error,
+            ScalarSignatureError::UnsupportedNoteCount { max, .. }
+                if max == MAX_AGGREGATION_OUTPUT_NOTES
+        ));
+    }
+
+    /// Poseidon needs at least one input, so the output-note id hash cannot be
+    /// built from an empty set.
+    #[test]
+    fn aggregation_refuses_zero_output_notes() {
+        let key = signer();
+        let fee_note = notes(&key, 1).remove(0);
+        let error = aggregate(&key, &[], &fee_note)
+            .expect_err("an empty output set must be an error, not a panic");
+        assert!(matches!(
+            error,
+            ScalarSignatureError::UnsupportedNoteCount { notes: 0, min, .. }
+                if min == MIN_AGGREGATION_OUTPUT_NOTES
+        ));
+    }
+}
+
+#[cfg(test)]
 mod seed_signer_tests {
     use super::*;
     use crate::encoding::HexDecodeError;
@@ -445,6 +611,18 @@ mod seed_signer_tests {
     const GOOD_SEED: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
     /// Malformed seeds return errors without exposing key material in Debug output.
+    #[test]
+    fn stored_public_key_must_match_the_signing_seed() {
+        let seed = "01".repeat(32);
+        let signer = SeedNoteSigner::new(&seed).unwrap();
+        assert!(SeedNoteSigner::from_parts(&seed, signer.public_key).is_ok());
+        let other = SeedNoteSigner::new(&"02".repeat(32)).unwrap();
+        assert!(matches!(
+            SeedNoteSigner::from_parts(&seed, other.public_key),
+            Err(ScalarSignatureError::PublicKeyMismatch)
+        ));
+    }
+
     // Use `.err()` because `SeedNoteSigner` intentionally omits `Debug`.
     #[test]
     fn malformed_seeds_are_rejected_not_panicked_on() {

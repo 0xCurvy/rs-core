@@ -49,6 +49,7 @@ report.merkle_root_depth8_leaves1to5 = hex(tree.root());
 const proof = tree.proof(fieldBytes(3));
 report.merkle_proof_leaf3_siblings = hex(proof.siblings);
 report.merkle_proof_verifies = core.verifyMerkleProof(
+  8,
   fieldBytes(3),
   2,
   proof.siblings,

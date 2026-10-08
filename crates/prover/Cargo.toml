@@ -12,7 +12,7 @@ homepage.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/curvy-prover"
-exclude = ["js/**", "MOBILE_HARNESS.md"]
+exclude = ["js/**", "scripts/**", "MOBILE_HARNESS.md"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -30,7 +30,7 @@ ark-groth16 = { workspace = true, default-features = false }
 ark-poly = { workspace = true, default-features = false }
 ark-relations = { workspace = true, default-features = false }
 ark-serialize = { workspace = true, default-features = false }
-ark-std = { workspace = true, default-features = false }
+ark-std = { workspace = true, default-features = false, features = ["getrandom"] }
 byteorder.workspace = true
 curvy-witness = { version = "=0.1.0-rc.6", path = "../witness" }
 getrandom.workspace = true
@@ -38,6 +38,7 @@ num-bigint.workspace = true
 rayon = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-rayon = { workspace = true, optional = true }
 
@@ -47,6 +48,17 @@ serde_json.workspace = true
 [features]
 default = ["std"]
 bench = ["sparrow"]
+# Retain zkey constraint matrices as exact CSR arrays and evaluate the QAP
+# directly from them. This is a prototype feature; the arkworks-compatible
+# nested matrix remains the default until real-artifact RSS gates pass.
+compact-matrix = []
+# Experimental caller-owned, bounded FFT and MSM-scalar buffers.
+scratch = ["compact-matrix"]
+# Parse the zkey in one forward pass over pre-authenticated chunks, with an
+# additional digest of every consumed byte. Prototype:
+# it requires the Groth header to precede the query sections it sizes. Section
+# ids need not ascend - the test fixture's do not.
+zkey-single-pass = []
 std = [
   "ark-bn254/std",
   "ark-ec/std",
@@ -58,12 +70,12 @@ std = [
   "ark-std/getrandom",
   "ark-std/std",
 ]
-# Opt into Curvy's ark-groth16 0.6-compatible proof assembly and MSM scheduler.
-# Do not enable ark-ec/parallel or ark-groth16/parallel: ark-ec 0.6 constructs
-# private Rayon pools inside large MSMs, which wasm-bindgen-rayon cannot spawn.
-# Curvy schedules those MSMs on the host's existing pool; FFT and field work
-# stay parallel. Without this feature, the ordinary prover calls stock serial
-# ark-groth16 directly.
+# Run Curvy's ark-groth16 0.6-compatible proof assembly and MSM scheduler on
+# the host's Rayon pool. Do not enable ark-ec/parallel or ark-groth16/parallel:
+# ark-ec 0.6 constructs private Rayon pools inside large MSMs, which
+# wasm-bindgen-rayon cannot spawn. Curvy schedules those MSMs on the host's
+# existing pool; FFT and field work stay parallel. Without this feature, the
+# same proof assembly and batch-affine MSM run serially.
 parallel = [
   "dep:rayon",
   "ark-ff/parallel",
@@ -71,8 +83,26 @@ parallel = [
   "ark-std/parallel",
 ]
 signet-v2 = ["curvy-witness/signet-v2"]
-sparrow = ["signet-v2", "curvy-witness/sage"]
+sage = ["curvy-witness/sage"]
+zkey-manifest = []
+# Prototype: witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
+# simd128 only; a no-op elsewhere). With `parallel` each witness-map
+# transform is parallel inside, on any pool size. See src/simd_fft and
+# poc/wasm-fft.
+wasm-simd-fft = []
+sparrow = ["signet-v2", "sage", "zkey-manifest"]
 wasm = ["dep:wasm-bindgen"]
+# Opt-in SIMD batch-affine MSM (BN254 G1/G2) for WASM builds. Takes effect
+# only on wasm32 with `+simd128`; every other build ignores it. See
+# src/msm_simd and poc/wasm-field.
+wasm-simd-msm = []
+# Development only, never shipped: in-WASM differential self-tests, randomized
+# stress cases and a kernel benchmark for `wasm-simd-msm` / `wasm-simd-fft`
+# (`simdMsmSelfTest`, `simdSparrowSelfTest`, `simdFftSelfTest`,
+# `simdFieldStress`, `simdMsmStress`, `simdFftStress`, `SimdMsmBench`,
+# `simdSelfTestInit`, `simdSelfTestPanic`), for
+# whichever of the two is enabled. Driven by scripts/simd-selftest.mjs.
+wasm-simd-selftest = ["wasm"]
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 
 [[bin]]
@@ -82,8 +112,12 @@ required-features = ["std"]
 
 [[example]]
 name = "derive_sage_cache"
-required-features = ["sparrow"]
+required-features = ["sage"]
+
+[[example]]
+name = "phase_profile"
+required-features = ["bench"]
 
 [[example]]
 name = "zkey_chunk_manifest"
-required-features = ["sparrow"]
+required-features = ["zkey-manifest"]

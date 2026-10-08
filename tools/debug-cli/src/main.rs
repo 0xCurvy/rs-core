@@ -30,7 +30,7 @@ use curvy_core::note;
 use curvy_core::poseidon;
 use curvy_core::stealth;
 use curvy_core::witness::{self, Note, NoteSigner, Proof, SeedNoteSigner};
-use curvy_prover::CircuitProver;
+use curvy_prover::ResidentProver;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
 
@@ -928,7 +928,7 @@ fn cmd_prove(rest: &[&str]) -> Result<(), String> {
     );
 
     let started = Instant::now();
-    let prover = CircuitProver::from_artifacts(
+    let prover = ResidentProver::from_artifacts(
         MULTIPLIER_ZKEY,
         MULTIPLIER_ZKEY_SHA256,
         &graph,
@@ -936,7 +936,9 @@ fn cmd_prove(rest: &[&str]) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     println!(
-        "artifacts authenticated + parsed in {:.1} ms (constraints={}, publicInputs={})",
+        "{} {} artifacts authenticated + parsed in {:.1} ms (constraints={}, publicInputs={})",
+        prover.profile(),
+        prover.mode(),
         elapsed_ms(started),
         prover.num_constraints(),
         prover.num_public()

@@ -21,11 +21,16 @@ rustdoc-args = ["-D", "warnings"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# Opt into the generated sparse Poseidon schedule without changing the JS API.
+poseidon-optimized = ["curvy-core/poseidon-optimized"]
 # Rayon-threaded scan and bulk Merkle construction for cross-origin-isolated
 # pages. Needs `scripts/build-wasm.sh web --threads`; plain builds ignore it.
 wasm-threads = ["curvy-core/parallel", "dep:wasm-bindgen-rayon"]
 
 [dependencies]
+js-sys = "=0.3.103"
+num-bigint.workspace = true
+zeroize.workspace = true
 curvy-core = { version = "=0.1.0-rc.6", path = "../core" }
 wasm-bindgen.workspace = true
 wasm-bindgen-rayon = { workspace = true, optional = true }

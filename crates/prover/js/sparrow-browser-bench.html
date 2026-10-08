@@ -4,8 +4,9 @@
 <pre id="output">running</pre>
 <script type="module">
   import {
+    ARTIFACT_BYTE_LIMITS,
     cachedArtifactBytes,
-    loadOrCompileSageProver,
+    loadOrCompileStreamingProver,
     proveCachedZkey,
     proveCachedZkeyOnePass,
   } from "./sparrow-cache-api.mjs";
@@ -49,12 +50,15 @@
     const compileStarted = performance.now();
     const appliedWindowBits = Number(params.get("windowBits") || 13);
     const appliedMsmChunkPoints = Number(params.get("msmChunkPoints") || 65536);
-    const sage = await loadOrCompileSageProver({
+    const sage = await loadOrCompileStreamingProver({
       wasm,
       cache,
       graphUrl: required("graph"),
       expectedSourceGraphSha256: required("graphHash"),
       expectedZkeySha256: required("zkeyHash"),
+      // Optional trusted SAGE program digest. Without it the derived cache is
+      // neither read nor written and every load recompiles the graph.
+      expectedSageProgramSha256: params.get("sageProgramHash") || null,
       batchProfile: params.get("profile") === "batch",
       windowBits: appliedWindowBits,
       msmChunkPoints: appliedMsmChunkPoints,
@@ -123,7 +127,10 @@
     const proofStarted = performance.now();
     let result;
     if (params.has("manifest")) {
-      const manifestBytes = await cachedArtifactBytes(cache, required("manifest"));
+      const manifestBytes = await cachedArtifactBytes(cache, required("manifest"), {
+        maxBytes: ARTIFACT_BYTE_LIMITS.manifest,
+        expectedSha256: required("manifestHash"),
+      });
       result = await proveCachedZkeyOnePass({
         prover,
         inputJson,
@@ -155,8 +162,11 @@
       crossOriginIsolated,
       storageComparison,
       onePassManifest: params.has("manifest"),
+      proverMode: prover.mode,
+      proverProfile: prover.profile,
       sageCacheHit: sage.cacheHit,
       sageCacheStored: sage.cacheStored,
+      sageProgramPinned: sage.programPinned,
       sageCompilerVersion: sage.compilerVersion,
       sageProgramBytes: sage.programBytes,
       sageProgramSha256: sage.programSha256,

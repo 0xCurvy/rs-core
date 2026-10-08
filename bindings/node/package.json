@@ -39,6 +39,7 @@
   },
   "napi": {
     "binaryName": "curvy_rs_core_node",
+    "dtsHeaderFile": "index.d.ts.header",
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-unknown-linux-gnu",
@@ -47,8 +48,8 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --no-js --platform --release",
+    "build:debug": "napi build --no-js --platform",
     "build:release": "node ../../scripts/build-node-release.mjs",
     "package:metadata": "node ../../scripts/prepare-node-package.mjs",
     "package:preview": "npm run package:metadata && npm pack --dry-run --ignore-scripts",

@@ -54,3 +54,12 @@ parity matrix over every graph it publishes.
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for artifact
 and build-target guidance.
+
+Circuit input JSON is decoded directly into the bounded input buffer without a
+JSON DOM or bigint decimal conversion. Duplicate signal names (including hash
+collisions) and surplus values are rejected. Missing inputs retain Circom's zero
+semantics; nested arrays flatten in order. Signed decimal strings reduce modulo
+BN254 in linear time. JSON integer literals support the signed/unsigned 64-bit
+range (including `-0`); use decimal strings for larger integers. Non-zero
+fractional/exponent numbers are rejected. Error messages do not repeat invalid input values. Owned evaluation
+buffers are cleared on drop; returned assignments belong to the caller.

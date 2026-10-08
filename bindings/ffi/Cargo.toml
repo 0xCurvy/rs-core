@@ -13,13 +13,18 @@ rust-version.workspace = true
 name = "curvy_ffi"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+compact-matrix = ["curvy-prover/compact-matrix"]
+signet-v2 = ["curvy-prover/signet-v2"]
+poseidon-optimized = ["curvy-core/poseidon-optimized"]
+
 [dependencies]
+zeroize.workspace = true
 curvy-core = { version = "=0.1.0-rc.6", path = "../../crates/core" }
-curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness" }
-curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", default-features = false, features = ["std"] }
+curvy-witness = { version = "=0.1.0-rc.6", path = "../../crates/witness", features = ["sage"] }
+curvy-prover = { version = "=0.1.0-rc.6", path = "../../crates/prover", default-features = false, features = ["std", "sage"] }
 serde_json.workspace = true
 
 [dev-dependencies]
 # Boundary tests author witness-graph headers, which are self-authenticating.
 sha2.workspace = true
-

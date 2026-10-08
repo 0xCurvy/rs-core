@@ -38,7 +38,8 @@ type Aes256Ctr64BE = Ctr64BE<Aes256>;
 // coordinates (`< r`), but typing them as `BigUint` keeps the cipher byte-identical
 // to the TS for the whole `[0, 2^256)` input domain.
 fn derive_note_key(shared_secret: &BigUint) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(NOTE_KEY_SALT), &biguint_to_be_32(shared_secret));
+    let input = zeroize::Zeroizing::new(biguint_to_be_32(shared_secret));
+    let hk = Hkdf::<Sha256>::new(Some(NOTE_KEY_SALT), &input[..]);
     let mut okm = [0u8; 32];
     hk.expand(NOTE_KEY_INFO, &mut okm)
         .expect("hkdf expand to 32 bytes");
@@ -57,13 +58,13 @@ fn derive_counter_block(ephemeral_key: (&BigUint, &BigUint)) -> [u8; 16] {
 
 /// The two field-element keystream pads `(ksAmount, ksToken)`.
 fn ctr_keystream_fields(shared_secret: &BigUint, ephemeral_key: (&BigUint, &BigUint)) -> (Fr, Fr) {
-    let key = derive_note_key(shared_secret);
+    let key = zeroize::Zeroizing::new(derive_note_key(shared_secret));
     let counter = derive_counter_block(ephemeral_key);
 
-    let mut ks = [0u8; KEYSTREAM_BYTES];
+    let mut ks = zeroize::Zeroizing::new([0u8; KEYSTREAM_BYTES]);
     let mut cipher =
-        Aes256Ctr64BE::new_from_slices(&key, &counter).expect("valid AES-256 key + 16-byte IV");
-    cipher.apply_keystream(&mut ks);
+        Aes256Ctr64BE::new_from_slices(&key[..], &counter).expect("valid AES-256 key + 16-byte IV");
+    cipher.apply_keystream(&mut ks[..]);
 
     (
         fr_from_be_bytes_mod(&ks[0..32]),

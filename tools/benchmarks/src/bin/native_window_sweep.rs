@@ -3,15 +3,14 @@
 //! WTNS decoding and manifest parsing happen once and are excluded from each
 //! sample. Every timed run rereads the zkey once and returns a self-verified
 //! proof. Rounds alternate ascending/descending window order to reduce thermal
-//! and cache-order bias.
+//! and cache-order bias. Pass `adaptive` (or `0`) as a window to time
+//! `StreamingConfig::native_adaptive`'s per-query widths alongside the fixed ones.
 
 use std::{env, fs, fs::File, time::Instant};
 
 use curvy_prover::{
-    sparrow::{
-        SparrowConfig,
-        manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
-    },
+    ProverMode, SPARROW_PROFILE, StreamingConfig,
+    sparrow::manifest::{ZkeyChunkManifest, prove_reader_with_manifest_owned},
     wtns::read_wtns,
 };
 
@@ -21,7 +20,7 @@ const DEFAULT_SAMPLES: usize = 3;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().collect::<Vec<_>>();
     if !(7..=10).contains(&args.len()) {
-        return Err("usage: native_window_sweep <zkey> <zkey-sha256> <manifest> <manifest-sha256> <wtns> <threads> [msm-chunk-points] [comma-separated-windows] [samples]".into());
+        return Err("usage: native_window_sweep <zkey> <zkey-sha256> <manifest> <manifest-sha256> <wtns> <threads> [msm-chunk-points] [comma-separated-windows|adaptive] [samples]".into());
     }
 
     let threads = args[6].parse::<usize>()?;
@@ -32,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .num_threads(threads)
         .build_global()?;
 
-    let mut base_config = SparrowConfig::native_adaptive();
+    let mut base_config = StreamingConfig::native_adaptive();
     if let Some(value) = args.get(7) {
         base_config.msm_chunk_points = value.parse()?;
     }
@@ -60,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         for index in indices {
             let window_bits = timings[index].0;
-            let config = SparrowConfig {
+            let config = StreamingConfig {
                 window_bits,
                 ..base_config
             };
@@ -77,6 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("prover_mode={}", ProverMode::Streaming);
+    println!("profile={SPARROW_PROFILE}");
     println!("threads={threads}");
     println!("msm_chunk_points={}", base_config.msm_chunk_points);
     println!("samples={samples}");
@@ -94,14 +95,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => Some((window_bits, median)),
         };
         println!(
-            "{window_bits}\t{median:.3}\t{:.3}\t{:.3}",
+            "{}\t{median:.3}\t{:.3}\t{:.3}",
+            window_label(window_bits),
             samples[0],
             samples[samples.len() - 1]
         );
     }
     println!(
         "recommended_window_bits={}",
-        recommendation.expect("at least one window").0
+        window_label(recommendation.expect("at least one window").0)
     );
     Ok(())
 }
@@ -109,14 +111,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_windows(value: &str) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
     let mut windows = value
         .split(',')
-        .map(str::parse::<usize>)
+        .map(|window| match window {
+            "adaptive" => Ok(StreamingConfig::ADAPTIVE_WINDOW_BITS),
+            window => window.parse::<usize>(),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     windows.sort_unstable();
     windows.dedup();
-    if windows.is_empty() || windows.iter().any(|window| !(4..=16).contains(window)) {
-        return Err("window widths must be comma-separated values in 4..=16".into());
+    let valid = |window: &usize| {
+        *window == StreamingConfig::ADAPTIVE_WINDOW_BITS || (4..=16).contains(window)
+    };
+    if windows.is_empty() || !windows.iter().all(valid) {
+        return Err("window widths must be comma-separated values in 4..=16 or adaptive".into());
     }
     Ok(windows)
+}
+
+fn window_label(window_bits: usize) -> String {
+    if window_bits == StreamingConfig::ADAPTIVE_WINDOW_BITS {
+        "adaptive".into()
+    } else {
+        window_bits.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -126,7 +142,8 @@ mod tests {
     #[test]
     fn parses_sorts_and_deduplicates_windows() {
         assert_eq!(parse_windows("12,8,10,8").unwrap(), [8, 10, 12]);
-        assert!(parse_windows("0,8").is_err());
+        assert_eq!(parse_windows("adaptive,8,0").unwrap(), [0, 8]);
+        assert!(parse_windows("3,8").is_err());
         assert!(parse_windows("").is_err());
     }
 }

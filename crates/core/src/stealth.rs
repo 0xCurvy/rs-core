@@ -16,8 +16,6 @@
 //! tower `C0.B0.A0` must equal arkworks' `Fq12.c0.c0.c0`, and the BN254 G1/G2 + the
 //! secp256k1 generators must match gnark's.
 
-use core::str::FromStr;
-
 use ark_bn254::{Bn254, Fq as BnFq, Fq12, Fr as BnFr, G1Affine as BnG1, G2Affine as BnG2};
 use ark_ec::pairing::Pairing;
 use ark_ec::{AffineRepr, CurveGroup};
@@ -27,7 +25,8 @@ use num_bigint::BigUint;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::encoding::from_hex_lossy;
+use crate::encoding::from_hex_exact;
+use crate::field::Bn254Fr;
 
 // Map announcements → the SPARSE list of matches (the closure returns
 // `Option<Match>`), in input order. With the `parallel` feature the work fans
@@ -79,40 +78,65 @@ fn fp_dec<F: PrimeField>(x: F) -> String {
     fp_to_biguint(x).to_str_radix(10)
 }
 
-fn xy_bn(p: &BnG1) -> String {
-    format!("{}.{}", fp_dec(p.x().unwrap()), fp_dec(p.y().unwrap()))
+// The identity has no affine `"X.Y"` encoding, so these return `None` for it
+// rather than panicking; callers decide whether that is an error or a skip.
+fn xy_bn(p: &BnG1) -> Option<String> {
+    p.xy().map(|(x, y)| format!("{}.{}", fp_dec(x), fp_dec(y)))
 }
-fn xy_secp(p: &SecpG1) -> String {
-    format!("{}.{}", fp_dec(p.x().unwrap()), fp_dec(p.y().unwrap()))
+fn xy_secp(p: &SecpG1) -> Option<String> {
+    p.xy().map(|(x, y)| format!("{}.{}", fp_dec(x), fp_dec(y)))
+}
+fn identity_err(what: &str) -> StealthError {
+    err(format!("{what} is the point at infinity"))
 }
 
 fn parse_xy<F: PrimeField>(s: &str) -> Result<(F, F), StealthError> {
-    let (x, y) = s
-        .split_once('.')
-        .ok_or_else(|| err(format!("point must be \"X.Y\", got {s:?}")))?;
-    Ok((
-        F::from_str(x).map_err(|_| err(format!("bad point X: {x:?}")))?,
-        F::from_str(y).map_err(|_| err(format!("bad point Y: {y:?}")))?,
-    ))
+    if s.len() > 160 {
+        return Err(err("point encoding exceeds 160 characters"));
+    }
+    let (x, y) = s.split_once('.').ok_or_else(|| err("point must be X.Y"))?;
+    let coordinate = |s: &str| {
+        if s.is_empty()
+            || s.len() > 78
+            || !s.bytes().all(|b| b.is_ascii_digit())
+            || (s.len() > 1 && s.starts_with('0'))
+        {
+            return Err(err("point coordinates must be unsigned canonical decimals"));
+        }
+        let value = BigUint::parse_bytes(s.as_bytes(), 10)
+            .ok_or_else(|| err("invalid point coordinate"))?;
+        if value >= BigUint::from_bytes_le(&F::MODULUS.to_bytes_le()) {
+            return Err(err("point coordinate exceeds field modulus"));
+        }
+        F::from_str(s).map_err(|_| err("invalid point coordinate"))
+    };
+    Ok((coordinate(x)?, coordinate(y)?))
 }
 
 // Both BN254 G1 and secp256k1 have cofactor 1, so on-curve already implies the
-// prime-order subgroup - no separate subgroup check is needed. The check also
-// excludes (0, 0) (off-curve for both), so a parsed point is never the identity
-// and downstream `x()/y().unwrap()` on it cannot fire.
+// prime-order subgroup - no separate subgroup check is needed. arkworks encodes
+// the identity of both curves as affine (0, 0) and `is_on_curve` ACCEPTS it, so
+// the identity must be rejected explicitly: it is never a valid key or
+// announcement point, and it has no affine coordinates to format.
 fn parse_bn(s: &str, what: &str) -> Result<BnG1, StealthError> {
     let (x, y) = parse_xy::<BnFq>(s)?;
     let p = BnG1::new_unchecked(x, y);
+    if p.is_zero() {
+        return Err(identity_err(what));
+    }
     if !p.is_on_curve() {
-        return Err(err(format!("{what} is not on BN254 G1: {s:?}")));
+        return Err(err(format!("{what} is not on BN254 G1")));
     }
     Ok(p)
 }
 fn parse_secp(s: &str, what: &str) -> Result<SecpG1, StealthError> {
     let (x, y) = parse_xy::<SecpFq>(s)?;
     let p = SecpG1::new_unchecked(x, y);
+    if p.is_zero() {
+        return Err(identity_err(what));
+    }
     if !p.is_on_curve() {
-        return Err(err(format!("{what} is not on secp256k1: {s:?}")));
+        return Err(err(format!("{what} is not on secp256k1")));
     }
     Ok(p)
 }
@@ -120,14 +144,24 @@ fn parse_secp(s: &str, what: &str) -> Result<SecpG1, StealthError> {
 /// Private scalar from big-endian hex, rejecting a zero reduction (a zero spend or
 /// view key would put every derived point at the identity).
 fn parse_secp_scalar(hex: &str, what: &str) -> Result<SecpFr, StealthError> {
-    let s = SecpFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
+    let s = SecpFr::from_be_bytes_mod_order(
+        &zeroize::Zeroizing::new(
+            from_hex_exact::<32>(hex)
+                .map_err(|_| err(format!("{what} must be exactly 32 bytes of unprefixed hex")))?,
+        )[..],
+    );
     if s.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }
     Ok(s)
 }
 fn parse_bn_scalar(hex: &str, what: &str) -> Result<BnFr, StealthError> {
-    let v = BnFr::from_be_bytes_mod_order(&from_hex_lossy(hex));
+    let v = BnFr::from_be_bytes_mod_order(
+        &zeroize::Zeroizing::new(
+            from_hex_exact::<32>(hex)
+                .map_err(|_| err(format!("{what} must be exactly 32 bytes of unprefixed hex")))?,
+        )[..],
+    );
     if v.is_zero() {
         return Err(err(format!("{what} reduces to zero")));
     }
@@ -147,13 +181,11 @@ fn compute_b(secret: &Fq12) -> SecpFr {
     SecpFr::from_le_bytes_mod_order(&a0.into_bigint().to_bytes_le())
 }
 
-/// `viewTag` ("v1-1byte"): first 2 hex chars of the point's X coordinate.
-fn view_tag(p: &BnG1) -> String {
-    fp_to_biguint(p.x().unwrap())
-        .to_str_radix(16)
-        .chars()
-        .take(2)
-        .collect()
+/// `viewTag` ("v1-1byte"): first 2 hex chars of the point's X coordinate, or
+/// `None` for the identity (which has no X coordinate).
+fn view_tag(p: &BnG1) -> Option<String> {
+    p.x()
+        .map(|x| fp_to_biguint(x).to_str_radix(16).chars().take(2).collect())
 }
 
 /// Compare a computed `v·R` tag against an announcement's tag. Matching means the
@@ -163,7 +195,8 @@ fn view_tag(p: &BnG1) -> String {
 /// a panic - the Go core panicked here on 1-char tags, which turned one bad
 /// announcement into a dead scan.
 fn tag_matches(vri: &BnG1, vt: &str) -> bool {
-    vt.get(..2).is_some_and(|prefix| view_tag(vri) == prefix)
+    vt.get(..2)
+        .is_some_and(|prefix| view_tag(vri).is_some_and(|tag| tag == prefix))
 }
 
 /// `get_meta`: derive the public meta-keys `(K, V)` from the private `(k, v)` hex.
@@ -172,11 +205,15 @@ pub fn get_meta(k_hex: &str, v_hex: &str) -> Result<(String, String), StealthErr
     let big_s = secp_mul(SecpG1::generator(), s);
     let v = parse_bn_scalar(v_hex, "view private key")?;
     let big_v = bn_mul(BnG1::generator(), v);
-    Ok((xy_secp(&big_s), xy_bn(&big_v)))
+    Ok((
+        xy_secp(&big_s).ok_or_else(|| identity_err("spend public key"))?,
+        xy_bn(&big_v).ok_or_else(|| identity_err("view public key"))?,
+    ))
 }
 
 /// `send` output `{R, viewTag, spendingPubKey}` for a **given** ephemeral `r`
-/// (decimal). The Go `send` picks `r` randomly; pass the recorded `r` to reproduce.
+/// (canonical decimal in `[1, p)` of the BN254 scalar field). The Go `send`
+/// picks `r` randomly; pass the recorded `r` to reproduce.
 pub struct SendOutput {
     pub big_r: String,
     pub view_tag: String,
@@ -184,7 +221,11 @@ pub struct SendOutput {
 }
 
 pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, StealthError> {
-    let r = BnFr::from_str(r_dec).map_err(|_| err(format!("bad ephemeral r: {r_dec:?}")))?;
+    // Canonical BN254 scalar: no leading zeros and no reduction of values at or
+    // above the group order, so each ephemeral `r` has exactly one encoding.
+    let r = Bn254Fr::try_from_dec(r_dec)
+        .map_err(|error| err(format!("invalid ephemeral scalar r: {error}")))?
+        .into_inner();
     if r.is_zero() {
         return Err(err("ephemeral r must be nonzero"));
     }
@@ -198,10 +239,13 @@ pub fn send_with_r(r_dec: &str, big_k: &str, big_v: &str) -> Result<SendOutput, 
     let secret = Bn254::pairing(rv, BnG2::generator());
     let b = compute_b(&secret.0);
     let spk = secp_mul(big_k_pt, b);
+    // r ≠ 0 and V ≠ O in a prime-order group, so R and r·V are never the
+    // identity; b·K is the identity only if b reduces to zero. Error rather
+    // than panic either way.
     Ok(SendOutput {
-        big_r: xy_bn(&big_r),
-        view_tag: view_tag(&rv),
-        spending_pub_key: xy_secp(&spk),
+        big_r: xy_bn(&big_r).ok_or_else(|| identity_err("ephemeral R"))?,
+        view_tag: view_tag(&rv).ok_or_else(|| identity_err("shared point r·V"))?,
+        spending_pub_key: xy_secp(&spk).ok_or_else(|| identity_err("spending public key"))?,
     })
 }
 
@@ -224,10 +268,10 @@ pub struct ViewerMatch {
 }
 
 /// Returns the SPARSE, input-ordered list of tag-matching announcements.
-/// Announcements (`R_i`, `viewTag_i`) come off the network, so a malformed or
-/// off-curve `R_i` (or malformed tag) is simply not a match - one hostile or
-/// corrupt announcement must not abort a whole wallet scan. Errors are reserved
-/// for the caller's own inputs (keys, mismatched array lengths).
+/// Announcements (`R_i`, `viewTag_i`) come off the network, so a malformed,
+/// off-curve or identity `R_i` (or malformed tag) is simply not a match - one
+/// hostile or corrupt announcement must not abort a whole wallet scan. Errors
+/// are reserved for the caller's own inputs (keys, mismatched array lengths).
 pub fn scan(
     k_hex: &str,
     v_hex: &str,
@@ -250,8 +294,9 @@ pub fn scan(
         (&String, &String)
     )| {
         let ri = parse_bn(ri_str, "announcement R").ok()?;
-        // v ≠ 0 and R is a valid affine point of the prime-order G1, so v·R is
-        // never the identity - view_tag/xy on it cannot panic.
+        // v ≠ 0 and parse_bn rejects the identity, so in the prime-order G1 v·R
+        // is never the identity. An identity v·R (tag) or b·S (b reducing to
+        // zero) would be skipped as a non-match rather than panic.
         let vri = bn_mul(ri, v);
         if !tag_matches(&vri, vt) {
             return None;
@@ -260,8 +305,8 @@ pub fn scan(
         let sb = s * b;
         Some(ScanMatch {
             index: i as u32,
-            spending_pub_key: xy_secp(&secp_mul(big_s, b)),
-            spending_priv_key: format!("0x{}", fp_to_biguint(sb).to_str_radix(16)),
+            spending_pub_key: xy_secp(&secp_mul(big_s, b))?,
+            spending_priv_key: format!("0x{:064x}", fp_to_biguint(sb)),
         })
     }))
 }
@@ -296,7 +341,7 @@ pub fn viewer_scan(
         let b = compute_b(&Bn254::pairing(vri, BnG2::generator()).0);
         Some(ViewerMatch {
             index: i as u32,
-            spending_pub_key: xy_secp(&secp_mul(s, b)),
+            spending_pub_key: xy_secp(&secp_mul(s, b))?,
         })
     }))
 }
@@ -308,18 +353,21 @@ fn random_scalar_bytes() -> Result<[u8; 32], StealthError> {
     Ok(b)
 }
 
-fn pad_even(s: &str) -> String {
-    if s.len().is_multiple_of(2) {
-        s.to_string()
-    } else {
-        format!("0{s}")
-    }
-}
-
 fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
     // A zero draw has probability ~2⁻²⁵⁴; redraw rather than emit a degenerate key.
     loop {
-        let x = F::from_le_bytes_mod_order(&random_scalar_bytes()?);
+        let mut bytes = zeroize::Zeroizing::new(random_scalar_bytes()?);
+        // Mask unused top bits, then reject rather than reduce: every accepted
+        // nonzero field element has exactly one equally likely encoding.
+        let bits = F::MODULUS_BIT_SIZE as usize;
+        if bits < 256 {
+            bytes[bits / 8] &= (1u8 << (bits % 8)) - 1;
+            bytes[bits / 8 + 1..].fill(0);
+        }
+        let x = F::from_le_bytes_mod_order(&bytes[..]);
+        if x.into_bigint().to_bytes_le() != bytes[..] {
+            continue;
+        }
         if !x.is_zero() {
             return Ok(x);
         }
@@ -331,18 +379,19 @@ fn random_nonzero<F: PrimeField>() -> Result<F, StealthError> {
 pub fn new_meta() -> Result<(String, String, String, String), StealthError> {
     let s = random_nonzero::<SecpFr>()?;
     let v = random_nonzero::<BnFr>()?;
-    let k_hex = pad_even(&fp_to_biguint(s).to_str_radix(16));
-    let v_hex = pad_even(&fp_to_biguint(v).to_str_radix(16));
+    let k_hex = format!("{:064x}", fp_to_biguint(s));
+    let v_hex = format!("{:064x}", fp_to_biguint(v));
     Ok((
         k_hex,
         v_hex,
-        xy_secp(&secp_mul(SecpG1::generator(), s)),
-        xy_bn(&bn_mul(BnG1::generator(), v)),
+        xy_secp(&secp_mul(SecpG1::generator(), s))
+            .ok_or_else(|| identity_err("spend public key"))?,
+        xy_bn(&bn_mul(BnG1::generator(), v)).ok_or_else(|| identity_err("view public key"))?,
     ))
 }
 
 /// `send`: pick a fresh ephemeral `r` and produce the announcement.
-/// Returns `(r_dec, output)`. Errors on malformed / off-curve recipient keys.
+/// Returns `(r_dec, output)`. Errors on malformed / off-curve / identity recipient keys.
 pub fn send(big_k: &str, big_v: &str) -> Result<(String, SendOutput), StealthError> {
     let r = random_nonzero::<BnFr>()?;
     let r_dec = fp_to_biguint(r).to_str_radix(10);
@@ -363,6 +412,25 @@ pub fn is_valid_secp256k1_point(point: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_hex_is_exact_and_generated_keys_are_fixed_width() {
+        let (k, v, _, _) = new_meta().unwrap();
+        assert_eq!(k.len(), 64);
+        assert_eq!(v.len(), 64);
+        for bad in [
+            "aabbZ".to_owned() + &"00".repeat(29),
+            "aabb".into(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "ab".repeat(32) + "f",
+            "0x".to_owned() + &k,
+        ] {
+            assert!(get_meta(&bad, &v).is_err());
+            assert!(get_meta(&k, &bad).is_err());
+            assert!(scan(&bad, &v, &[], &[]).is_err());
+        }
+    }
 
     #[test]
     fn new_meta_round_trips_through_get_meta() {
@@ -446,5 +514,101 @@ mod tests {
         assert!(!is_valid_bn254_point("1.2.3"));
         assert!(!is_valid_secp256k1_point("1.3"));
         assert!(!is_valid_secp256k1_point(""));
+    }
+
+    // arkworks' affine encoding of the point at infinity on both curves. It is
+    // NOT on either curve equation, but `is_on_curve` accepts it.
+    const IDENTITY: &str = "0.0";
+
+    #[test]
+    fn identity_point_is_rejected_at_every_boundary() {
+        assert!(!is_valid_bn254_point(IDENTITY));
+        assert!(!is_valid_secp256k1_point(IDENTITY));
+
+        let (k, v, big_k, big_v) = new_meta().unwrap();
+        assert!(
+            send(IDENTITY, &big_v).is_err(),
+            "identity K must be rejected"
+        );
+        assert!(
+            send(&big_k, IDENTITY).is_err(),
+            "identity V must be rejected"
+        );
+        assert!(
+            viewer_scan(&v, IDENTITY, &[], &[]).is_err(),
+            "identity S must be rejected"
+        );
+
+        // A hostile identity announcement must be skipped, not panic the scan.
+        let (_r, sent) = send(&big_k, &big_v).unwrap();
+        let rs = vec![IDENTITY.to_string(), sent.big_r.clone()];
+        let tags = vec!["00".to_string(), sent.view_tag.clone()];
+        let found = scan(&k, &v, &rs, &tags).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].index, 1);
+        assert_eq!(found[0].spending_pub_key, sent.spending_pub_key);
+        let seen = viewer_scan(&v, &big_k, &rs, &tags).unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].index, 1);
+    }
+
+    #[test]
+    fn identity_formatting_is_none_not_a_panic() {
+        assert_eq!(xy_bn(&BnG1::identity()), None);
+        assert_eq!(xy_secp(&SecpG1::identity()), None);
+        assert_eq!(view_tag(&BnG1::identity()), None);
+        assert!(!tag_matches(&BnG1::identity(), "00"));
+        assert_eq!(xy_bn(&BnG1::generator()).as_deref(), Some("1.2"));
+    }
+
+    #[test]
+    fn point_coordinates_reject_leading_zeros() {
+        for bad in ["01.2", "1.02", "0001.2", "00.0", "1.00"] {
+            assert!(!is_valid_bn254_point(bad), "{bad}");
+            assert!(!is_valid_secp256k1_point(bad), "{bad}");
+        }
+        let (_k, v, big_k, big_v) = new_meta().unwrap();
+        let (kx, ky) = big_k.split_once('.').unwrap();
+        let (vx, vy) = big_v.split_once('.').unwrap();
+        assert!(send(&format!("0{kx}.{ky}"), &big_v).is_err());
+        assert!(send(&big_k, &format!("{vx}.0{vy}")).is_err());
+        assert!(viewer_scan(&v, &format!("0{kx}.{ky}"), &[], &[]).is_err());
+    }
+
+    #[test]
+    fn send_with_r_requires_a_canonical_scalar() {
+        use crate::field::FIELD_MODULUS_DEC;
+        let (_k, _v, big_k, big_v) = new_meta().unwrap();
+        let five = send_with_r("5", &big_k, &big_v).unwrap();
+        // p - 1 is the largest accepted scalar.
+        let p_minus_1 = (BigUint::parse_bytes(FIELD_MODULUS_DEC.as_bytes(), 10).unwrap() - 1u8)
+            .to_str_radix(10);
+        assert!(send_with_r(&p_minus_1, &big_k, &big_v).is_ok());
+
+        let p_plus_5 = (BigUint::parse_bytes(FIELD_MODULUS_DEC.as_bytes(), 10).unwrap() + 5u8)
+            .to_str_radix(10);
+        for bad in [
+            "05",
+            "005",
+            "+5",
+            "-5",
+            " 5",
+            "",
+            "0",
+            "00",
+            FIELD_MODULUS_DEC,
+            &p_plus_5,
+            &"9".repeat(78),
+        ] {
+            assert!(
+                send_with_r(bad, &big_k, &big_v).is_err(),
+                "r = {bad:?} must be rejected"
+            );
+        }
+        // The canonical encoding still yields R = 5·G.
+        assert_eq!(
+            five.big_r,
+            xy_bn(&bn_mul(BnG1::generator(), BnFr::from(5u8))).unwrap()
+        );
     }
 }

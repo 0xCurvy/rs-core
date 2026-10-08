@@ -1,10 +1,11 @@
-//! SPARROW, Curvy's bounded-memory Groth16 prover over a sequential snarkjs
-//! zkey.
+//! SPARROW (Streaming Prover Architecture for Resource-Restricted One-pass
+//! Workflows), Curvy's bounded-memory Groth16 prover over a sequential snarkjs
+//! zkey. The developer-facing entry point is [`StreamingProver`].
 //!
 //! The preferred protocol authenticates a small pinned manifest first, then
 //! authenticates each zkey chunk before feeding it to the parser in a single
 //! pass. A compatible whole-file-digest protocol authenticates and rewinds the
-//! zkey before a separately hashed proof pass. Constraint coefficients are
+//! zkey and rechecks each chunk before exposing it during the proof pass. Constraint coefficients are
 //! evaluated as they arrive and every query is reduced into persistent
 //! Pippenger buckets, so no zkey section and no vector of query points is
 //! retained.
@@ -13,15 +14,24 @@ pub mod manifest;
 #[cfg(feature = "bench")]
 #[doc(hidden)]
 pub mod phase_bench;
+#[cfg(all(
+    feature = "wasm-simd-selftest",
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+pub(crate) mod simd_self_test;
 
 use std::{
     io::{Read, Seek, SeekFrom},
-    ops::{AddAssign, SubAssign},
     sync::Arc,
 };
 
-use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+use ark_bn254::{Bn254, Fq, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
+use ark_ec::{
+    AffineRepr, CurveGroup, PrimeGroup,
+    short_weierstrass::{Affine, Projective},
+};
 use ark_ff::{BigInt, PrimeField, UniformRand, Zero};
 use ark_groth16::{Groth16, Proof, VerifyingKey, prepare_verifying_key};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
@@ -31,7 +41,38 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{ProofBundle, proof_to_snarkjs_json, publics_to_json};
+use crate::{
+    ProofBundle, ProverMode, SPARROW_PROFILE, msm::WindowBuckets, proof_to_snarkjs_json,
+    publics_to_json,
+};
+
+/// Persistent window buckets of SPARROW's G1 and G2 queries: arkworks'
+/// batch-affine buckets, or under `wasm-simd-msm` (wasm32 with simd128) the
+/// SIMD kernel's buckets, which keep the same schedule in 29-bit limbs.
+#[cfg(not(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+)))]
+type G1Windows = crate::msm::AffineBuckets<ark_bn254::g1::Config>;
+#[cfg(not(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+)))]
+type G2Windows = crate::msm::AffineBuckets<ark_bn254::g2::Config>;
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+type G1Windows = crate::msm_simd::SparrowG1;
+#[cfg(all(
+    feature = "wasm-simd-msm",
+    target_arch = "wasm32",
+    target_feature = "simd128"
+))]
+type G2Windows = crate::msm_simd::SparrowG2;
 
 const FILE_HEADER_BYTES: usize = 12;
 const SECTION_HEADER_BYTES: usize = 12;
@@ -41,10 +82,13 @@ const G1_BYTES: usize = 64;
 const G2_BYTES: usize = 128;
 const ZKEY_SECTIONS: u32 = 10;
 const MAX_PUBLIC_INPUTS: usize = 65_536;
+// A hard resource ceiling also applies to the low-level externally authenticated
+// builder: two initial QAP arrays total at most 256 MiB, not 128 GiB.
+const MAX_DOMAIN_SIZE: usize = 1 << 22;
 const MAX_CONTRIBUTIONS_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
-pub enum SparrowError {
+pub enum StreamingError {
     #[error("expected zkey SHA-256 must be exactly 64 hexadecimal characters")]
     InvalidExpectedHash,
     #[error("zkey SHA-256 mismatch: expected {expected}, got {actual}")]
@@ -73,8 +117,36 @@ pub enum SparrowError {
     SelfVerificationFailed,
 }
 
+impl From<crate::artifacts::manifest::ArtifactError> for StreamingError {
+    fn from(error: crate::artifacts::manifest::ArtifactError) -> Self {
+        use crate::artifacts::manifest::ArtifactError as A;
+        match error {
+            A::InvalidExpectedHash => Self::InvalidExpectedHash,
+            A::ZkeyHashMismatch { expected, actual } => Self::ZkeyHashMismatch { expected, actual },
+            A::ManifestHashMismatch { expected, actual } => {
+                Self::ManifestHashMismatch { expected, actual }
+            }
+            A::ManifestZkeyHashMismatch { expected, actual } => {
+                Self::ManifestZkeyHashMismatch { expected, actual }
+            }
+            A::ZkeyChunkHashMismatch {
+                index,
+                expected,
+                actual,
+            } => Self::ZkeyChunkHashMismatch {
+                index,
+                expected,
+                actual,
+            },
+            A::InvalidZkey(message) => Self::InvalidZkey(message),
+            A::UnexpectedEof => Self::UnexpectedEof,
+            A::Io(error) => Self::Io(error),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-pub struct SparrowConfig {
+pub struct StreamingConfig {
     /// Signed-Pippenger window width. Use [`Self::ADAPTIVE_WINDOW_BITS`] to
     /// select the query-size policy; explicit widths remain available for
     /// WASM/device-specific tuning.
@@ -88,14 +160,14 @@ pub struct SparrowConfig {
 
 /// First-pass digest state for hosts whose artifact source is itself a stream
 /// (for example a cached browser `Response`).
-pub struct SparrowAuthenticator {
+pub struct StreamingAuthenticator {
     expected_sha256: String,
     hasher: Sha256,
     bytes: u64,
 }
 
-impl SparrowAuthenticator {
-    pub fn new(expected_sha256: &str) -> Result<Self, SparrowError> {
+impl StreamingAuthenticator {
+    pub fn new(expected_sha256: &str) -> Result<Self, StreamingError> {
         Ok(Self {
             expected_sha256: normalize_hash(expected_sha256)?,
             hasher: Sha256::new(),
@@ -103,19 +175,19 @@ impl SparrowAuthenticator {
         })
     }
 
-    pub fn update(&mut self, bytes: &[u8]) -> Result<(), SparrowError> {
+    pub fn update(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
         self.bytes = self
             .bytes
             .checked_add(bytes.len() as u64)
-            .ok_or_else(|| SparrowError::InvalidZkey("artifact byte count overflow".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("artifact byte count overflow".into()))?;
         self.hasher.update(bytes);
         Ok(())
     }
 
-    pub fn finish(self) -> Result<u64, SparrowError> {
+    pub fn finish(self) -> Result<u64, StreamingError> {
         let actual = hex_digest(self.hasher.finalize());
         if actual != self.expected_sha256 {
-            return Err(SparrowError::ZkeyHashMismatch {
+            return Err(StreamingError::ZkeyHashMismatch {
                 expected: self.expected_sha256,
                 actual,
             });
@@ -124,7 +196,7 @@ impl SparrowAuthenticator {
     }
 }
 
-impl Default for SparrowConfig {
+impl Default for StreamingConfig {
     fn default() -> Self {
         // Use a stable cross-target baseline. Native hosts can select the
         // query-size policy with `native_adaptive`; browser and mobile hosts
@@ -137,7 +209,7 @@ impl Default for SparrowConfig {
     }
 }
 
-impl SparrowConfig {
+impl StreamingConfig {
     /// Sentinel selecting a window from the number of points in each query.
     ///
     /// Window choice changes only the MSM execution schedule. It does not
@@ -162,7 +234,7 @@ impl SparrowConfig {
         self.window_bits == Self::ADAPTIVE_WINDOW_BITS
     }
 
-    fn validate(self) -> Result<Self, SparrowError> {
+    fn validate(self) -> Result<Self, StreamingError> {
         if !self.uses_adaptive_window() && !(4..=16).contains(&self.window_bits) {
             return invalid("MSM window bits must be 0 (adaptive) or in 4..=16");
         }
@@ -176,21 +248,32 @@ impl SparrowConfig {
     }
 }
 
-/// SAGE-backed circuit bundle whose large proving key is never materialized.
-pub struct SparrowProver {
+/// SPARROW streaming prover whose large proving key is never materialized.
+pub struct StreamingProver {
     graph: SageGraph,
     expected_zkey_sha256: String,
-    config: SparrowConfig,
+    config: StreamingConfig,
 }
 
-impl SparrowProver {
+impl StreamingProver {
+    pub const MODE: ProverMode = ProverMode::Streaming;
+    pub const PROFILE: &'static str = SPARROW_PROFILE;
+
+    pub const fn mode(&self) -> ProverMode {
+        Self::MODE
+    }
+
+    pub const fn profile(&self) -> &'static str {
+        Self::PROFILE
+    }
+
     pub fn from_signet_bytes(
         graph: &[u8],
         expected_graph_sha256: &str,
         expected_zkey_sha256: &str,
         limits: Limits,
-        config: SparrowConfig,
-    ) -> Result<Self, SparrowError> {
+        config: StreamingConfig,
+    ) -> Result<Self, StreamingError> {
         let expected_zkey_sha256 = normalize_hash(expected_zkey_sha256)?;
         let graph = SageGraph::from_bytes_with_limits(graph, expected_graph_sha256, limits)?;
         Ok(Self {
@@ -206,8 +289,8 @@ impl SparrowProver {
         expected_source_graph_sha256: &str,
         expected_zkey_sha256: &str,
         limits: Limits,
-        config: SparrowConfig,
-    ) -> Result<Self, SparrowError> {
+        config: StreamingConfig,
+    ) -> Result<Self, StreamingError> {
         let expected_zkey_sha256 = normalize_hash(expected_zkey_sha256)?;
         let graph = SageGraph::from_compiled_bytes_with_limits(
             program,
@@ -235,11 +318,11 @@ impl SparrowProver {
     /// Browser hosts use this once to populate a versioned, origin-local cache.
     /// Loading that cache still validates its digest and embedded source-graph
     /// digest through [`Self::from_compiled_sage_bytes`].
-    pub fn compiled_sage_bytes(&self) -> Result<Vec<u8>, SparrowError> {
+    pub fn compiled_sage_bytes(&self) -> Result<Vec<u8>, StreamingError> {
         Ok(self.graph.to_compiled_bytes()?)
     }
 
-    pub fn calculate_witness_json(&self, input_json: &str) -> Result<Vec<Fr>, SparrowError> {
+    pub fn calculate_witness_json(&self, input_json: &str) -> Result<Vec<Fr>, StreamingError> {
         Ok(self.graph.calculate_json(input_json)?)
     }
 
@@ -248,10 +331,8 @@ impl SparrowProver {
         &self,
         input_json: &str,
         zkey: &mut R,
-    ) -> Result<ProofBundle, SparrowError> {
+    ) -> Result<ProofBundle, StreamingError> {
         let assignment = self.calculate_witness_json(input_json)?;
-        authenticate_reader(zkey, &self.expected_zkey_sha256, self.config.io_chunk_bytes)?;
-        zkey.seek(SeekFrom::Start(0))?;
         prove_reader_owned(zkey, assignment, &self.expected_zkey_sha256, self.config)
     }
 
@@ -264,7 +345,7 @@ impl SparrowProver {
         zkey: &mut R,
         manifest_bytes: &[u8],
         expected_manifest_sha256: &str,
-    ) -> Result<ProofBundle, SparrowError> {
+    ) -> Result<ProofBundle, StreamingError> {
         let manifest = manifest::ZkeyChunkManifest::from_bytes(
             manifest_bytes,
             expected_manifest_sha256,
@@ -278,9 +359,7 @@ impl SparrowProver {
         &self,
         assignment: &[Fr],
         zkey: &mut R,
-    ) -> Result<ProofBundle, SparrowError> {
-        authenticate_reader(zkey, &self.expected_zkey_sha256, self.config.io_chunk_bytes)?;
-        zkey.seek(SeekFrom::Start(0))?;
+    ) -> Result<ProofBundle, StreamingError> {
         prove_reader(zkey, assignment, &self.expected_zkey_sha256, self.config)
     }
 }
@@ -297,11 +376,12 @@ impl SparrowProver {
 /// manifest adapter, which authenticates every complete chunk first. The hash
 /// accumulated by [`Self::new`] checks final equality but does not by itself
 /// authorize bytes before they are processed.
-pub struct SparrowProofBuilder {
+pub struct StreamingProofBuilder {
     assignment: Option<Arc<[Fr]>>,
     public_inputs: Option<Vec<Fr>>,
     expected_sha256: String,
-    config: SparrowConfig,
+    config: StreamingConfig,
+    max_domain_size: usize,
     hasher: Option<Sha256>,
     began: bool,
     seen_sections: [bool; (ZKEY_SECTIONS + 1) as usize],
@@ -318,12 +398,16 @@ pub struct SparrowProofBuilder {
     h_msm: Option<G1Projective>,
 }
 
-impl SparrowProofBuilder {
+impl StreamingProofBuilder {
+    /// Low-level framing API. Authenticate all bytes before supplying them,
+    /// using an immutable snapshot or pinned chunk manifest. The final digest
+    /// is only an equality check; it cannot authorize prior allocations.
+    /// Domains above 2^22 are rejected before QAP allocation.
     pub fn new(
         assignment: Vec<Fr>,
         expected_sha256: &str,
-        config: SparrowConfig,
-    ) -> Result<Self, SparrowError> {
+        config: StreamingConfig,
+    ) -> Result<Self, StreamingError> {
         Self::new_with_hashing(assignment, expected_sha256, config, true)
     }
 
@@ -333,22 +417,32 @@ impl SparrowProofBuilder {
     fn new_manifest_authenticated(
         assignment: Vec<Fr>,
         expected_sha256: &str,
-        config: SparrowConfig,
-    ) -> Result<Self, SparrowError> {
+        config: StreamingConfig,
+    ) -> Result<Self, StreamingError> {
         Self::new_with_hashing(assignment, expected_sha256, config, false)
+    }
+
+    /// Further bound dimensions using a length obtained from authentication.
+    pub(crate) fn with_authenticated_length(mut self, bytes: u64) -> Self {
+        self.max_domain_size = (bytes / G1_BYTES as u64).min(MAX_DOMAIN_SIZE as u64) as usize;
+        self
     }
 
     fn new_with_hashing(
         assignment: Vec<Fr>,
         expected_sha256: &str,
-        config: SparrowConfig,
+        config: StreamingConfig,
         hash_zkey: bool,
-    ) -> Result<Self, SparrowError> {
+    ) -> Result<Self, StreamingError> {
+        if assignment.first() != Some(&Fr::from(1_u64)) {
+            return invalid("witness assignment must begin with constant one");
+        }
         Ok(Self {
             assignment: Some(assignment.into()),
             public_inputs: None,
             expected_sha256: normalize_hash(expected_sha256)?,
             config: config.validate()?,
+            max_domain_size: MAX_DOMAIN_SIZE,
             hasher: hash_zkey.then(Sha256::new),
             began: false,
             seen_sections: [false; (ZKEY_SECTIONS + 1) as usize],
@@ -366,7 +460,7 @@ impl SparrowProofBuilder {
         })
     }
 
-    pub fn begin_zkey(&mut self, header: &[u8]) -> Result<(), SparrowError> {
+    pub fn begin_zkey(&mut self, header: &[u8]) -> Result<(), StreamingError> {
         if self.began || self.active.is_some() || header.len() != FILE_HEADER_BYTES {
             return invalid("invalid or duplicate zkey file header");
         }
@@ -383,7 +477,7 @@ impl SparrowProofBuilder {
         Ok(())
     }
 
-    pub fn begin_section(&mut self, section_header: &[u8]) -> Result<(), SparrowError> {
+    pub fn begin_section(&mut self, section_header: &[u8]) -> Result<(), StreamingError> {
         if !self.began || self.active.is_some() || section_header.len() != SECTION_HEADER_BYTES {
             return invalid("section began in an invalid stream state");
         }
@@ -405,15 +499,15 @@ impl SparrowProofBuilder {
         Ok(())
     }
 
-    pub fn push_section_chunk(&mut self, bytes: &[u8]) -> Result<(), SparrowError> {
+    pub fn push_section_chunk(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
         let active = self
             .active
             .as_mut()
-            .ok_or_else(|| SparrowError::InvalidZkey("no active zkey section".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("no active zkey section".into()))?;
         let next = active
             .received
             .checked_add(bytes.len() as u64)
-            .ok_or_else(|| SparrowError::InvalidZkey("section byte count overflow".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("section byte count overflow".into()))?;
         if next > active.length {
             return invalid(format!(
                 "zkey section {} exceeded its declared size",
@@ -428,11 +522,11 @@ impl SparrowProofBuilder {
         Ok(())
     }
 
-    pub fn end_section(&mut self) -> Result<(), SparrowError> {
+    pub fn end_section(&mut self) -> Result<(), StreamingError> {
         let active = self
             .active
             .take()
-            .ok_or_else(|| SparrowError::InvalidZkey("no active zkey section".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("no active zkey section".into()))?;
         if active.received != active.length {
             self.active = Some(active);
             return invalid("zkey section ended before its declared size");
@@ -446,6 +540,9 @@ impl SparrowProofBuilder {
             }
             (2, SectionProcessor::Small(bytes)) => {
                 let header = GrothHeader::parse(&bytes)?;
+                if header.domain_size > self.max_domain_size {
+                    return invalid("Groth16 domain exceeds authenticated zkey length");
+                }
                 let assignment = self.assignment()?;
                 if header.n_vars != assignment.len() {
                     return invalid(format!(
@@ -497,14 +594,14 @@ impl SparrowProofBuilder {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<ProofBundle, SparrowError> {
+    pub fn finish(self) -> Result<ProofBundle, StreamingError> {
         if self.active.is_some() || !self.began || self.section_count != ZKEY_SECTIONS {
             return invalid("incomplete zkey stream");
         }
         if let Some(hasher) = self.hasher {
             let actual = hex_digest(hasher.finalize());
             if actual != self.expected_sha256 {
-                return Err(SparrowError::ZkeyHashMismatch {
+                return Err(StreamingError::ZkeyHashMismatch {
                     expected: self.expected_sha256,
                     actual,
                 });
@@ -513,10 +610,10 @@ impl SparrowProofBuilder {
 
         let header = self
             .header
-            .ok_or_else(|| SparrowError::InvalidZkey("missing Groth16 header".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing Groth16 header".into()))?;
         let ic = self
             .ic
-            .ok_or_else(|| SparrowError::InvalidZkey("missing IC query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing IC query".into()))?;
         let vk = VerifyingKey::<Bn254> {
             alpha_g1: header.alpha_g1,
             beta_g2: header.beta_g2,
@@ -530,19 +627,19 @@ impl SparrowProofBuilder {
         let s = Fr::rand(&mut rng);
         let mut g_a = self
             .a_msm
-            .ok_or_else(|| SparrowError::InvalidZkey("missing A query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing A query".into()))?;
         g_a += header.alpha_g1;
         g_a += header.delta_g1.mul_bigint(r.into_bigint());
 
         let mut g1_b = self
             .b1_msm
-            .ok_or_else(|| SparrowError::InvalidZkey("missing B1 query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing B1 query".into()))?;
         g1_b += header.beta_g1;
         g1_b += header.delta_g1.mul_bigint(s.into_bigint());
 
         let mut g2_b = self
             .b2_msm
-            .ok_or_else(|| SparrowError::InvalidZkey("missing B2 query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing B2 query".into()))?;
         g2_b += header.beta_g2;
         g2_b += header.delta_g2.mul_bigint(s.into_bigint());
 
@@ -551,10 +648,10 @@ impl SparrowProofBuilder {
         c -= header.delta_g1.mul_bigint((r * s).into_bigint());
         c += self
             .l_msm
-            .ok_or_else(|| SparrowError::InvalidZkey("missing L query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing L query".into()))?;
         c += self
             .h_msm
-            .ok_or_else(|| SparrowError::InvalidZkey("missing H query".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing H query".into()))?;
 
         let proof = Proof::<Bn254> {
             a: g_a.into_affine(),
@@ -564,12 +661,12 @@ impl SparrowProofBuilder {
         let public_inputs = self
             .public_inputs
             .as_deref()
-            .ok_or_else(|| SparrowError::InvalidZkey("missing public inputs".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("missing public inputs".into()))?;
         let verified =
             Groth16::<Bn254>::verify_proof(&prepare_verifying_key(&vk), &proof, public_inputs)
-                .map_err(|error| SparrowError::Verification(error.to_string()))?;
+                .map_err(|error| StreamingError::Verification(error.to_string()))?;
         if !verified {
-            return Err(SparrowError::SelfVerificationFailed);
+            return Err(StreamingError::SelfVerificationFailed);
         }
 
         Ok(ProofBundle {
@@ -578,19 +675,19 @@ impl SparrowProofBuilder {
         })
     }
 
-    fn header(&self) -> Result<&GrothHeader, SparrowError> {
-        self.header
-            .as_ref()
-            .ok_or_else(|| SparrowError::InvalidZkey("Groth16 header must precede section".into()))
-    }
-
-    fn assignment(&self) -> Result<&Arc<[Fr]>, SparrowError> {
-        self.assignment.as_ref().ok_or_else(|| {
-            SparrowError::InvalidZkey("assignment was released before dependent query".into())
+    fn header(&self) -> Result<&GrothHeader, StreamingError> {
+        self.header.as_ref().ok_or_else(|| {
+            StreamingError::InvalidZkey("Groth16 header must precede section".into())
         })
     }
 
-    fn processor_for(&self, id: u32, length: u64) -> Result<SectionProcessor, SparrowError> {
+    fn assignment(&self) -> Result<&Arc<[Fr]>, StreamingError> {
+        self.assignment.as_ref().ok_or_else(|| {
+            StreamingError::InvalidZkey("assignment was released before dependent query".into())
+        })
+    }
+
+    fn processor_for(&self, id: u32, length: u64) -> Result<SectionProcessor, StreamingError> {
         match id {
             1 => small(length, 4),
             2 => small(length, GROTH_HEADER_BYTES),
@@ -638,7 +735,7 @@ impl SparrowProofBuilder {
                 let header = self.header()?;
                 let offset = header.n_public + 1;
                 let count = header.n_vars.checked_sub(offset).ok_or_else(|| {
-                    SparrowError::InvalidZkey("invalid L query dimensions".into())
+                    StreamingError::InvalidZkey("invalid L query dimensions".into())
                 })?;
                 query_g1(
                     length,
@@ -651,7 +748,7 @@ impl SparrowProofBuilder {
             9 => {
                 let header = self.header()?;
                 let h = self.h.as_ref().ok_or_else(|| {
-                    SparrowError::InvalidZkey("coefficient section must precede H query".into())
+                    StreamingError::InvalidZkey("coefficient section must precede H query".into())
                 })?;
                 query_g1(length, Arc::clone(h), 0, header.domain_size, self.config)
             }
@@ -676,13 +773,13 @@ struct ActiveSection {
 enum SectionProcessor {
     Small(Vec<u8>),
     Coefficients(Box<CoefficientAccumulator>),
-    G1(Box<QueryAccumulator<G1Affine>>),
-    G2(Box<QueryAccumulator<G2Affine>>),
+    G1(Box<QueryAccumulator<G1Windows>>),
+    G2(Box<QueryAccumulator<G2Windows>>),
     Ignore,
 }
 
 impl SectionProcessor {
-    fn push(&mut self, bytes: &[u8]) -> Result<(), SparrowError> {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
         match self {
             Self::Small(value) => {
                 value.extend_from_slice(bytes);
@@ -696,7 +793,7 @@ impl SectionProcessor {
     }
 }
 
-fn small(length: u64, expected: usize) -> Result<SectionProcessor, SparrowError> {
+fn small(length: u64, expected: usize) -> Result<SectionProcessor, StreamingError> {
     if length != expected as u64 {
         return invalid(format!(
             "section size mismatch: expected {expected}, got {length}"
@@ -710,8 +807,8 @@ fn query_g1(
     scalars: Arc<[Fr]>,
     scalar_offset: usize,
     count: usize,
-    config: SparrowConfig,
-) -> Result<SectionProcessor, SparrowError> {
+    config: StreamingConfig,
+) -> Result<SectionProcessor, StreamingError> {
     expected_query_size(length, count, G1_BYTES)?;
     Ok(SectionProcessor::G1(Box::new(QueryAccumulator::new(
         scalars,
@@ -729,8 +826,8 @@ fn query_g2(
     scalars: Arc<[Fr]>,
     scalar_offset: usize,
     count: usize,
-    config: SparrowConfig,
-) -> Result<SectionProcessor, SparrowError> {
+    config: StreamingConfig,
+) -> Result<SectionProcessor, StreamingError> {
     expected_query_size(length, count, G2_BYTES)?;
     Ok(SectionProcessor::G2(Box::new(QueryAccumulator::new(
         scalars,
@@ -743,10 +840,10 @@ fn query_g2(
     )?)))
 }
 
-fn expected_query_size(length: u64, count: usize, width: usize) -> Result<(), SparrowError> {
+fn expected_query_size(length: u64, count: usize, width: usize) -> Result<(), StreamingError> {
     let expected = count
         .checked_mul(width)
-        .ok_or_else(|| SparrowError::InvalidZkey("query size overflow".into()))?;
+        .ok_or_else(|| StreamingError::InvalidZkey("query size overflow".into()))?;
     if length != expected as u64 {
         return invalid(format!(
             "query size mismatch: expected {expected}, got {length}"
@@ -769,7 +866,7 @@ struct GrothHeader {
 }
 
 impl GrothHeader {
-    fn parse(bytes: &[u8]) -> Result<Self, SparrowError> {
+    fn parse(bytes: &[u8]) -> Result<Self, StreamingError> {
         if bytes.len() != GROTH_HEADER_BYTES
             || le_u32(&bytes[..4])? != 32
             || limbs(&bytes[4..36])? != Fq::MODULUS
@@ -781,7 +878,11 @@ impl GrothHeader {
         let n_vars = le_u32(&bytes[72..76])? as usize;
         let n_public = le_u32(&bytes[76..80])? as usize;
         let domain_size = le_u32(&bytes[80..84])? as usize;
-        if n_vars <= n_public || domain_size == 0 || !domain_size.is_power_of_two() {
+        if n_vars <= n_public
+            || domain_size == 0
+            || domain_size > MAX_DOMAIN_SIZE
+            || !domain_size.is_power_of_two()
+        {
             return invalid("invalid Groth16 dimensions");
         }
         let mut offset = 84;
@@ -792,6 +893,12 @@ impl GrothHeader {
         let delta_g1 = take_g1(bytes, &mut offset)?;
         let delta_g2 = take_g2(bytes, &mut offset)?;
         if offset != bytes.len()
+            || alpha_g1.is_zero()
+            || beta_g1.is_zero()
+            || beta_g2.is_zero()
+            || gamma_g2.is_zero()
+            || delta_g1.is_zero()
+            || delta_g2.is_zero()
             || !valid_g1(&alpha_g1)
             || !valid_g1(&beta_g1)
             || !valid_g2(&beta_g2)
@@ -833,14 +940,14 @@ impl CoefficientAccumulator {
         header: GrothHeader,
         assignment: Arc<[Fr]>,
         batch_records: usize,
-    ) -> Result<Self, SparrowError> {
+    ) -> Result<Self, StreamingError> {
         let mut a = Vec::new();
         a.try_reserve_exact(header.domain_size)
-            .map_err(|_| SparrowError::InvalidZkey("cannot allocate QAP A domain".into()))?;
+            .map_err(|_| StreamingError::InvalidZkey("cannot allocate QAP A domain".into()))?;
         a.resize(header.domain_size, Fr::zero());
         let mut b = Vec::new();
         b.try_reserve_exact(header.domain_size)
-            .map_err(|_| SparrowError::InvalidZkey("cannot allocate QAP B domain".into()))?;
+            .map_err(|_| StreamingError::InvalidZkey("cannot allocate QAP B domain".into()))?;
         b.resize(header.domain_size, Fr::zero());
         Ok(Self {
             header,
@@ -856,7 +963,7 @@ impl CoefficientAccumulator {
         })
     }
 
-    fn push(&mut self, mut bytes: &[u8]) -> Result<(), SparrowError> {
+    fn push(&mut self, mut bytes: &[u8]) -> Result<(), StreamingError> {
         if self.declared.is_none() {
             let needed = 4 - self.carry.len();
             let take = needed.min(bytes.len());
@@ -889,7 +996,7 @@ impl CoefficientAccumulator {
         Ok(())
     }
 
-    fn queue_record(&mut self, record: &[u8]) -> Result<(), SparrowError> {
+    fn queue_record(&mut self, record: &[u8]) -> Result<(), StreamingError> {
         self.batch.extend_from_slice(record);
         if self.batch.len() == self.batch_records * COEFFICIENT_BYTES {
             self.flush()?;
@@ -897,7 +1004,7 @@ impl CoefficientAccumulator {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), SparrowError> {
+    fn flush(&mut self) -> Result<(), StreamingError> {
         if self.batch.is_empty() {
             return Ok(());
         }
@@ -934,23 +1041,23 @@ impl CoefficientAccumulator {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<(Vec<Fr>, usize), SparrowError> {
+    fn finish(mut self) -> Result<(Vec<Fr>, usize), StreamingError> {
         self.flush()?;
         if !self.carry.is_empty() || self.declared != Some(self.seen) {
             return invalid("coefficient record count mismatch");
         }
         let num_constraints = self
             .max_constraint
-            .ok_or_else(|| SparrowError::InvalidZkey("empty coefficient section".into()))?
+            .ok_or_else(|| StreamingError::InvalidZkey("empty coefficient section".into()))?
             .checked_sub(self.header.n_public as u32)
-            .ok_or_else(|| SparrowError::InvalidZkey("invalid constraint count".into()))?
+            .ok_or_else(|| StreamingError::InvalidZkey("invalid constraint count".into()))?
             as usize;
         let num_inputs = self.header.n_public + 1;
         let used = num_constraints
             .checked_add(num_inputs)
-            .ok_or_else(|| SparrowError::InvalidZkey("QAP domain overflow".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("QAP domain overflow".into()))?;
         let domain = GeneralEvaluationDomain::<Fr>::new(used)
-            .ok_or_else(|| SparrowError::InvalidZkey("QAP domain is too large".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("QAP domain is too large".into()))?;
         if domain.size() != self.header.domain_size {
             return invalid("zkey domain size does not match its constraints");
         }
@@ -974,15 +1081,15 @@ fn decode_coefficient(
     record: &[u8],
     header: &GrothHeader,
     assignment: &[Fr],
-) -> Result<CoefficientTerm, SparrowError> {
+) -> Result<CoefficientTerm, StreamingError> {
     let matrix = le_u32(&record[..4])? as usize;
     let constraint = le_u32(&record[4..8])? as usize;
     let signal = le_u32(&record[8..12])? as usize;
     if matrix > 1 || constraint >= header.domain_size || signal >= assignment.len() {
         return invalid("coefficient record index is out of bounds");
     }
-    let encoded = limbs(&record[12..44])?;
-    let value = Fr::new_unchecked(Fr::new_unchecked(encoded).into_bigint());
+    let value = crate::zkey::deserialize_field_fr(&mut &record[12..44])
+        .map_err(|_| StreamingError::InvalidZkey("noncanonical coefficient".into()))?;
     Ok(CoefficientTerm {
         matrix,
         constraint,
@@ -995,128 +1102,92 @@ fn circom_witness_map(
     mut a: Vec<Fr>,
     mut b: Vec<Fr>,
     num_constraints: usize,
-) -> Result<Vec<Fr>, SparrowError> {
-    let mut c = vec![Fr::zero(); domain.size()];
-    #[cfg(feature = "parallel")]
-    c[..num_constraints]
-        .par_iter_mut()
-        .zip(a.par_iter())
-        .zip(b.par_iter())
-        .for_each(|((c, a), b)| *c = *a * b);
-    #[cfg(not(feature = "parallel"))]
-    c[..num_constraints]
-        .iter_mut()
-        .zip(a.iter())
-        .zip(b.iter())
-        .for_each(|((c, a), b)| *c = *a * b);
-
-    domain.ifft_in_place(&mut a);
-    domain.ifft_in_place(&mut b);
-    let double = GeneralEvaluationDomain::<Fr>::new(2 * domain.size())
-        .ok_or_else(|| SparrowError::InvalidZkey("double QAP domain is too large".into()))?;
-    let root = double.element(1);
-    GeneralEvaluationDomain::<Fr>::distribute_powers_and_mul_by_const(
-        &mut a,
-        root,
-        Fr::from(1_u64),
-    );
-    GeneralEvaluationDomain::<Fr>::distribute_powers_and_mul_by_const(
-        &mut b,
-        root,
-        Fr::from(1_u64),
-    );
-    domain.fft_in_place(&mut a);
-    domain.fft_in_place(&mut b);
-    #[cfg(feature = "parallel")]
-    a.par_iter_mut()
-        .zip(b.par_iter())
-        .for_each(|(a, b)| *a *= b);
-    #[cfg(not(feature = "parallel"))]
-    a.iter_mut().zip(&b).for_each(|(a, b)| *a *= b);
-    drop(b);
-    let mut ab = a;
-
-    domain.ifft_in_place(&mut c);
-    GeneralEvaluationDomain::<Fr>::distribute_powers_and_mul_by_const(
-        &mut c,
-        root,
-        Fr::from(1_u64),
-    );
-    domain.fft_in_place(&mut c);
-    #[cfg(feature = "parallel")]
-    ab.par_iter_mut().zip(c).for_each(|(ab, c)| *ab -= c);
-    #[cfg(not(feature = "parallel"))]
-    ab.iter_mut().zip(c).for_each(|(ab, c)| *ab -= c);
-    Ok(ab)
+) -> Result<Vec<Fr>, StreamingError> {
+    let mut c = Vec::new();
+    crate::qap::finish_evaluations(domain, &mut a, &mut b, &mut c, num_constraints)
+        .map_err(|error| StreamingError::InvalidZkey(format!("invalid QAP domain: {error}")))?;
+    Ok(a)
 }
+
+/// A query point decoder (`decode_g1` or `decode_g2`).
+type DecodePoint<P> = fn(&[u8]) -> Result<Affine<P>, StreamingError>;
 
 /// Bounded-memory signed-Pippenger scheduling over arkworks group types.
 ///
 /// This layer controls batching, scalar recoding, and bucket reduction. Field
 /// arithmetic, curve addition/doubling, and the final Groth16 verification stay
-/// in `ark-bn254`/`ark-groth16`; this is not a separate BN254 implementation.
-struct QueryAccumulator<G: AffineRepr<ScalarField = Fr>> {
+/// in `ark-bn254`/`ark-groth16`; this is not a separate BN254 implementation
+/// (except under `wasm-simd-msm`, whose buckets use the SIMD kernel's field
+/// arithmetic; see `crate::msm_simd`).
+/// Buckets persist across chunks in affine form; each chunk's additions are
+/// applied in batch-affine form (see `crate::msm`), so every bucket is final
+/// before the next chunk starts. Bases are converted to the buckets'
+/// representation as they are decoded.
+struct QueryAccumulator<W: WindowBuckets> {
     scalars: Arc<[Fr]>,
     scalar_offset: usize,
     expected: usize,
     seen: usize,
     record_bytes: usize,
-    decode: fn(&[u8]) -> Result<G, SparrowError>,
-    validate: fn(&G) -> bool,
+    decode: DecodePoint<W::Curve>,
+    validate: fn(&Affine<W::Curve>) -> bool,
     carry: Vec<u8>,
-    pairs: Vec<(G, BigInt<4>)>,
-    buckets: Vec<Vec<G::Group>>,
+    pairs: Vec<(W::Base, BigInt<4>)>,
+    buckets: Vec<W>,
     window_bits: usize,
     chunk_points: usize,
-    first: Option<G>,
-    last: Option<G>,
+    first: Option<Affine<W::Curve>>,
+    last: Option<Affine<W::Curve>>,
+    /// Shortest run of whole records decoded on the Rayon pool.
+    #[cfg(feature = "parallel")]
+    parallel_min_records: usize,
 }
 
-impl<G> QueryAccumulator<G>
-where
-    G: AffineRepr<ScalarField = Fr> + Send + Sync,
-    G::Group: Send + Sync,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G> + AddAssign<&'a G::Group>,
-{
+/// Runs of fewer whole records are decoded on the calling thread. Manifest
+/// and reader pushes carry 1 MiB (16,384 G1 or 8,192 G2 records).
+#[cfg(feature = "parallel")]
+const PARALLEL_DECODE_MIN_RECORDS: usize = 256;
+/// Records per Rayon task when decoding a run.
+#[cfg(feature = "parallel")]
+const DECODE_TASK_RECORDS: usize = 256;
+
+impl<W: WindowBuckets> QueryAccumulator<W> {
     fn new(
         scalars: Arc<[Fr]>,
         scalar_offset: usize,
         expected: usize,
         record_bytes: usize,
-        decode: fn(&[u8]) -> Result<G, SparrowError>,
-        validate: fn(&G) -> bool,
-        config: SparrowConfig,
-    ) -> Result<Self, SparrowError> {
+        decode: DecodePoint<W::Curve>,
+        validate: fn(&Affine<W::Curve>) -> bool,
+        config: StreamingConfig,
+    ) -> Result<Self, StreamingError> {
         let scalar_end = scalar_offset
             .checked_add(expected)
-            .ok_or_else(|| SparrowError::InvalidZkey("query scalar range overflow".into()))?;
+            .ok_or_else(|| StreamingError::InvalidZkey("query scalar range overflow".into()))?;
         if scalar_end > scalars.len() {
             return invalid("query scalar range exceeds assignment");
         }
         let window_bits = resolve_window_bits(config.window_bits, expected);
         let windows = (Fr::MODULUS_BIT_SIZE as usize).div_ceil(window_bits);
-        let recoding_bits = windows
-            .checked_mul(window_bits)
-            .ok_or_else(|| SparrowError::InvalidZkey("signed-window bit count overflow".into()))?;
+        let recoding_bits = windows.checked_mul(window_bits).ok_or_else(|| {
+            StreamingError::InvalidZkey("signed-window bit count overflow".into())
+        })?;
         // A padded top bit is necessary for signed recoding, but is not by
         // itself a field-generic proof that the final carry vanishes. SPARROW is
-        // fixed to BN254 Fr; its modulus and the allowed 4..=16 widths satisfy
-        // that stronger invariant, which the recoder tests exercise directly.
+        // fixed to BN254 Fr; its modulus and every width it can select (explicit
+        // 4..=16, or 3..=14 from the adaptive policy) satisfy that stronger
+        // invariant, which the recoder tests exercise directly for 3..=16.
         if recoding_bits <= Fr::MODULUS_BIT_SIZE as usize {
             return invalid("signed-window recoding needs a carry bit");
         }
-        let bucket_count = 1_usize << (window_bits - 1);
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(windows)
-            .map_err(|_| SparrowError::InvalidZkey("cannot allocate MSM windows".into()))?;
+            .map_err(|_| StreamingError::InvalidZkey("cannot allocate MSM windows".into()))?;
         for _ in 0..windows {
-            let mut window = Vec::new();
-            window
-                .try_reserve_exact(bucket_count)
-                .map_err(|_| SparrowError::InvalidZkey("cannot allocate MSM buckets".into()))?;
-            window.resize(bucket_count, G::Group::zero());
-            buckets.push(window);
+            buckets.push(W::try_new(window_bits).ok_or_else(|| {
+                StreamingError::InvalidZkey("cannot allocate MSM buckets".into())
+            })?);
         }
         Ok(Self {
             scalars,
@@ -1133,10 +1204,12 @@ where
             chunk_points: config.msm_chunk_points,
             first: None,
             last: None,
+            #[cfg(feature = "parallel")]
+            parallel_min_records: PARALLEL_DECODE_MIN_RECORDS,
         })
     }
 
-    fn push(&mut self, mut bytes: &[u8]) -> Result<(), SparrowError> {
+    fn push(&mut self, mut bytes: &[u8]) -> Result<(), StreamingError> {
         if !self.carry.is_empty() {
             let needed = self.record_bytes - self.carry.len();
             let take = needed.min(bytes.len());
@@ -1148,15 +1221,79 @@ where
                 self.carry = Vec::with_capacity(self.record_bytes);
             }
         }
-        let mut records = bytes.chunks_exact(self.record_bytes);
-        for record in &mut records {
-            self.process_record(record)?;
-        }
-        self.carry.extend_from_slice(records.remainder());
+        let whole = bytes.len() - bytes.len() % self.record_bytes;
+        self.process_records(&bytes[..whole])?;
+        self.carry.extend_from_slice(&bytes[whole..]);
         Ok(())
     }
 
-    fn process_record(&mut self, record: &[u8]) -> Result<(), SparrowError> {
+    /// Decode whole records in order. Under `parallel`, runs of records are
+    /// decoded and converted to the buckets' representation on the Rayon
+    /// pool. A run never extends past the free space of the current chunk,
+    /// so every chunk holds the same pairs in the same order, and is
+    /// accumulated at the same point, as with the serial loop.
+    fn process_records(&mut self, mut bytes: &[u8]) -> Result<(), StreamingError> {
+        while !bytes.is_empty() {
+            let records = bytes.len() / self.record_bytes;
+            #[cfg(feature = "parallel")]
+            let run = records.min(self.chunk_points - self.pairs.len());
+            #[cfg(not(feature = "parallel"))]
+            let run = records;
+            let (head, tail) = bytes.split_at(run * self.record_bytes);
+            #[cfg(feature = "parallel")]
+            if run >= self.parallel_min_records {
+                self.process_run(head)?;
+                bytes = tail;
+                continue;
+            }
+            for record in head.chunks_exact(self.record_bytes) {
+                self.process_record(record)?;
+            }
+            bytes = tail;
+        }
+        Ok(())
+    }
+
+    /// [`Self::process_record`] for a run of whole records that fits in the
+    /// current chunk, decoded in parallel.
+    #[cfg(feature = "parallel")]
+    fn process_run(&mut self, bytes: &[u8]) -> Result<(), StreamingError> {
+        let count = bytes.len() / self.record_bytes;
+        if count > self.expected - self.seen {
+            return invalid("query contains too many points");
+        }
+        if self.first.is_none() {
+            self.first = Some((self.decode)(&bytes[..self.record_bytes])?);
+        }
+        self.last = Some((self.decode)(&bytes[bytes.len() - self.record_bytes..])?);
+        let start = self.scalar_offset + self.seen;
+        let scalars = &self.scalars[start..start + count];
+        let (decode, record_bytes) = (self.decode, self.record_bytes);
+        let parts = bytes
+            .par_chunks(DECODE_TASK_RECORDS * record_bytes)
+            .zip(scalars.par_chunks(DECODE_TASK_RECORDS))
+            .map(|(records, scalars)| {
+                let mut pairs = Vec::with_capacity(scalars.len());
+                for (record, scalar) in records.chunks_exact(record_bytes).zip(scalars) {
+                    let point = decode(record)?;
+                    if !point.is_zero() && !scalar.is_zero() {
+                        pairs.push((W::base(&point), scalar.into_bigint()));
+                    }
+                }
+                Ok(pairs)
+            })
+            .collect::<Result<Vec<_>, StreamingError>>()?;
+        self.seen += count;
+        for pairs in parts {
+            self.pairs.extend(pairs);
+        }
+        if self.pairs.len() == self.chunk_points {
+            self.flush();
+        }
+        Ok(())
+    }
+
+    fn process_record(&mut self, record: &[u8]) -> Result<(), StreamingError> {
         if self.seen >= self.expected {
             return invalid("query contains too many points");
         }
@@ -1168,7 +1305,7 @@ where
         let scalar = self.scalars[self.scalar_offset + self.seen];
         self.seen += 1;
         if !point.is_zero() && !scalar.is_zero() {
-            self.pairs.push((point, scalar.into_bigint()));
+            self.pairs.push((W::base(&point), scalar.into_bigint()));
             if self.pairs.len() == self.chunk_points {
                 self.flush();
             }
@@ -1180,35 +1317,11 @@ where
         if self.pairs.is_empty() {
             return;
         }
-        let pairs = &self.pairs;
-        let window_bits = self.window_bits;
-        #[cfg(feature = "parallel")]
-        self.buckets
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(window, buckets)| {
-                accumulate_signed_window(buckets, pairs, window_bits, window)
-            });
-        #[cfg(not(feature = "parallel"))]
-        {
-            let windows = self.buckets.len();
-            let mut signed_digits = (0..windows)
-                .map(|_| Vec::with_capacity(pairs.len()))
-                .collect::<Vec<_>>();
-            for (_, scalar) in pairs {
-                for_each_signed_window(scalar, window_bits, windows, |window, digit| {
-                    signed_digits[window].push(digit);
-                });
-            }
-            self.buckets
-                .iter_mut()
-                .zip(&signed_digits)
-                .for_each(|(buckets, digits)| accumulate_signed_digits(buckets, pairs, digits));
-        }
+        accumulate_affine_windows(&mut self.buckets, &self.pairs, self.window_bits);
         self.pairs.clear();
     }
 
-    fn finish(mut self) -> Result<G::Group, SparrowError> {
+    fn finish(mut self) -> Result<Projective<W::Curve>, StreamingError> {
         if !self.carry.is_empty() || self.seen != self.expected {
             return invalid("query point count mismatch");
         }
@@ -1224,51 +1337,117 @@ where
             return invalid("invalid query endpoint");
         }
         self.flush();
-        Ok(reduce_windows::<G>(&self.buckets, self.window_bits))
+        Ok(crate::msm::reduce_affine_windows(
+            &self.buckets,
+            self.window_bits,
+        ))
+    }
+}
+
+/// Stream a zkey-encoded G1 query section through SPARROW's bucket
+/// accumulator, `push_bytes` at a time, exactly as `StreamingProofBuilder`
+/// does. Benchmark support only.
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub fn bench_query_msm_g1(
+    section: &[u8],
+    scalars: Arc<[Fr]>,
+    config: StreamingConfig,
+    push_bytes: usize,
+) -> Result<G1Projective, StreamingError> {
+    let count = section.len() / G1_BYTES;
+    let query = QueryAccumulator::<G1Windows>::new(
+        scalars,
+        0,
+        count,
+        G1_BYTES,
+        decode_g1,
+        valid_g1,
+        config.validate()?,
+    )?;
+    bench_stream_query(query, section, push_bytes)
+}
+
+/// G2 counterpart of [`bench_query_msm_g1`].
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub fn bench_query_msm_g2(
+    section: &[u8],
+    scalars: Arc<[Fr]>,
+    config: StreamingConfig,
+    push_bytes: usize,
+) -> Result<G2Projective, StreamingError> {
+    let count = section.len() / G2_BYTES;
+    let query = QueryAccumulator::<G2Windows>::new(
+        scalars,
+        0,
+        count,
+        G2_BYTES,
+        decode_g2,
+        valid_g2,
+        config.validate()?,
+    )?;
+    bench_stream_query(query, section, push_bytes)
+}
+
+#[cfg(feature = "bench")]
+fn bench_stream_query<W: WindowBuckets>(
+    mut query: QueryAccumulator<W>,
+    section: &[u8],
+    push_bytes: usize,
+) -> Result<Projective<W::Curve>, StreamingError> {
+    for chunk in section.chunks(push_bytes.max(1)) {
+        query.push(chunk)?;
+    }
+    query.finish()
+}
+
+/// Fold one chunk of `(base, scalar)` pairs into every signed window's affine
+/// buckets, leaving only the buckets resident. Shared by the streaming prover
+/// and `phase_bench`, so the benchmark times the production kernel.
+fn accumulate_affine_windows<W: WindowBuckets>(
+    buckets: &mut [W],
+    pairs: &[(W::Base, BigInt<4>)],
+    window_bits: usize,
+) {
+    #[cfg(feature = "parallel")]
+    buckets
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(window, buckets)| {
+            for (base, scalar) in pairs {
+                buckets.add_digit(signed_window_digit(scalar, window_bits, window), base);
+            }
+            buckets.finish();
+            buckets.release_scratch();
+        });
+    #[cfg(not(feature = "parallel"))]
+    {
+        let windows = buckets.len();
+        let mut signed_digits = (0..windows)
+            .map(|_| Vec::with_capacity(pairs.len()))
+            .collect::<Vec<_>>();
+        for (_, scalar) in pairs {
+            for_each_signed_window(scalar, window_bits, windows, |window, digit| {
+                signed_digits[window].push(digit);
+            });
+        }
+        for (buckets, digits) in buckets.iter_mut().zip(&signed_digits) {
+            for ((base, _), &digit) in pairs.iter().zip(digits) {
+                buckets.add_digit(digit, base);
+            }
+            buckets.finish();
+            buckets.release_scratch();
+        }
     }
 }
 
 fn resolve_window_bits(configured: usize, points: usize) -> usize {
-    if configured != SparrowConfig::ADAPTIVE_WINDOW_BITS {
+    if configured != StreamingConfig::ADAPTIVE_WINDOW_BITS {
         return configured;
     }
 
     crate::msm::adaptive_window_bits(points)
-}
-
-#[cfg(not(feature = "parallel"))]
-fn accumulate_signed_digits<G>(buckets: &mut [G::Group], pairs: &[(G, BigInt<4>)], digits: &[i16])
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G>,
-{
-    for ((base, _), digit) in pairs.iter().zip(digits) {
-        match digit.cmp(&0) {
-            std::cmp::Ordering::Greater => buckets[*digit as usize - 1] += base,
-            std::cmp::Ordering::Less => buckets[digit.unsigned_abs() as usize - 1] -= base,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-}
-
-#[cfg(feature = "parallel")]
-fn accumulate_signed_window<G>(
-    buckets: &mut [G::Group],
-    pairs: &[(G, BigInt<4>)],
-    width: usize,
-    window: usize,
-) where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G> + SubAssign<&'a G>,
-{
-    for (base, scalar) in pairs {
-        let digit = signed_window_digit(scalar, width, window);
-        match digit.cmp(&0) {
-            std::cmp::Ordering::Greater => buckets[digit as usize - 1] += base,
-            std::cmp::Ordering::Less => buckets[digit.unsigned_abs() as usize - 1] -= base,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
 }
 
 #[cfg(any(not(feature = "parallel"), test))]
@@ -1286,14 +1465,6 @@ fn signed_window_digit(scalar: &BigInt<4>, width: usize, window: usize) -> i16 {
     crate::msm::signed_window_digit(scalar, width, window)
 }
 
-fn reduce_windows<G>(buckets: &[Vec<G::Group>], width: usize) -> G::Group
-where
-    G: AffineRepr<ScalarField = Fr>,
-    for<'a> G::Group: AddAssign<&'a G::Group>,
-{
-    crate::msm::reduce_bucket_windows::<G>(buckets, width)
-}
-
 fn valid_g1(point: &G1Affine) -> bool {
     point.is_zero() || (point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve())
 }
@@ -1302,27 +1473,27 @@ fn valid_g2(point: &G2Affine) -> bool {
     point.is_zero() || (point.is_on_curve() && point.is_in_correct_subgroup_assuming_on_curve())
 }
 
-fn take_g1(bytes: &[u8], offset: &mut usize) -> Result<G1Affine, SparrowError> {
+fn take_g1(bytes: &[u8], offset: &mut usize) -> Result<G1Affine, StreamingError> {
     let end = offset
         .checked_add(G1_BYTES)
-        .ok_or_else(|| SparrowError::InvalidZkey("point offset overflow".into()))?;
+        .ok_or_else(|| StreamingError::InvalidZkey("point offset overflow".into()))?;
     let point = decode_g1(
         bytes
             .get(*offset..end)
-            .ok_or_else(|| SparrowError::InvalidZkey("truncated G1 point".into()))?,
+            .ok_or_else(|| StreamingError::InvalidZkey("truncated G1 point".into()))?,
     )?;
     *offset = end;
     Ok(point)
 }
 
-fn take_g2(bytes: &[u8], offset: &mut usize) -> Result<G2Affine, SparrowError> {
+fn take_g2(bytes: &[u8], offset: &mut usize) -> Result<G2Affine, StreamingError> {
     let end = offset
         .checked_add(G2_BYTES)
-        .ok_or_else(|| SparrowError::InvalidZkey("point offset overflow".into()))?;
+        .ok_or_else(|| StreamingError::InvalidZkey("point offset overflow".into()))?;
     let point = decode_g2(
         bytes
             .get(*offset..end)
-            .ok_or_else(|| SparrowError::InvalidZkey("truncated G2 point".into()))?,
+            .ok_or_else(|| StreamingError::InvalidZkey("truncated G2 point".into()))?,
     )?;
     *offset = end;
     Ok(point)
@@ -1330,42 +1501,26 @@ fn take_g2(bytes: &[u8], offset: &mut usize) -> Result<G2Affine, SparrowError> {
 
 // These decoders deliberately avoid a subgroup check for every bulk query
 // point. They must only be reached after the caller has established the pinned
-// zkey/manifest trust boundary documented on `SparrowProofBuilder`; query
+// zkey/manifest trust boundary documented on `StreamingProofBuilder`; query
 // endpoints and the verification key still receive explicit curve/subgroup
 // checks, and no proof is returned without arkworks Groth16 verification.
-fn decode_g1(bytes: &[u8]) -> Result<G1Affine, SparrowError> {
-    if bytes.len() != G1_BYTES {
-        return invalid("truncated G1 point");
+fn decode_g1(bytes: &[u8]) -> Result<G1Affine, StreamingError> {
+    if bytes.len() != 64 {
+        return invalid("invalid G1 point width");
     }
-    let x = Fq::new_unchecked(limbs(&bytes[..32])?);
-    let y = Fq::new_unchecked(limbs(&bytes[32..])?);
-    Ok(if x.is_zero() && y.is_zero() {
-        G1Affine::identity()
-    } else {
-        G1Affine::new_unchecked(x, y)
-    })
+    crate::zkey::deserialize_g1(&mut &bytes[..])
+        .map_err(|_| StreamingError::InvalidZkey("noncanonical G1 coordinate".into()))
 }
 
-fn decode_g2(bytes: &[u8]) -> Result<G2Affine, SparrowError> {
-    if bytes.len() != G2_BYTES {
-        return invalid("truncated G2 point");
+fn decode_g2(bytes: &[u8]) -> Result<G2Affine, StreamingError> {
+    if bytes.len() != 128 {
+        return invalid("invalid G2 point width");
     }
-    let x = Fq2::new(
-        Fq::new_unchecked(limbs(&bytes[..32])?),
-        Fq::new_unchecked(limbs(&bytes[32..64])?),
-    );
-    let y = Fq2::new(
-        Fq::new_unchecked(limbs(&bytes[64..96])?),
-        Fq::new_unchecked(limbs(&bytes[96..])?),
-    );
-    Ok(if x.is_zero() && y.is_zero() {
-        G2Affine::identity()
-    } else {
-        G2Affine::new_unchecked(x, y)
-    })
+    crate::zkey::deserialize_g2(&mut &bytes[..])
+        .map_err(|_| StreamingError::InvalidZkey("noncanonical G2 coordinate".into()))
 }
 
-fn limbs(bytes: &[u8]) -> Result<BigInt<4>, SparrowError> {
+fn limbs(bytes: &[u8]) -> Result<BigInt<4>, StreamingError> {
     if bytes.len() != 32 {
         return invalid("invalid field element width");
     }
@@ -1373,29 +1528,29 @@ fn limbs(bytes: &[u8]) -> Result<BigInt<4>, SparrowError> {
     for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
         let limb: [u8; 8] = chunk
             .try_into()
-            .map_err(|_| SparrowError::InvalidZkey("invalid field limb width".into()))?;
+            .map_err(|_| StreamingError::InvalidZkey("invalid field limb width".into()))?;
         *word = u64::from_le_bytes(limb);
     }
     Ok(BigInt(words))
 }
 
-fn le_u32(bytes: &[u8]) -> Result<u32, SparrowError> {
+fn le_u32(bytes: &[u8]) -> Result<u32, StreamingError> {
     bytes
         .try_into()
         .map(u32::from_le_bytes)
-        .map_err(|_| SparrowError::InvalidZkey("invalid u32 width".into()))
+        .map_err(|_| StreamingError::InvalidZkey("invalid u32 width".into()))
 }
 
-fn le_u64(bytes: &[u8]) -> Result<u64, SparrowError> {
+fn le_u64(bytes: &[u8]) -> Result<u64, StreamingError> {
     bytes
         .try_into()
         .map(u64::from_le_bytes)
-        .map_err(|_| SparrowError::InvalidZkey("invalid u64 width".into()))
+        .map_err(|_| StreamingError::InvalidZkey("invalid u64 width".into()))
 }
 
-fn normalize_hash(value: &str) -> Result<String, SparrowError> {
+fn normalize_hash(value: &str) -> Result<String, StreamingError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(SparrowError::InvalidExpectedHash);
+        return Err(StreamingError::InvalidExpectedHash);
     }
     Ok(value.to_ascii_lowercase())
 }
@@ -1408,50 +1563,38 @@ fn hex_digest(value: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
-fn invalid<T>(message: impl Into<String>) -> Result<T, SparrowError> {
-    Err(SparrowError::InvalidZkey(message.into()))
+fn invalid<T>(message: impl Into<String>) -> Result<T, StreamingError> {
+    Err(StreamingError::InvalidZkey(message.into()))
 }
 
-pub fn authenticate_reader<R: Read + Seek>(
-    reader: &mut R,
-    expected_sha256: &str,
-    chunk_bytes: usize,
-) -> Result<(), SparrowError> {
-    let expected = normalize_hash(expected_sha256)?;
-    reader.seek(SeekFrom::Start(0))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; chunk_bytes.max(FILE_HEADER_BYTES)];
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let actual = hex_digest(hasher.finalize());
-    if actual != expected {
-        return Err(SparrowError::ZkeyHashMismatch { expected, actual });
-    }
-    Ok(())
-}
-
-pub fn prove_reader<R: Read>(
+/// Authenticate the whole file and each subsequently exposed chunk before parsing.
+/// Non-seekable sources must use the independently pinned manifest adapter.
+pub fn prove_reader<R: Read + Seek>(
     reader: &mut R,
     assignment: &[Fr],
     expected_sha256: &str,
-    config: SparrowConfig,
-) -> Result<ProofBundle, SparrowError> {
+    config: StreamingConfig,
+) -> Result<ProofBundle, StreamingError> {
     prove_reader_owned(reader, assignment.to_vec(), expected_sha256, config)
 }
 
 /// Owned-assignment variant that avoids retaining and copying a large witness.
-pub fn prove_reader_owned<R: Read>(
+pub fn prove_reader_owned<R: Read + Seek>(
     reader: &mut R,
     assignment: Vec<Fr>,
     expected_sha256: &str,
-    config: SparrowConfig,
-) -> Result<ProofBundle, SparrowError> {
-    let mut builder = SparrowProofBuilder::new(assignment, expected_sha256, config)?;
+    config: StreamingConfig,
+) -> Result<ProofBundle, StreamingError> {
+    let config = config.validate()?;
+    let mut authenticated =
+        crate::authenticated_reader::AuthenticatedReader::new(reader, expected_sha256)
+            .map_err(authentication_error)?;
+    let length = authenticated.seek(SeekFrom::End(0))?;
+    authenticated.seek(SeekFrom::Start(0))?;
+    let reader = &mut authenticated;
+    let mut builder =
+        StreamingProofBuilder::new_manifest_authenticated(assignment, expected_sha256, config)?
+            .with_authenticated_length(length);
     let mut file_header = [0_u8; FILE_HEADER_BYTES];
     read_exact_stream(reader, &mut file_header)?;
     builder.begin_zkey(&file_header)?;
@@ -1464,7 +1607,7 @@ pub fn prove_reader_owned<R: Read>(
         builder.begin_section(&section_header)?;
         while remaining != 0 {
             let wanted = usize::try_from(remaining.min(buffer.len() as u64))
-                .map_err(|_| SparrowError::InvalidZkey("section size overflow".into()))?;
+                .map_err(|_| StreamingError::InvalidZkey("section size overflow".into()))?;
             read_exact_stream(reader, &mut buffer[..wanted])?;
             builder.push_section_chunk(&buffer[..wanted])?;
             remaining -= wanted as u64;
@@ -1478,15 +1621,28 @@ pub fn prove_reader_owned<R: Read>(
     builder.finish()
 }
 
-fn read_exact_stream<R: Read>(reader: &mut R, mut bytes: &mut [u8]) -> Result<(), SparrowError> {
+fn read_exact_stream<R: Read>(reader: &mut R, mut bytes: &mut [u8]) -> Result<(), StreamingError> {
     while !bytes.is_empty() {
         let count = reader.read(bytes)?;
         if count == 0 {
-            return Err(SparrowError::UnexpectedEof);
+            return Err(StreamingError::UnexpectedEof);
         }
         bytes = &mut bytes[count..];
     }
     Ok(())
+}
+
+/// Preserve the typed pin and I/O failures of the shared whole-file pass.
+fn authentication_error(error: crate::ProverError) -> StreamingError {
+    use crate::ProverError as P;
+    match error {
+        P::InvalidExpectedHash => StreamingError::InvalidExpectedHash,
+        P::ZkeyHashMismatch { expected, actual } => {
+            StreamingError::ZkeyHashMismatch { expected, actual }
+        }
+        P::ZkeyIo(error) => StreamingError::Io(error),
+        error => StreamingError::InvalidZkey(format!("zkey authentication failed: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -1495,20 +1651,304 @@ mod tests {
     use ark_ff::{PrimeField, UniformRand};
     use num_bigint::{BigInt as NumBigInt, Sign};
 
-    use super::{SparrowConfig, for_each_signed_window, resolve_window_bits, signed_window_digit};
+    use super::{
+        StreamingConfig, for_each_signed_window, resolve_window_bits, signed_window_digit,
+    };
+
+    #[test]
+    fn rejects_non_one_assignments_before_streaming() {
+        for assignment in [vec![], vec![Fr::from(0_u64)], vec![Fr::from(2_u64)]] {
+            assert!(
+                super::StreamingProofBuilder::new(
+                    assignment,
+                    &"00".repeat(32),
+                    StreamingConfig::default()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// The whole-file pass must surface the same typed pin and I/O errors that
+    /// callers matched before it moved into the shared authenticated reader.
+    #[test]
+    fn whole_file_authentication_keeps_typed_errors() {
+        use std::io::{Cursor, Read, Seek, SeekFrom};
+
+        use super::{StreamingError, prove_reader_owned};
+
+        let key = include_bytes!("../testdata/multiplier.zkey");
+        let assignment = || vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)];
+        let prove = |pin: &str| {
+            prove_reader_owned(
+                &mut Cursor::new(key),
+                assignment(),
+                pin,
+                StreamingConfig::default(),
+            )
+        };
+        assert!(matches!(
+            prove(&"00".repeat(32)),
+            Err(StreamingError::ZkeyHashMismatch { .. })
+        ));
+        assert!(matches!(
+            prove("not-a-digest"),
+            Err(StreamingError::InvalidExpectedHash)
+        ));
+
+        struct Failing;
+        impl Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk failed"))
+            }
+        }
+        impl Seek for Failing {
+            fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+                Ok(0)
+            }
+        }
+        assert!(matches!(
+            prove_reader_owned(
+                &mut Failing,
+                assignment(),
+                &"00".repeat(32),
+                StreamingConfig::default(),
+            ),
+            Err(StreamingError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn untrusted_domain_is_rejected_before_allocation() {
+        let key = include_bytes!("../testdata/multiplier.zkey");
+        let mut cursor = 12;
+        while cursor < key.len() {
+            let id = u32::from_le_bytes(key[cursor..cursor + 4].try_into().unwrap());
+            let size =
+                u64::from_le_bytes(key[cursor + 4..cursor + 12].try_into().unwrap()) as usize;
+            if id == 2 {
+                let original = &key[cursor + 12..cursor + 12 + size];
+                for (offset, count) in [
+                    (84, 64),
+                    (148, 64),
+                    (212, 128),
+                    (340, 128),
+                    (468, 64),
+                    (532, 128),
+                ] {
+                    let mut identity = original.to_vec();
+                    identity[offset..offset + count].fill(0);
+                    assert!(super::GrothHeader::parse(&identity).is_err());
+                }
+                let mut builder = super::StreamingProofBuilder::new(
+                    vec![Fr::from(1_u64); 4],
+                    &"00".repeat(32),
+                    StreamingConfig::default(),
+                )
+                .unwrap()
+                .with_authenticated_length(1);
+                builder.begin_zkey(&key[..12]).unwrap();
+                builder.begin_section(&key[cursor..cursor + 12]).unwrap();
+                builder.push_section_chunk(original).unwrap();
+                assert!(
+                    builder
+                        .end_section()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("authenticated zkey length")
+                );
+                let mut header = original.to_vec();
+                header[80..84].copy_from_slice(&(1u32 << 31).to_le_bytes());
+                assert!(super::GrothHeader::parse(&header).is_err());
+                return;
+            }
+            cursor += 12 + size;
+        }
+        panic!("missing fixture header");
+    }
+
+    /// Streamed affine buckets equal arkworks' MSM across chunk boundaries,
+    /// with record-splitting push sizes, a scalar offset, repeated bases,
+    /// P and -P, identity bases, zero scalars, and repeated scalars.
+    #[test]
+    fn streamed_query_msm_matches_arkworks_for_g1_and_g2() {
+        use std::sync::Arc;
+
+        use ark_bn254::{G1Projective, G2Projective};
+        use ark_ec::{
+            CurveGroup, VariableBaseMSM,
+            short_weierstrass::{Affine, SWCurveConfig},
+        };
+
+        use super::{
+            G1_BYTES, G1Windows, G2_BYTES, G2Windows, QueryAccumulator, decode_g1, decode_g2,
+            valid_g1, valid_g2,
+        };
+
+        fn adversarial_bases<P: SWCurveConfig<ScalarField = Fr>>(
+            size: usize,
+            rng: &mut impl ark_std::rand::Rng,
+        ) -> Vec<Affine<P>> {
+            let p = Affine::<P>::rand(rng);
+            let double = (p + p).into_affine();
+            (0..size)
+                .map(|index| match index % 7 {
+                    0 | 4 => p,
+                    1 => -p,
+                    3 => Affine::identity(),
+                    6 => double,
+                    _ => Affine::rand(rng),
+                })
+                .collect()
+        }
+
+        let mut rng = ark_std::test_rng();
+        let (offset, size) = (3, 240);
+        let mut scalars = (0..offset + size)
+            .map(|_| Fr::rand(&mut rng))
+            .collect::<Vec<_>>();
+        for index in offset..offset + size {
+            match index % 5 {
+                0 => scalars[index] = Fr::from(0_u64),
+                1 => scalars[index] = Fr::from(1_u64),
+                2 => scalars[index] = scalars[index - 1],
+                _ => {}
+            }
+        }
+        let bigints = scalars[offset..]
+            .iter()
+            .map(|scalar| scalar.into_bigint())
+            .collect::<Vec<_>>();
+        let scalars: Arc<[Fr]> = scalars.into();
+
+        let g1 = adversarial_bases::<ark_bn254::g1::Config>(size, &mut rng);
+        let g2 = adversarial_bases::<ark_bn254::g2::Config>(size, &mut rng);
+        let g1_bytes = g1
+            .iter()
+            .flat_map(|point| point.x.0.0.into_iter().chain(point.y.0.0))
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let g2_bytes = g2
+            .iter()
+            .flat_map(|point| [point.x.c0, point.x.c1, point.y.c0, point.y.c1])
+            .flat_map(|coordinate| coordinate.0.0)
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let expected_g1 = G1Projective::msm_bigint(&g1, &bigints);
+        let expected_g2 = G2Projective::msm_bigint(&g2, &bigints);
+        assert!(expected_g1 != G1Projective::default() && expected_g2 != G2Projective::default());
+
+        let adaptive = StreamingConfig::ADAPTIVE_WINDOW_BITS;
+        // Pushes that split records, that carry runs of whole records (with
+        // and without a split record), and the whole section at once; with
+        // `parallel`, runs of 1 and 3 records already decode on the pool.
+        for (pushed_records, extra_bytes) in [(1, 33), (13, 5), (size, 0)] {
+            for parallel_min_records in [1, 3, usize::MAX] {
+                for (window_bits, msm_chunk_points) in
+                    [(4, 7), (8, 64), (13, 1_000), (16, 33), (adaptive, 5)]
+                {
+                    let config = StreamingConfig {
+                        window_bits,
+                        msm_chunk_points,
+                        ..StreamingConfig::default()
+                    };
+                    let label = format!(
+                        "{config:?}, {pushed_records} records + {extra_bytes} bytes per push, runs from {parallel_min_records}"
+                    );
+                    let mut query = QueryAccumulator::<G1Windows>::new(
+                        Arc::clone(&scalars),
+                        offset,
+                        size,
+                        G1_BYTES,
+                        decode_g1,
+                        valid_g1,
+                        config,
+                    )
+                    .unwrap();
+                    #[cfg(feature = "parallel")]
+                    {
+                        query.parallel_min_records = parallel_min_records;
+                    }
+                    for chunk in g1_bytes.chunks(pushed_records * G1_BYTES + extra_bytes) {
+                        query.push(chunk).unwrap();
+                    }
+                    assert_eq!(query.finish().unwrap(), expected_g1, "G1 {label}");
+
+                    let mut query = QueryAccumulator::<G2Windows>::new(
+                        Arc::clone(&scalars),
+                        offset,
+                        size,
+                        G2_BYTES,
+                        decode_g2,
+                        valid_g2,
+                        config,
+                    )
+                    .unwrap();
+                    #[cfg(feature = "parallel")]
+                    {
+                        query.parallel_min_records = parallel_min_records;
+                    }
+                    for chunk in g2_bytes.chunks(pushed_records * G2_BYTES + extra_bytes) {
+                        query.push(chunk).unwrap();
+                    }
+                    assert_eq!(query.finish().unwrap(), expected_g2, "G2 {label}");
+                }
+            }
+        }
+
+        // A noncanonical coordinate and an excess record are rejected on
+        // either decode path.
+        let mut bad = g1_bytes.clone();
+        bad[G1_BYTES * 100..G1_BYTES * 100 + 32].fill(0xff);
+        for parallel_min_records in [1, usize::MAX] {
+            let config = StreamingConfig::default();
+            let new_query = |count| {
+                QueryAccumulator::<G1Windows>::new(
+                    Arc::clone(&scalars),
+                    offset,
+                    count,
+                    G1_BYTES,
+                    decode_g1,
+                    valid_g1,
+                    config,
+                )
+                .unwrap()
+            };
+            let mut query = new_query(size);
+            #[cfg(feature = "parallel")]
+            {
+                query.parallel_min_records = parallel_min_records;
+            }
+            assert!(
+                query.push(&bad).is_err(),
+                "noncanonical, runs from {parallel_min_records}"
+            );
+            let mut query = new_query(size - 1);
+            #[cfg(feature = "parallel")]
+            {
+                query.parallel_min_records = parallel_min_records;
+            }
+            assert!(
+                query.push(&g1_bytes).is_err(),
+                "excess, runs from {parallel_min_records}"
+            );
+        }
+    }
 
     #[test]
     fn adaptive_window_tracks_query_size() {
-        let adaptive = SparrowConfig::ADAPTIVE_WINDOW_BITS;
-        assert_eq!(resolve_window_bits(adaptive, 32_768), 8);
-        assert_eq!(resolve_window_bits(adaptive, 32_769), 9);
-        assert_eq!(resolve_window_bits(adaptive, 65_537), 10);
-        assert_eq!(resolve_window_bits(adaptive, 262_145), 11);
-        assert_eq!(resolve_window_bits(adaptive, 524_289), 12);
-        assert_eq!(resolve_window_bits(adaptive, 2_097_153), 13);
+        let adaptive = StreamingConfig::ADAPTIVE_WINDOW_BITS;
+        assert_eq!(resolve_window_bits(adaptive, 4_095), 8);
+        assert_eq!(resolve_window_bits(adaptive, 4_096), 10);
+        assert_eq!(resolve_window_bits(adaptive, 16_384), 12);
+        assert_eq!(resolve_window_bits(adaptive, 65_536), 12);
+        assert_eq!(resolve_window_bits(adaptive, 65_537), 12);
+        assert_eq!(resolve_window_bits(adaptive, 524_288), 12);
+        assert_eq!(resolve_window_bits(adaptive, 524_289), 14);
+        assert_eq!(resolve_window_bits(adaptive, usize::MAX), 14);
         assert_eq!(resolve_window_bits(7, usize::MAX), 7);
 
-        let native = SparrowConfig::native_adaptive();
+        let native = StreamingConfig::native_adaptive();
         assert!(native.uses_adaptive_window());
         assert_eq!(native.msm_chunk_points, 524_288);
     }
@@ -1525,7 +1965,8 @@ mod tests {
         ];
         scalars.extend((0..128).map(|_| Fr::rand(&mut rng)));
 
-        for width in 4..=16 {
+        // Width 3 is reachable through the adaptive policy for tiny queries.
+        for width in 3..=16 {
             let windows = (Fr::MODULUS_BIT_SIZE as usize).div_ceil(width);
             for scalar in &scalars {
                 let mut reconstructed = NumBigInt::from(0);

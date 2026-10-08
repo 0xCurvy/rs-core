@@ -77,6 +77,28 @@ const allowedStaticPrefixes = [
   "/crates/prover/pkg-web/",
   "/crates/prover/pkg-web-threads/",
 ];
+// Optional A/B builds: serve a prover package from another directory under the
+// same URL, e.g. one server per build on separate ports. Paths stay confined to
+// the given directory; a missing directory fails at startup.
+const packageOverrides = new Map();
+for (const [prefix, variable] of [
+  ["/crates/prover/pkg-web/", "CURVY_MOBILE_PKG_WEB"],
+  ["/crates/prover/pkg-web-threads/", "CURVY_MOBILE_PKG_WEB_THREADS"],
+]) {
+  const value = process.env[variable];
+  if (value) packageOverrides.set(prefix, normalize(await realpath(resolve(value))));
+}
+const buildLabel = process.env.CURVY_MOBILE_BUILD_LABEL || null;
+// Identify the served prover builds in every report, so A/B runs can't be mixed up.
+publicConfig.build = { label: buildLabel };
+for (const [prefix, key] of [
+  ["/crates/prover/pkg-web/", "portableWasmSha256"],
+  ["/crates/prover/pkg-web-threads/", "threadedWasmSha256"],
+]) {
+  const directory = packageOverrides.get(prefix) ?? resolve(repositoryRoot, `.${prefix}`);
+  publicConfig.build[key] = await hashFile(resolve(directory, "curvy_prover_bg.wasm")).catch(() => null);
+}
+if (buildLabel) publicConfig.title = `${publicConfig.title} [${buildLabel}]`;
 
 const requestHandler = async (request, response) => {
   setIsolationHeaders(response);
@@ -147,6 +169,7 @@ server.listen(port, host, () => {
   const harnessPath = "/crates/prover/js/mobile-harness.html";
   const tokenQuery = `?token=${encodeURIComponent(accessToken)}`;
   console.log(`Curvy mobile harness (${publicConfig.profiles.length} profile(s))`);
+  console.log(`Build: ${JSON.stringify(publicConfig.build)}`);
   console.log(`Local:   ${scheme}://localhost:${port}${harnessPath}${tokenQuery}`);
   if (!isLoopbackHost(host)) {
     for (const address of networkAddresses()) {
@@ -210,6 +233,11 @@ async function prepareConfig(config) {
       publicProfile.artifacts[kind] = { url, size: metadata.size, sha256 };
     }
     publicProfile.sourceGraphSha256 = publicProfile.artifacts.graph.sha256;
+    // Optional trusted digest of the derived SAGE program for this graph,
+    // compiler version, and limits profile. Without it every run recompiles.
+    publicProfile.sageProgramSha256 = profile.sageProgramSha256 == null
+      ? null
+      : normalizedHash(profile.sageProgramSha256, `${profile.id}.sageProgramSha256`);
     if (profile.sourceGraphSha256 !== undefined) {
       const legacySourceHash = normalizedHash(
         profile.sourceGraphSha256,
@@ -252,6 +280,16 @@ async function resolveStaticFile(pathname) {
   const exactFile = allowedStaticFiles.has(adjusted);
   const allowedPrefix = allowedStaticPrefixes.find((prefix) => adjusted.startsWith(prefix));
   if (!exactFile && !allowedPrefix) throw new Error("static path is not allowlisted");
+  const override = allowedPrefix && packageOverrides.get(allowedPrefix);
+  if (override) {
+    const overrideFile = normalize(resolve(override, `.${adjusted.slice(allowedPrefix.length - 1)}`));
+    if (!overrideFile.startsWith(`${override}${sep}`)) throw new Error("forbidden package path");
+    const realOverrideFile = normalize(await realpath(overrideFile));
+    if (!isWithin(override, realOverrideFile) || realOverrideFile === override) {
+      throw new Error("static symlink leaves its package directory");
+    }
+    return realOverrideFile;
+  }
   const file = normalize(resolve(repositoryRoot, `.${adjusted}`));
   if (exactFile) {
     const expected = normalize(resolve(repositoryRoot, `.${adjusted}`));

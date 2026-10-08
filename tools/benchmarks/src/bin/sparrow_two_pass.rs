@@ -1,10 +1,9 @@
 //! Measure the two-pass SPARROW fallback from a SIGNET source graph.
 
-use std::{env, fs, fs::File, io::Seek, io::SeekFrom, time::Instant};
+use std::{env, fs, fs::File, time::Instant};
 
-use curvy_prover::sparrow::{
-    SparrowConfig, SparrowProver, authenticate_reader, prove_reader_owned,
-};
+use curvy_prover::sparrow::prove_reader_owned;
+use curvy_prover::{StreamingConfig, StreamingProver};
 use curvy_witness::Limits;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -21,14 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "batch" => Limits::batch_prover(),
         _ => return Err("limits must be client or batch".into()),
     };
-    let config = SparrowConfig::default();
+    let config = StreamingConfig::default();
     let total_started = Instant::now();
 
     let graph_read_started = Instant::now();
     let graph = fs::read(&args[3])?;
     let graph_read_ms = graph_read_started.elapsed().as_secs_f64() * 1_000.0;
     let graph_compile_started = Instant::now();
-    let prover = SparrowProver::from_signet_bytes(&graph, &args[4], &args[2], limits, config)?;
+    let prover = StreamingProver::from_signet_bytes(&graph, &args[4], &args[2], limits, config)?;
     let graph_compile_ms = graph_compile_started.elapsed().as_secs_f64() * 1_000.0;
     drop(graph);
 
@@ -36,22 +35,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let witness_started = Instant::now();
     let assignment = prover.calculate_witness_json(&input)?;
     let witness_ms = witness_started.elapsed().as_secs_f64() * 1_000.0;
+    let prover_mode = prover.mode();
+    let profile = prover.profile();
     let sage_slots = prover.sage_slot_count();
     let assignment_size = prover.assignment_size();
     // This harness proves once. Releasing the compiled SAGE instruction stream
     // lets the allocator reuse that storage for FFT and MSM working sets.
     drop(prover);
 
+    // `prove_reader_owned` performs both passes itself: it hashes the whole
+    // zkey against the pin, then rewinds and rechecks each chunk while proving.
+    // The library exposes no boundary between them, so they are timed together.
     let mut zkey = File::open(&args[1])?;
-    let auth_started = Instant::now();
-    authenticate_reader(&mut zkey, &args[2], config.io_chunk_bytes)?;
-    let auth_ms = auth_started.elapsed().as_secs_f64() * 1_000.0;
-    zkey.seek(SeekFrom::Start(0))?;
-
-    let proof_started = Instant::now();
+    let two_pass_started = Instant::now();
     let bundle = prove_reader_owned(&mut zkey, assignment, &args[2], config)?;
-    let proof_ms = proof_started.elapsed().as_secs_f64() * 1_000.0;
+    let two_pass_ms = two_pass_started.elapsed().as_secs_f64() * 1_000.0;
 
+    println!("prover_mode={prover_mode}");
+    println!("profile={profile}");
     println!("threads={threads}");
     println!("zkey_bytes={}", fs::metadata(&args[1])?.len());
     println!("graph_bytes={}", fs::metadata(&args[3])?.len());
@@ -60,8 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("graph_read_ms={graph_read_ms:.3}");
     println!("graph_compile_ms={graph_compile_ms:.3}");
     println!("witness_ms={witness_ms:.3}");
-    println!("zkey_auth_pass_ms={auth_ms:.3}");
-    println!("sparrow_proof_and_self_verify_ms={proof_ms:.3}");
+    println!("zkey_auth_proof_and_self_verify_ms={two_pass_ms:.3}");
     println!("proof_json_bytes={}", bundle.proof_json.len());
     println!(
         "total_ms={:.3}",

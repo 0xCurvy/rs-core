@@ -4,10 +4,12 @@ use std::io::Cursor;
 
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_groth16::Proof;
-use curvy_prover::Prover;
-use curvy_prover::sparrow::{
-    SparrowConfig, SparrowError, SparrowProofBuilder, SparrowProver,
-    manifest::{ManifestProofStream, ZkeyChunkManifest, prove_reader_with_manifest_owned},
+use curvy_prover::sparrow::manifest::{
+    ManifestProofStream, ZkeyChunkManifest, prove_reader_with_manifest_owned,
+};
+use curvy_prover::{
+    Prover, ProverMode, SPARROW_PROFILE, StreamingConfig, StreamingError, StreamingProofBuilder,
+    StreamingProver,
 };
 use curvy_witness::Limits;
 use sha2::{Digest, Sha256};
@@ -53,30 +55,33 @@ fn release_validator_rejects_identity_anchor_points() {
 #[test]
 fn sage_and_sparrow_queries_produce_a_valid_proof() {
     let graph = multiplier_graph();
-    let prover = SparrowProver::from_signet_bytes(
+    let prover = StreamingProver::from_signet_bytes(
         &graph,
         &digest(&graph),
         ZKEY_SHA256,
         Limits::client(),
-        SparrowConfig {
+        StreamingConfig {
             window_bits: 6,
             msm_chunk_points: 2,
             io_chunk_bytes: 17,
         },
     )
     .expect("authenticated SAGE graph must compile");
+    assert_eq!(prover.mode(), ProverMode::Streaming);
+    assert_eq!(prover.mode().to_string(), "streaming");
+    assert_eq!(prover.profile(), SPARROW_PROFILE);
     assert!(prover.sage_slot_count() <= 3);
 
     let program = prover
         .compiled_sage_bytes()
         .expect("serialize authenticated SAGE graph");
-    let cached = SparrowProver::from_compiled_sage_bytes(
+    let cached = StreamingProver::from_compiled_sage_bytes(
         &program,
         &digest(&program),
         &digest(&graph),
         ZKEY_SHA256,
         Limits::client(),
-        SparrowConfig {
+        StreamingConfig {
             window_bits: 6,
             msm_chunk_points: 2,
             io_chunk_bytes: 17,
@@ -108,12 +113,12 @@ fn sage_and_sparrow_queries_produce_a_valid_proof() {
 #[test]
 fn incremental_builder_accepts_unaligned_chunks_and_rechecks_the_digest() {
     let assignment = vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)];
-    let config = SparrowConfig {
+    let config = StreamingConfig {
         window_bits: 6,
         msm_chunk_points: 2,
         io_chunk_bytes: 17,
     };
-    let mut builder = SparrowProofBuilder::new(assignment, ZKEY_SHA256, config).unwrap();
+    let mut builder = StreamingProofBuilder::new(assignment, ZKEY_SHA256, config).unwrap();
     builder.begin_zkey(&ZKEY[..12]).unwrap();
     let mut offset = 12;
     for _ in 0..10 {
@@ -132,7 +137,7 @@ fn incremental_builder_accepts_unaligned_chunks_and_rechecks_the_digest() {
 
     let mut corrupted = ZKEY.to_vec();
     *corrupted.last_mut().unwrap() ^= 1;
-    let mut builder = SparrowProofBuilder::new(
+    let mut builder = StreamingProofBuilder::new(
         vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)],
         ZKEY_SHA256,
         config,
@@ -153,7 +158,7 @@ fn incremental_builder_accepts_unaligned_chunks_and_rechecks_the_digest() {
     }
     assert!(matches!(
         builder.finish(),
-        Err(SparrowError::ZkeyHashMismatch { .. })
+        Err(StreamingError::ZkeyHashMismatch { .. })
     ));
 }
 
@@ -163,22 +168,22 @@ fn authenticated_chunk_manifest_enables_a_single_zkey_pass() {
         ZkeyChunkManifest::generate(&mut Cursor::new(ZKEY), 64 * 1024).unwrap();
     assert!(matches!(
         ZkeyChunkManifest::from_bytes(&manifest_bytes, &"00".repeat(32), ZKEY_SHA256),
-        Err(SparrowError::ManifestHashMismatch { .. })
+        Err(curvy_prover::artifacts::manifest::ArtifactError::ManifestHashMismatch { .. })
     ));
     assert!(matches!(
         ZkeyChunkManifest::from_bytes(&manifest_bytes, &manifest_sha, &"00".repeat(32)),
-        Err(SparrowError::ManifestZkeyHashMismatch { .. })
+        Err(curvy_prover::artifacts::manifest::ArtifactError::ManifestZkeyHashMismatch { .. })
     ));
     let manifest =
         ZkeyChunkManifest::from_bytes(&manifest_bytes, &manifest_sha, ZKEY_SHA256).unwrap();
     let assignment = vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)];
-    let config = SparrowConfig {
+    let config = StreamingConfig {
         window_bits: 6,
         msm_chunk_points: 2,
         io_chunk_bytes: 17,
     };
     let graph = multiplier_graph();
-    let prover = SparrowProver::from_signet_bytes(
+    let prover = StreamingProver::from_signet_bytes(
         &graph,
         &digest(&graph),
         ZKEY_SHA256,
@@ -204,7 +209,7 @@ fn authenticated_chunk_manifest_enables_a_single_zkey_pass() {
     }
     assert!(matches!(
         stream.finish(),
-        Err(SparrowError::ZkeyChunkHashMismatch { index: 0, .. })
+        Err(StreamingError::ZkeyChunkHashMismatch { index: 0, .. })
     ));
 }
 
@@ -224,7 +229,7 @@ fn manifest_advances_across_multiple_chunks_and_batches_authentication() {
         .verify_reader(&mut Cursor::new(&zkey))
         .expect("chunk table and whole digest agree");
     let assignment = vec![Fr::from(1), Fr::from(33), Fr::from(3), Fr::from(11)];
-    let config = SparrowConfig {
+    let config = StreamingConfig {
         window_bits: 6,
         msm_chunk_points: 2,
         io_chunk_bytes: 17,
@@ -242,6 +247,43 @@ fn manifest_advances_across_multiple_chunks_and_batches_authentication() {
         .finish()
         .expect("exact-chunk entry point must produce a proof");
 
+    // Exact chunks then the remainder through the partial-chunk path: under
+    // `parallel` the last exact chunk is still waiting to be parsed and must
+    // precede the partial bytes.
+    let mut mixed = ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
+    mixed
+        .push_complete_chunk(zkey[..64 * 1024].to_vec())
+        .expect("first exact chunk");
+    for chunk in zkey[64 * 1024..].chunks(1_000) {
+        mixed
+            .push(chunk)
+            .expect("partial pushes after an exact chunk");
+    }
+    mixed
+        .finish()
+        .expect("mixed entry points must produce a proof");
+
+    // A corrupted exact chunk is rejected by the push that carries it.
+    for corrupt_chunk in [1, 2] {
+        let mut corrupted = zkey.clone();
+        corrupted[corrupt_chunk * 64 * 1024] ^= 1;
+        let mut stream =
+            ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
+        let mut chunks = corrupted.chunks(64 * 1024);
+        for _ in 0..corrupt_chunk {
+            stream
+                .push_complete_chunk(chunks.next().unwrap().to_vec())
+                .expect("authentic chunk");
+        }
+        let error = stream
+            .push_complete_chunk(chunks.next().unwrap().to_vec())
+            .expect_err("corrupted exact chunk");
+        assert!(matches!(
+            error,
+            StreamingError::ZkeyChunkHashMismatch { index, .. } if index == corrupt_chunk
+        ));
+    }
+
     let mut truncated =
         ManifestProofStream::new(assignment.clone(), manifest.clone(), config).unwrap();
     truncated
@@ -249,7 +291,7 @@ fn manifest_advances_across_multiple_chunks_and_batches_authentication() {
         .expect("all complete chunks authenticate before the truncated tail");
     assert!(matches!(
         truncated.finish(),
-        Err(SparrowError::UnexpectedEof)
+        Err(StreamingError::UnexpectedEof)
     ));
 
     let bundle = prove_reader_with_manifest_owned(
@@ -275,7 +317,7 @@ fn manifest_advances_across_multiple_chunks_and_batches_authentication() {
         .expect_err("corruption in the second chunk must fail before parsing it");
     assert!(matches!(
         error,
-        SparrowError::ZkeyChunkHashMismatch { index: 1, .. }
+        StreamingError::ZkeyChunkHashMismatch { index: 1, .. }
     ));
 }
 

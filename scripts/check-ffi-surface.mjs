@@ -15,6 +15,7 @@ const required = {
     decryptAmountToken: "curvy_decrypt_amount_token",
     encryptAmountToken: "curvy_encrypt_amount_token",
     ephemeralPubKey: "curvy_ephemeral_pub_key",
+    ephemeralPubKeyBytes: "curvy_ephemeral_pub_key_bytes",
     get_meta: "curvy_get_meta",
     new_meta: "curvy_new_meta",
     noteId: "curvy_note_id",
@@ -38,6 +39,18 @@ const required = {
     viewerScan: "curvy_viewer_scan",
   },
   classes: {
+    SeedSigner: {
+      constructor: "curvy_seed_signer_new",
+      free: "curvy_seed_signer_free",
+      publicKey: "curvy_seed_signer_public_key",
+      sign: "curvy_seed_signer_sign",
+    },
+    ScalarSigner: {
+      constructor: "curvy_scalar_signer_new",
+      free: "curvy_scalar_signer_free",
+      publicKey: "curvy_scalar_signer_public_key",
+      sign: "curvy_scalar_signer_sign",
+    },
     MerkleTree: {
       constructor: "curvy_merkle_new",
       free: "curvy_merkle_free",
@@ -142,12 +155,15 @@ const required = {
       index: "curvy_viewer_scan",
       spendingPubKey: "curvy_viewer_scan",
     },
-    WasmCircuitProver: {
-      constructor: "curvy_circuit_prover_new",
-      free: "curvy_circuit_prover_free",
-      prove: "curvy_circuit_prover_prove",
-      numConstraints: "curvy_circuit_prover_num_constraints",
-      numPublic: "curvy_circuit_prover_num_public",
+    WasmResidentProver: {
+      constructor: "curvy_resident_prover_new",
+      free: "curvy_resident_prover_free",
+      prove: "curvy_resident_prover_prove",
+      numConstraints: "curvy_resident_prover_num_constraints",
+      numPublic: "curvy_resident_prover_num_public",
+      mode: "curvy_resident_prover_mode",
+      profile: "curvy_resident_prover_profile",
+      verifyingKeyDigest: "curvy_resident_prover_verifying_key_digest",
     },
     WasmProver: {
       constructor: "curvy_prover_new",
@@ -160,6 +176,7 @@ const required = {
       constructor: "curvy_witness_graph_new",
       free: "curvy_witness_graph_free",
       calculate: "curvy_witness_graph_calculate",
+      calculatePacked: "curvy_witness_graph_calculate_packed",
       assignmentSize: "curvy_witness_graph_assignment_size",
     },
   },
