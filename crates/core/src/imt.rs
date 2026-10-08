@@ -537,6 +537,36 @@ impl NotesFrontier {
         Ok(completed)
     }
 
+    /// Append one leaf and return its inclusion siblings in the tree as it
+    /// stands right after the append (`depth` values, bottom to top).
+    ///
+    /// A leaf that has just been appended has only completed subtrees to its
+    /// left and only empty ones to its right, so its path is this frontier and
+    /// the zero roots: no earlier leaf is needed. A prover that only ever
+    /// appends can therefore hold the frontier instead of the tree. The
+    /// siblings equal those of [`Imt::create_proof`] for the same leaf in the
+    /// same tree.
+    pub fn append_with_siblings(
+        &mut self,
+        leaf: Fr,
+    ) -> Result<(FrontierAppend, Vec<Fr>), TreeError> {
+        let leaf_index = self.leaf_count;
+        let siblings = (0..self.depth)
+            .map(|level| {
+                if (leaf_index >> level) & 1 == 0 {
+                    return Ok(self.zeroes[level]);
+                }
+                self.frontier[level].ok_or_else(|| {
+                    TreeError::InvalidSnapshot(format!(
+                        "frontier level {level} is empty for occupied leaf-count bit",
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let appended = self.append(leaf)?;
+        Ok((appended, siblings))
+    }
+
     /// [`NotesFrontier::append`] over a canonical big-endian 32-byte leaf.
     ///
     /// Every consumer reaching this type across a byte boundary - the wasm/TS
@@ -2186,6 +2216,65 @@ mod tests {
             frontier.append(Fr::from(65u64)),
             Err(TreeError::TreeFull { depth: 6 })
         );
+    }
+
+    #[test]
+    fn notes_frontier_siblings_match_the_flat_tree_proof_of_each_new_leaf() {
+        let leaves: Vec<Fr> = (1u64..=64).map(Fr::from).collect();
+        let mut frontier = NotesFrontier::new(6, 3).unwrap();
+        let mut tree = Imt::new(6);
+
+        for (index, leaf) in leaves.iter().enumerate() {
+            let (appended, siblings) = frontier.append_with_siblings(*leaf).unwrap();
+            tree.insert(*leaf);
+            let proof = tree.create_proof(index);
+
+            assert_eq!(appended.leaf_index, index);
+            assert_eq!(
+                siblings, proof.siblings,
+                "siblings mismatch at leaf {index}"
+            );
+            assert_eq!(frontier.root(), proof.root);
+            assert!(verify_proof(&InclusionProof {
+                leaf: *leaf,
+                index,
+                siblings,
+                root: frontier.root(),
+            }));
+        }
+
+        let full = frontier.clone();
+        assert_eq!(
+            frontier.append_with_siblings(Fr::from(65u64)),
+            Err(TreeError::TreeFull { depth: 6 })
+        );
+        assert_eq!(frontier, full);
+    }
+
+    #[test]
+    fn notes_frontier_siblings_match_at_production_depth_from_a_snapshot() {
+        // Start in the middle of a tree, as a prover does when it restores the
+        // indexer's snapshot, and cross a shard boundary on the way.
+        let history: Vec<Fr> = (1u64..=300).map(Fr::from).collect();
+        let mut tree = Imt::from_leaves(NOTES_TREE_DEPTH, &history);
+        let mut original = NotesFrontier::new(NOTES_TREE_DEPTH, 8).unwrap();
+        original.append_many(&history).unwrap();
+        let mut frontier = NotesFrontier::from_snapshot_bytes(&original.encode_snapshot()).unwrap();
+
+        for value in 1_000u64..1_300 {
+            let leaf = Fr::from(value);
+            let (appended, siblings) = frontier.append_with_siblings(leaf).unwrap();
+            tree.insert(leaf);
+            let proof = tree.create_proof(appended.leaf_index);
+
+            assert_eq!(
+                siblings, proof.siblings,
+                "siblings mismatch at {}",
+                appended.leaf_index
+            );
+            assert_eq!(frontier.root(), tree.root());
+        }
+        assert_eq!(frontier.leaf_count(), 600);
     }
 
     #[test]

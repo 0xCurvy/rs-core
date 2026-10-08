@@ -1,9 +1,12 @@
-use std::{fs::File, io::BufReader, sync::Arc, time::Instant};
+use std::{collections::HashSet, fs::File, io::BufReader, sync::Arc, time::Instant};
 
 use curvy_core::{
+    Fr,
     field::{Bn254Fr, fr_from_be_32_checked, fr_to_be_32, fr_to_biguint, fr_to_dec},
     hash_utils::sha256_bigint,
-    imt::IndexedMerkleTree as RustIndexedMerkleTree,
+    imt::{
+        IndexedMerkleTree as RustIndexedMerkleTree, NotesFrontier as RustNotesFrontier, TreeError,
+    },
 };
 use curvy_prover::{
     Prover, ResidentProver as RustResidentProver,
@@ -34,6 +37,11 @@ fn validate_batch_size(batch_size: u32) -> Result<()> {
     Ok(())
 }
 
+/// Resource ceiling for one frontier `append` call: 32 MiB of packed leaves.
+const MAX_APPEND_LEAVES: usize = 1 << 20;
+/// `leafCount` is a `u32`, which holds every count up to a full depth-31 tree.
+const MAX_FRONTIER_DEPTH: u32 = 31;
+
 const DEFAULT_PROVER_THREADS: u32 = 1;
 const MAX_PROVER_THREADS: u32 = 64;
 
@@ -58,6 +66,12 @@ pub struct ResidentProverOptions {
     /// Maximum accepted proofs, including the running proof. Defaults to 8;
     /// excess requests reject immediately. Must be between 1 and 64.
     pub max_pending_proofs: Option<u32>,
+    /// Accept artifacts up to the batch-prover budget (8,000,000 graph nodes,
+    /// a 96 MiB graph) instead of the client budget (2,000,000 nodes, 64 MiB).
+    /// The 20- and 50-note pending-commitment circuits need it. Defaults to
+    /// false, so a process that never loads those circuits does not widen what
+    /// it will allocate for an artifact.
+    pub batch_profile: Option<bool>,
 }
 
 #[napi(object)]
@@ -133,6 +147,11 @@ impl ResidentProver {
                 "maxPendingProofs must be between 1 and 64",
             ));
         }
+        let limits = if options.batch_profile.unwrap_or(false) {
+            Limits::batch_prover()
+        } else {
+            Limits::client()
+        };
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(threads as usize)
             .thread_name(|index| format!("curvy-resident-prover-{index}"))
@@ -176,7 +195,7 @@ impl ResidentProver {
         };
         let compiled = match (&options.sage_program_path, &options.sage_program_sha256) {
             (Some(path), Some(_)) => Some(
-                read_file_bounded(path, Limits::client().sage_program_bytes)
+                read_file_bounded(path, limits.sage_program_bytes)
                     .map_err(|error| native_error("read SAGE program", error))?,
             ),
             (None, None) => None,
@@ -194,7 +213,7 @@ impl ResidentProver {
                     "witnessGraphPath is required without a compiled SAGE program",
                 )
             })?;
-            read_graph_file_bounded(path, Limits::client())
+            read_graph_file_bounded(path, limits)
                 .map_err(|error| native_error("read witness graph", error))?
         } else {
             Vec::new()
@@ -218,15 +237,23 @@ impl ResidentProver {
                         .as_deref()
                         .expect("validated SAGE digest"),
                     &options.witness_graph_sha256,
-                    Limits::client(),
+                    limits,
                 )
             } else if options.use_sage.unwrap_or(false) {
-                let graph = SageGraph::from_bytes(&witness_graph, &options.witness_graph_sha256)
-                    .map_err(|error| native_error("compile SAGE graph", error))?;
+                let graph = SageGraph::from_bytes_with_limits(
+                    &witness_graph,
+                    &options.witness_graph_sha256,
+                    limits,
+                )
+                .map_err(|error| native_error("compile SAGE graph", error))?;
                 RustResidentProver::with_sage(prover, graph)
             } else {
-                let graph = WitnessGraph::from_bytes(&witness_graph, &options.witness_graph_sha256)
-                    .map_err(|error| native_error("load witness graph", error))?;
+                let graph = WitnessGraph::from_bytes_with_limits(
+                    &witness_graph,
+                    &options.witness_graph_sha256,
+                    limits,
+                )
+                .map_err(|error| native_error("load witness graph", error))?;
                 RustResidentProver::with_graph(prover, graph)
             };
             resident.map_err(|error| native_error("initialize native prover", error))
@@ -516,7 +543,7 @@ impl IndexedMerkleTree {
         Self::from_leaves(depth, &leaves)
     }
 
-    fn from_leaves(depth: u32, leaves: &[curvy_core::Fr]) -> Result<Self> {
+    fn from_leaves(depth: u32, leaves: &[Fr]) -> Result<Self> {
         let tree = RustIndexedMerkleTree::from_leaves(depth as usize, leaves)
             .map_err(|error| native_error("initialize native Merkle tree", error))?;
         Ok(Self { tree })
@@ -579,79 +606,324 @@ impl IndexedMerkleTree {
     fn build_pending_commitment_fields(
         &mut self,
         batch_size: u32,
-        pending_note_ids: Vec<curvy_core::Fr>,
+        pending_note_ids: Vec<Fr>,
     ) -> Result<PendingCommitmentInput> {
-        if pending_note_ids.is_empty() {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "pending note ids must not be empty".to_owned(),
-            ));
-        }
-        if pending_note_ids.len() > batch_size as usize {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!(
-                    "pending note id count {} exceeds batch size {batch_size}",
-                    pending_note_ids.len()
-                ),
-            ));
-        }
-
-        let current_notes_root = self.tree.root();
-        let current_note_index = self.tree.leaf_count();
-        let zero = Bn254Fr::try_from_dec("0")
-            .expect("zero is canonical")
-            .into_inner();
-        let mut padded_note_ids = pending_note_ids;
-        padded_note_ids.resize(batch_size as usize, zero);
-
-        let mut work = self.tree.clone();
-        let mut siblings = Vec::with_capacity(batch_size as usize);
-        for &note_id in &padded_note_ids {
-            if note_id == zero {
-                siblings.push(vec!["0".to_owned(); self.tree.depth()]);
-                continue;
-            }
-            work.insert(note_id)
-                .map_err(|error| native_error("insert pending note", error))?;
-            let proof = work
-                .create_proof(note_id)
-                .map_err(|error| native_error("create pending note proof", error))?;
-            siblings.push(proof.siblings.iter().map(fr_to_dec).collect::<Vec<_>>());
-        }
-
-        let new_notes_root = work.root();
-        let new_note_index = work.leaf_count();
-        let mut hash_inputs = padded_note_ids
-            .iter()
-            .map(fr_to_biguint)
-            .collect::<Vec<_>>();
-        hash_inputs.push(fr_to_biguint(&current_notes_root));
-        hash_inputs.push(fr_to_biguint(&new_notes_root));
-        hash_inputs.push(current_note_index.into());
-        hash_inputs.push(new_note_index.into());
-        let input_hash = sha256_bigint(&hash_inputs).to_str_radix(10);
-        let padded_note_ids = padded_note_ids.iter().map(fr_to_dec).collect::<Vec<_>>();
-        let current_notes_root = fr_to_dec(&current_notes_root);
-        let new_notes_root = fr_to_dec(&new_notes_root);
-
-        let circuit_input_json = serde_json::json!({
-            "currentNoteIndex": current_note_index.to_string(),
-            "inputHash": input_hash,
-            "currentNotesRoot": current_notes_root,
-            "pendingNoteIds": padded_note_ids,
-            "siblings": siblings,
-        })
-        .to_string();
-
-        self.tree = work;
-        Ok(PendingCommitmentInput {
-            circuit_input_json,
-            input_hash,
-            padded_note_ids,
-            new_notes_root,
-        })
+        build_pending_commitment_input(&mut self.tree, batch_size, pending_note_ids)
     }
+}
+
+/// Constant-space frontier of the notes tree: the completed subtrees along its
+/// right-hand edge, at most one per level, and the leaf count.
+///
+/// It appends leaves and builds the pending-notes-commitment circuit input
+/// exactly as [`IndexedMerkleTree`] does, but holds no leaf, so its size does
+/// not depend on how many notes the tree contains (a depth-30 snapshot is at
+/// most 1,015 bytes). A prover that only ever appends needs nothing more.
+///
+/// Two things it cannot do, because it has forgotten the leaves: prove that an
+/// earlier leaf is in the tree, and notice that a note id is already in it.
+/// Only a repeat inside one batch is rejected here.
+#[napi]
+pub struct NotesFrontier {
+    frontier: RustNotesFrontier,
+}
+
+#[napi]
+impl NotesFrontier {
+    /// An empty frontier. `shardHeight` must match whoever else reads the
+    /// snapshot; it does not affect roots or commitment inputs.
+    #[napi(constructor, catch_unwind)]
+    pub fn new(depth: u32, shard_height: u32) -> Result<Self> {
+        validate_frontier_depth(depth as usize)?;
+        let frontier = RustNotesFrontier::new(depth as usize, shard_height as usize)
+            .map_err(|error| native_error("initialize notes frontier", error))?;
+        Ok(Self { frontier })
+    }
+
+    /// An empty frontier with the production notes-tree geometry.
+    #[napi(factory, catch_unwind)]
+    pub fn production() -> Self {
+        Self {
+            frontier: RustNotesFrontier::production(),
+        }
+    }
+
+    /// Restore a frontier from `snapshot()` bytes. The indexer stores the same
+    /// format with each block, so a prover can start from the block whose root
+    /// the chain has instead of replaying every leaf.
+    #[napi(factory, js_name = "fromSnapshot", catch_unwind)]
+    pub fn from_snapshot(snapshot: Buffer) -> Result<Self> {
+        let frontier = RustNotesFrontier::from_snapshot_bytes(&snapshot)
+            .map_err(|error| native_error("restore notes frontier", error))?;
+        validate_frontier_depth(frontier.depth())?;
+        Ok(Self { frontier })
+    }
+
+    /// The canonical versioned snapshot of this frontier.
+    #[napi(catch_unwind)]
+    pub fn snapshot(&self) -> Buffer {
+        self.frontier.encode_snapshot().into()
+    }
+
+    #[napi(catch_unwind)]
+    pub fn root(&self) -> String {
+        fr_to_dec(&self.frontier.root())
+    }
+
+    /// Return the root as one canonical 32-byte big-endian field element.
+    #[napi(js_name = "rootPacked", catch_unwind)]
+    pub fn root_packed(&self) -> Buffer {
+        self.frontier.root_be_32().to_vec().into()
+    }
+
+    #[napi(getter, catch_unwind)]
+    pub fn leaf_count(&self) -> u32 {
+        self.frontier.leaf_count() as u32
+    }
+
+    /// Depth of the tree this frontier belongs to. A restored snapshot carries
+    /// its own, so check it against the depth the caller expects.
+    #[napi(getter, catch_unwind)]
+    pub fn depth(&self) -> u32 {
+        self.frontier.depth() as u32
+    }
+
+    /// Append leaves in order, all or none. This is how a frontier is rebuilt
+    /// from the committed notes, a page at a time, when no snapshot is at hand.
+    #[napi(catch_unwind)]
+    pub fn append(&mut self, leaves_json: String) -> Result<()> {
+        if leaves_json.len() > MAX_APPEND_LEAVES * 82 + 2 {
+            return Err(too_many_leaves());
+        }
+        self.append_fields(parse_fields_json(&leaves_json, "leaves")?)
+    }
+
+    /// Packed counterpart to `append`. Each leaf is a canonical 32-byte
+    /// big-endian BN254 field element.
+    #[napi(js_name = "appendPacked", catch_unwind)]
+    pub fn append_packed(&mut self, leaves: Buffer) -> Result<()> {
+        if leaves.len() > MAX_APPEND_LEAVES * 32 {
+            return Err(too_many_leaves());
+        }
+        self.append_fields(parse_fields_packed(&leaves, "leaves")?)
+    }
+
+    fn append_fields(&mut self, leaves: Vec<Fr>) -> Result<()> {
+        if leaves.len() > MAX_APPEND_LEAVES {
+            return Err(too_many_leaves());
+        }
+        let mut work = self.frontier.clone();
+        work.append_many(&leaves)
+            .map_err(|error| native_error("append leaves", error))?;
+        self.frontier = work;
+        Ok(())
+    }
+
+    /// Advance the frontier transactionally and return the same circuit input
+    /// `IndexedMerkleTree.buildPendingCommitment` returns for the same tree
+    /// and notes. Take `snapshot()` first to be able to go back if the commit
+    /// built from this input does not land.
+    #[napi(catch_unwind)]
+    pub fn build_pending_commitment(
+        &mut self,
+        batch_size: u32,
+        pending_note_ids_json: String,
+    ) -> Result<PendingCommitmentInput> {
+        validate_batch_size(batch_size)?;
+        if pending_note_ids_json.len() > batch_size as usize * 82 + 2 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "pending note ids JSON exceeds the batch byte budget",
+            ));
+        }
+        let pending_note_ids = parse_fields_json(&pending_note_ids_json, "pending note ids")?;
+        self.build_pending_commitment_fields(batch_size, pending_note_ids)
+    }
+
+    /// Packed counterpart to `buildPendingCommitment`. Each pending note id is
+    /// a canonical 32-byte big-endian BN254 field element.
+    #[napi(js_name = "buildPendingCommitmentPacked", catch_unwind)]
+    pub fn build_pending_commitment_packed(
+        &mut self,
+        batch_size: u32,
+        pending_note_ids: Buffer,
+    ) -> Result<PendingCommitmentInput> {
+        validate_batch_size(batch_size)?;
+        if pending_note_ids.len() > batch_size as usize * 32 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "pending note ids exceed batch size",
+            ));
+        }
+        let pending_note_ids = parse_fields_packed(&pending_note_ids, "pending note ids")?;
+        self.build_pending_commitment_fields(batch_size, pending_note_ids)
+    }
+
+    fn build_pending_commitment_fields(
+        &mut self,
+        batch_size: u32,
+        pending_note_ids: Vec<Fr>,
+    ) -> Result<PendingCommitmentInput> {
+        // The indexed tree rejects any note id it already holds. A frontier
+        // holds none, so the only repeat it can see is one inside the batch.
+        let mut seen = HashSet::with_capacity(pending_note_ids.len());
+        let zero = Fr::from(0u64);
+        for note_id in &pending_note_ids {
+            if *note_id != zero && !seen.insert(*note_id) {
+                return Err(native_error(
+                    "insert pending note",
+                    TreeError::DuplicateLeaf,
+                ));
+            }
+        }
+        build_pending_commitment_input(&mut self.frontier, batch_size, pending_note_ids)
+    }
+}
+
+fn validate_frontier_depth(depth: usize) -> Result<()> {
+    if depth > MAX_FRONTIER_DEPTH as usize {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!("frontier depth must be at most {MAX_FRONTIER_DEPTH}; received {depth}"),
+        ));
+    }
+    Ok(())
+}
+
+fn too_many_leaves() -> Error {
+    Error::new(
+        Status::InvalidArg,
+        format!("append accepts at most {MAX_APPEND_LEAVES} leaves per call"),
+    )
+}
+
+/// What the pending-commitment adapter needs from a notes tree: take one note,
+/// and say which siblings prove it in the tree as it then stands.
+trait PendingNotesTree: Clone {
+    fn depth(&self) -> usize;
+    fn root(&self) -> Fr;
+    fn leaf_count(&self) -> usize;
+    fn insert_with_siblings(&mut self, note_id: Fr) -> Result<Vec<Fr>>;
+}
+
+impl PendingNotesTree for RustIndexedMerkleTree {
+    fn depth(&self) -> usize {
+        RustIndexedMerkleTree::depth(self)
+    }
+
+    fn root(&self) -> Fr {
+        RustIndexedMerkleTree::root(self)
+    }
+
+    fn leaf_count(&self) -> usize {
+        RustIndexedMerkleTree::leaf_count(self)
+    }
+
+    fn insert_with_siblings(&mut self, note_id: Fr) -> Result<Vec<Fr>> {
+        self.insert(note_id)
+            .map_err(|error| native_error("insert pending note", error))?;
+        let proof = self
+            .create_proof(note_id)
+            .map_err(|error| native_error("create pending note proof", error))?;
+        Ok(proof.siblings)
+    }
+}
+
+impl PendingNotesTree for RustNotesFrontier {
+    fn depth(&self) -> usize {
+        RustNotesFrontier::depth(self)
+    }
+
+    fn root(&self) -> Fr {
+        RustNotesFrontier::root(self)
+    }
+
+    fn leaf_count(&self) -> usize {
+        RustNotesFrontier::leaf_count(self)
+    }
+
+    fn insert_with_siblings(&mut self, note_id: Fr) -> Result<Vec<Fr>> {
+        self.append_with_siblings(note_id)
+            .map(|(_, siblings)| siblings)
+            .map_err(|error| native_error("insert pending note", error))
+    }
+}
+
+/// The pending-notes-commitment circuit input for appending `pending_note_ids`
+/// to `tree`. One implementation for both tree forms, so they cannot drift.
+/// `tree` changes only after every insertion, sibling proof and the input hash
+/// have succeeded.
+fn build_pending_commitment_input<T: PendingNotesTree>(
+    tree: &mut T,
+    batch_size: u32,
+    pending_note_ids: Vec<Fr>,
+) -> Result<PendingCommitmentInput> {
+    if pending_note_ids.is_empty() {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "pending note ids must not be empty".to_owned(),
+        ));
+    }
+    if pending_note_ids.len() > batch_size as usize {
+        return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+                "pending note id count {} exceeds batch size {batch_size}",
+                pending_note_ids.len()
+            ),
+        ));
+    }
+
+    let current_notes_root = tree.root();
+    let current_note_index = tree.leaf_count();
+    let zero = Bn254Fr::try_from_dec("0")
+        .expect("zero is canonical")
+        .into_inner();
+    let mut padded_note_ids = pending_note_ids;
+    padded_note_ids.resize(batch_size as usize, zero);
+
+    let mut work = tree.clone();
+    let mut siblings = Vec::with_capacity(batch_size as usize);
+    for &note_id in &padded_note_ids {
+        if note_id == zero {
+            siblings.push(vec!["0".to_owned(); tree.depth()]);
+            continue;
+        }
+        let proof_siblings = work.insert_with_siblings(note_id)?;
+        siblings.push(proof_siblings.iter().map(fr_to_dec).collect::<Vec<_>>());
+    }
+
+    let new_notes_root = work.root();
+    let new_note_index = work.leaf_count();
+    let mut hash_inputs = padded_note_ids
+        .iter()
+        .map(fr_to_biguint)
+        .collect::<Vec<_>>();
+    hash_inputs.push(fr_to_biguint(&current_notes_root));
+    hash_inputs.push(fr_to_biguint(&new_notes_root));
+    hash_inputs.push(current_note_index.into());
+    hash_inputs.push(new_note_index.into());
+    let input_hash = sha256_bigint(&hash_inputs).to_str_radix(10);
+    let padded_note_ids = padded_note_ids.iter().map(fr_to_dec).collect::<Vec<_>>();
+    let current_notes_root = fr_to_dec(&current_notes_root);
+    let new_notes_root = fr_to_dec(&new_notes_root);
+
+    let circuit_input_json = serde_json::json!({
+        "currentNoteIndex": current_note_index.to_string(),
+        "inputHash": input_hash,
+        "currentNotesRoot": current_notes_root,
+        "pendingNoteIds": padded_note_ids,
+        "siblings": siblings,
+    })
+    .to_string();
+
+    *tree = work;
+    Ok(PendingCommitmentInput {
+        circuit_input_json,
+        input_hash,
+        padded_note_ids,
+        new_notes_root,
+    })
 }
 
 #[napi(catch_unwind)]
@@ -671,7 +943,7 @@ fn native_error(context: &str, error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, format!("{context}: {error}"))
 }
 
-fn parse_fields_json(json: &str, label: &str) -> Result<Vec<curvy_core::Fr>> {
+fn parse_fields_json(json: &str, label: &str) -> Result<Vec<Fr>> {
     let values: Vec<String> = serde_json::from_str(json).map_err(|_| {
         Error::new(
             Status::InvalidArg,
@@ -688,7 +960,7 @@ fn parse_fields_json(json: &str, label: &str) -> Result<Vec<curvy_core::Fr>> {
         .collect()
 }
 
-fn parse_fields_packed(bytes: &[u8], label: &str) -> Result<Vec<curvy_core::Fr>> {
+fn parse_fields_packed(bytes: &[u8], label: &str) -> Result<Vec<Fr>> {
     if !bytes.len().is_multiple_of(32) {
         return Err(Error::new(
             Status::InvalidArg,
@@ -745,6 +1017,7 @@ mod tests {
                 "ee23155298ce2e491b9031d57fe4b63ce6618f7b4013da89737579abdd019d6f".into(),
             threads: Some(1),
             max_pending_proofs: None,
+            batch_profile: None,
             use_sage: None,
             sage_program_path: None,
             sage_program_sha256: None,

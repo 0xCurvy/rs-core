@@ -20,6 +20,11 @@ test("exports only the resident prover name", () => {
   assert.equal(binding["Circuit" + "Prover"], undefined);
 });
 
+test("exports both forms of the notes tree", () => {
+  assert.equal(typeof binding.IndexedMerkleTree, "function");
+  assert.equal(typeof binding.NotesFrontier, "function");
+});
+
 test("proves an authenticated generic circuit with one worker", async () => {
   const directory = await mkdtemp(join(tmpdir(), "curvy-node-test-"));
   const graph = multiplierGraph();
@@ -137,6 +142,142 @@ test("accepts canonical packed tree fields without decimal JSON arrays", () => {
   );
 });
 
+test("a frontier builds the same pending-commitment input as the indexed tree", () => {
+  // Every history length up to a few full subtrees, then three batches in a
+  // row on each: the second and third start from a state the first produced.
+  for (const historyLength of [0, 1, 2, 3, 7, 8, 9, 37]) {
+    const history = Array.from({ length: historyLength }, (_, index) => BigInt(1_000 + index));
+    const tree = binding.IndexedMerkleTree.fromPackedLeaves(30, packFields(history));
+    const frontier = binding.NotesFrontier.production();
+    frontier.appendPacked(packFields(history));
+    assert.equal(frontier.root(), tree.root());
+    assert.equal(frontier.leafCount, tree.leafCount);
+
+    let next = 5_000n;
+    for (const [batchSize, count] of [[5, 5], [5, 2], [50, 31]]) {
+      const noteIds = Array.from({ length: count }, () => next++);
+      const json = JSON.stringify(noteIds.map(String));
+      const expected = tree.buildPendingCommitment(batchSize, json);
+      const actual = frontier.buildPendingCommitment(batchSize, json);
+
+      assert.deepEqual(actual, expected, `history ${historyLength}, batch ${batchSize}/${count}`);
+      assert.equal(frontier.root(), tree.root());
+      assert.equal(frontier.leafCount, tree.leafCount);
+    }
+  }
+});
+
+test("the packed frontier calls agree with the JSON ones", () => {
+  const viaJson = new binding.NotesFrontier(8, 3);
+  const viaPacked = new binding.NotesFrontier(8, 3);
+  viaJson.append(JSON.stringify(["11", "12", "13"]));
+  viaPacked.appendPacked(packFields([11n, 12n, 13n]));
+  assert.deepEqual(viaPacked.rootPacked(), viaJson.rootPacked());
+
+  assert.deepEqual(
+    viaPacked.buildPendingCommitmentPacked(4, packFields([21n, 22n])),
+    viaJson.buildPendingCommitment(4, JSON.stringify(["21", "22"])),
+  );
+  assert.equal(viaPacked.leafCount, 5);
+  assert.throws(() => viaPacked.appendPacked(Buffer.alloc(31)), /multiple of 32/);
+});
+
+test("a frontier resumes from its snapshot and from pages of leaves", () => {
+  const leaves = Array.from({ length: 23 }, (_, index) => BigInt(100 + index));
+  const paged = binding.NotesFrontier.production();
+  for (let start = 0; start < leaves.length; start += 10) {
+    paged.appendPacked(packFields(leaves.slice(start, start + 10)));
+  }
+  assert.equal(paged.leafCount, 23);
+  assert.equal(paged.root(), binding.IndexedMerkleTree.fromPackedLeaves(30, packFields(leaves)).root());
+
+  const snapshot = paged.snapshot();
+  assert.ok(Buffer.isBuffer(snapshot));
+  assert.ok(snapshot.length <= 1_015);
+  const restored = binding.NotesFrontier.fromSnapshot(snapshot);
+  assert.equal(restored.root(), paged.root());
+  assert.equal(restored.leafCount, 23);
+  assert.deepEqual(restored.snapshot(), snapshot);
+  assert.deepEqual(
+    restored.buildPendingCommitment(5, JSON.stringify(["900", "901"])),
+    paged.buildPendingCommitment(5, JSON.stringify(["900", "901"])),
+  );
+
+  assert.equal(
+    binding.NotesFrontier.production().root(),
+    new binding.IndexedMerkleTree(30, "[]").root(),
+  );
+  assert.equal(binding.NotesFrontier.production().depth, 30);
+  assert.equal(restored.depth, 30);
+  assert.equal(new binding.NotesFrontier(8, 3).depth, 8);
+});
+
+test("a snapshot taken before a batch undoes it", () => {
+  const frontier = binding.NotesFrontier.production();
+  frontier.append(JSON.stringify(["1", "2", "3"]));
+  const before = frontier.snapshot();
+  const root = frontier.root();
+
+  frontier.buildPendingCommitment(5, JSON.stringify(["4", "5"]));
+  assert.equal(frontier.leafCount, 5);
+
+  const undone = binding.NotesFrontier.fromSnapshot(before);
+  assert.equal(undone.root(), root);
+  assert.equal(undone.leafCount, 3);
+});
+
+test("frontier batches that fail leave it unchanged", () => {
+  // Depth 2 holds four leaves.
+  const frontier = new binding.NotesFrontier(2, 1);
+  frontier.append(JSON.stringify(["5"]));
+  const before = frontier.root();
+  const snapshot = frontier.snapshot();
+  for (const [build, error] of [
+    [() => frontier.buildPendingCommitment(4, JSON.stringify(["7", "7"])), /leaf already exists/],
+    [() => frontier.buildPendingCommitment(4, JSON.stringify(["6", "7", "8", "9"])), /tree is full/],
+    [() => frontier.buildPendingCommitmentPacked(4, packFields([7n, 7n])), /leaf already exists/],
+    [() => frontier.buildPendingCommitmentPacked(4, packFields([6n, 7n, 8n, 9n])), /tree is full/],
+    [() => frontier.buildPendingCommitment(0, '["1"]'), /batchSize must be between/],
+    [() => frontier.buildPendingCommitment(4097, '["1"]'), /batchSize must be between/],
+    [() => frontier.buildPendingCommitment(4, "[]"), /must not be empty/],
+    [() => frontier.append(JSON.stringify(["6", "7", "8", "9"])), /tree is full/],
+  ]) {
+    assert.throws(build, error);
+    assert.equal(frontier.root(), before);
+    assert.equal(frontier.leafCount, 1);
+    assert.deepEqual(frontier.snapshot(), snapshot);
+  }
+  const result = frontier.buildPendingCommitment(4, JSON.stringify(["6", "7"]));
+  const input = JSON.parse(result.circuitInputJson);
+  assert.equal(input.currentNotesRoot, before);
+  assert.equal(input.currentNoteIndex, "1");
+  assert.equal(frontier.leafCount, 3);
+  assert.equal(frontier.root(), result.newNotesRoot);
+});
+
+test("a frontier cannot see a note that is already in the tree", () => {
+  // The indexed tree keeps every leaf and refuses a repeat. A frontier has
+  // forgotten them, so this check is the contract's, not the frontier's.
+  const tree = new binding.IndexedMerkleTree(30, JSON.stringify(["5"]));
+  const frontier = binding.NotesFrontier.production();
+  frontier.append(JSON.stringify(["5"]));
+
+  assert.throws(() => tree.buildPendingCommitment(2, JSON.stringify(["5"])), /leaf already exists/);
+  assert.equal(frontier.buildPendingCommitment(2, JSON.stringify(["5"])).paddedNoteIds[0], "5");
+});
+
+test("rejects malformed frontier snapshots and geometries", () => {
+  const snapshot = binding.NotesFrontier.production().snapshot();
+  assert.throws(() => binding.NotesFrontier.fromSnapshot(Buffer.alloc(3)), /snapshot/);
+  assert.throws(() => binding.NotesFrontier.fromSnapshot(Buffer.concat([snapshot, Buffer.alloc(1)])), /snapshot/);
+  const badMagic = Buffer.from(snapshot);
+  badMagic[0] ^= 0xff;
+  assert.throws(() => binding.NotesFrontier.fromSnapshot(badMagic), /snapshot/);
+  assert.throws(() => new binding.NotesFrontier(30, 0), /shard height/);
+  assert.throws(() => new binding.NotesFrontier(30, 30), /shard height/);
+  assert.throws(() => new binding.NotesFrontier(32, 14), /at most 31/);
+});
+
 async function fixtureOptions() {
   const directory = await mkdtemp(join(tmpdir(), "curvy-node-paths-"));
   const graph = multiplierGraph();
@@ -163,6 +304,33 @@ test("rejects oversized artifact files before authentication or whole-file alloc
       assert.throws(() => new binding.ResidentProver(oversized), error);
       await assert.rejects(binding.ResidentProver.create(oversized), error);
     }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
+test("the batch profile widens the artifact budget, and only when asked", async () => {
+  const options = await fixtureOptions();
+  const directory = dirname(options.witnessGraphPath);
+  const clientLimit = 64 * 1024 * 1024;
+  const batchLimit = 96 * 1024 * 1024;
+  const sized = async (bytes) => {
+    const path = join(directory, `graph-${bytes}.bin`);
+    const file = await open(path, "w");
+    try { await file.write(Buffer.from("CVYW")); await file.truncate(bytes); } finally { await file.close(); }
+    return { ...options, witnessGraphPath: path, witnessGraphSha256: "00".repeat(32) };
+  };
+  try {
+    const overClient = await sized(clientLimit + 1);
+    assert.throws(() => new binding.ResidentProver(overClient), /exceeds 67108864 byte limit/);
+    assert.throws(() => new binding.ResidentProver({ ...overClient, batchProfile: false }), /exceeds 67108864 byte limit/);
+    // Inside the batch budget the size check passes; the file then fails for
+    // what it is, an unauthenticated graph.
+    assert.throws(
+      () => new binding.ResidentProver({ ...overClient, batchProfile: true }),
+      (error) => !/byte limit/.test(error.message),
+    );
+    const overBatch = await sized(batchLimit + 1);
+    assert.throws(() => new binding.ResidentProver({ ...overBatch, batchProfile: true }), /exceeds 100663296 byte limit/);
+    await assert.rejects(binding.ResidentProver.create({ ...overBatch, batchProfile: true }), /exceeds 100663296 byte limit/);
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
