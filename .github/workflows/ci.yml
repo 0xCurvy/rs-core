@@ -538,19 +538,17 @@ jobs:
   # round trip -> parity against circom's own witness) on a small circuit with
   # input-dependent selects, and checks that a different circuit's R1CS is
   # refused. The builder is installed from the commit in
-  # crates/signet/scripts/ir-builder.pin into a cached directory outside target/.
+  # crates/signet/scripts/ir-builder.pin into a cached directory in the runner's temp.
   signet-graph:
     name: SIGNET graph pipeline smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      SIGNET_IR_BUILDER_ROOT: ${{ github.workspace }}/../signet-ir-builder
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: 1.99.0
-          cache-directories: ${{ github.workspace }}/../signet-ir-builder
+          cache-directories: ${{ runner.temp }}/signet-ir-builder
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -565,6 +563,8 @@ jobs:
       # Installs the pinned builder on a cold cache; the script clears the lint
       # flags for that install only, so signet itself still builds with them.
       - run: scripts/check.sh graph
+        env:
+          SIGNET_IR_BUILDER_ROOT: ${{ runner.temp }}/signet-ir-builder
       - run: git diff --exit-code -- Cargo.lock
 
   # Lints every workflow, including the disabled release workflow, with pinned
