@@ -160,6 +160,24 @@ else
     conclusion="$(gh run list --workflow ci.yml --commit "$head_commit" --limit 1 \
       --json conclusion --jq '.[0].conclusion // "none"' 2>/dev/null || echo unknown)"
     echo "ci.yml on $(git rev-parse --short HEAD): $conclusion"
+    if [[ "$conclusion" == none ]]; then
+      # CI does not run for a commit that changes only Markdown or this script
+      # (ci.yml paths-ignore). Accept the newest earlier commit CI passed when
+      # nothing else changed since.
+      passed=""
+      while read -r sha; do
+        if git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+          passed="$sha"
+          break
+        fi
+      done < <(gh run list --workflow ci.yml --branch main --event push --status success \
+        --limit 50 --json headSha --jq '.[].headSha' 2>/dev/null)
+      if [[ -n "$passed" ]] &&
+        [[ -z "$(git diff --name-only "$passed" HEAD | grep -v -E '\.md$|^scripts/publish\.sh$' || true)" ]]; then
+        echo "CI passed on $(git rev-parse --short "$passed"); only Markdown or scripts/publish.sh changed since"
+        conclusion=success
+      fi
+    fi
     [[ "$conclusion" == success ]] || confirm "CI has not passed for this commit. Publish anyway?" ||
       fail "stopped: CI has not passed"
   else

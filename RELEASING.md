@@ -27,7 +27,9 @@ publishes nothing.
    link at the bottom.
 3. Run the checks (`scripts/check.sh all`, plus the ones your change touches) and
    inspect `cargo package --list -p <crate>` for each crate.
-4. Merge to `main` and wait for CI to pass.
+4. Merge to `main` and wait for CI to pass. CI does not run for changes to only
+   Markdown files or `scripts/publish.sh`; `scripts/publish.sh` then accepts the
+   newest earlier commit that CI passed.
 
 ## 2. Tag
 

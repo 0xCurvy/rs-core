@@ -1,9 +1,17 @@
 name: CI
 
+# Markdown and the publish script are neither built nor tested here, so a change
+# to only those does not run CI. scripts/publish.sh skips the same paths.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - scripts/publish.sh
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - scripts/publish.sh
 
 # One in-flight run per ref. Superseded PR pushes are cancelled; main is left
 # alone so every commit on the release branch keeps a complete result.
