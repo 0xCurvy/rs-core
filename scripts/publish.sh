@@ -223,7 +223,8 @@ publish_wasm() {
   ((dry_run)) && return
   npm whoami >/dev/null || fail "not logged in to npm (npm login)"
   confirm "Publish $package@$version with dist-tag $dist_tag?" || fail "stopped before publishing"
-  npm publish "$tarball" --ignore-scripts --access public --tag "$dist_tag"
+  # The package's publishConfig asks for provenance, which only a CI publish can provide.
+  npm publish "$tarball" --ignore-scripts --access public --tag "$dist_tag" --provenance=false
 }
 
 publish_node() {
