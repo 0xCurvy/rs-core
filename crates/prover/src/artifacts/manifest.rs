@@ -111,13 +111,7 @@ impl ZkeyChunkManifest {
         if zkey_bytes == 0 || count != expected_count || bytes.len() != expected_bytes {
             return invalid("zkey manifest size or chunk count mismatch");
         }
-        let chunk_hashes = bytes[HEADER_BYTES..]
-            .chunks_exact(HASH_BYTES)
-            .map(|hash| {
-                hash.try_into()
-                    .map_err(|_| ArtifactError::InvalidZkey("truncated manifest chunk hash".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let chunk_hashes = bytes[HEADER_BYTES..].as_chunks::<HASH_BYTES>().0.to_vec();
         Ok(Self {
             chunk_bytes,
             zkey_bytes,

@@ -33,8 +33,9 @@
 //! | [`cipher`] | note-data AES-256-CTR additive field-OTP | `balanceCipher.ts` |
 //! | [`note`] | note `id` / `ownerHash` / `nullifier` commitments | `note.ts` |
 //! | [`hash_utils`] | `sha256BigInt` | `proving/utils.ts` |
+//! | [`calldata`] | the calldata binding of the aggregator's bound circuits | `calldataBinding.ts` |
 //! | [`imt`] | indexed IMT + stateful bounded sharded tree | `@zk-kit/imt` / `shardedNotesTree.ts` |
-//! | [`witness`] | aggregation / withdrawal / pending-commit witness builders | `witnessFromNotes.ts` |
+//! | [`witness`] | aggregation / withdrawal / pending-commit witness builders, SHA-256 and calldata-bound | `witnessFromNotes.ts` |
 //! | [`stealth`] | **Domain A** stealth addressing (pairing) | Go `curvy-core` |
 //!
 //! ## The boundary: how values cross in and out
@@ -109,6 +110,7 @@ pub mod field;
 // ── Domain B: circuit/commitment layer (BabyJubjub + Poseidon over BN254 Fr) ────
 pub mod babyjubjub;
 pub mod blake512;
+pub mod calldata;
 pub mod cipher;
 pub mod eddsa;
 pub mod hash_utils;

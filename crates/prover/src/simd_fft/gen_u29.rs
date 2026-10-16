@@ -5,8 +5,7 @@
 //! limb constants from `super::fr29` (checked against p).
 //!
 //! Fully unrolled 9x29 Montgomery kernels: `mont_mul`, `mul4`
-//! (scalar, and 4-way simd128 for wasm32). Same algorithms and bounds as the
-//! loop forms in poc/wasm-field/src (u29x9.rs, simd.rs).
+//! (scalar, and 4-way simd128 for wasm32).
 #![allow(unused_mut, unused_assignments, clippy::all)]
 
 use super::fr29::{MASK, MU, P, W};
@@ -265,7 +264,7 @@ use super::{MASK, MU, P, W};
 /// generic `mul(zext, zext)`, and once one operand becomes a u64x2 constant
 /// the backend emits `i64x2.mul`, which V8 emulates on arm64 (NEON has no
 /// 64-bit lane multiply) instead of a single UMULL.
-/// scripts/check-simd-codegen.mjs guards this in CI.
+/// `scripts/check.sh simd-codegen` guards this in CI.
 static P_SPLAT: [v128; 9] = [
     u32x4(P[0], P[0], P[0], P[0]), u32x4(P[1], P[1], P[1], P[1]), u32x4(P[2], P[2], P[2], P[2]),
     u32x4(P[3], P[3], P[3], P[3]), u32x4(P[4], P[4], P[4], P[4]), u32x4(P[5], P[5], P[5], P[5]),

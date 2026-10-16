@@ -1,5 +1,5 @@
 //! Development checks of the SIMD kernel, run inside a `wasm-simd-selftest`
-//! WASM build by scripts/simd-selftest.mjs:
+//! WASM build by `scripts/check.sh simd`:
 //!
 //! - [`self_test`] (`simdMsmSelfTest`): the kernel against arkworks'
 //!   `VariableBaseMSM` on random inputs at every width 3..=16, and on

@@ -13,7 +13,7 @@ const artifacts = new Map(cases.flatMap(c => [[c.zkeyUrl, c.zkeyPath], [c.graphU
   ...(c.manifestUrl ? [[c.manifestUrl, c.manifestPath]] : [])]));
 // The page always imports the prover from these URLs. CURVY_BROWSER_PKG_WEB and
 // CURVY_BROWSER_PKG_WEB_THREADS serve a prover package directory built
-// elsewhere (scripts/build-wasm.sh with CURVY_WASM_OUT_DIR) in their place.
+// elsewhere (scripts/build.sh wasm-* with CURVY_WASM_OUT_DIR) in their place.
 const sources = await Promise.all([
   ['/crates/prover/pkg-web/', process.env.CURVY_BROWSER_PKG_WEB || resolve(root, 'crates/prover/pkg-web')],
   ['/crates/prover/pkg-web-threads/', process.env.CURVY_BROWSER_PKG_WEB_THREADS || resolve(root, 'crates/prover/pkg-web-threads')],

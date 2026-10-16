@@ -1,52 +1,49 @@
 # Streaming prover (SPARROW) integration guide
 
-SPARROW means **Streaming Prover Architecture for Resource-Restricted One-pass
-Workflows**. It is the opt-in bounded-memory Groth16 prover in `curvy-prover`.
-`StreamingProver` uses SAGE for witness evaluation and processes a snarkjs
-proving key sequentially so the host does not need to retain the complete zkey
-or a complete query section. Every returned proof is verified with arkworks
-before it leaves the crate.
+SPARROW (**Streaming Prover Architecture for Resource-Restricted One-pass
+Workflows**) is the opt-in bounded-memory Groth16 prover in `curvy-prover`.
+`StreamingProver` evaluates the witness with SAGE and reads a snarkjs proving
+key sequentially, so the host never holds the complete zkey or a complete query
+section. Every returned proof is verified with arkworks first.
 
-Use SPARROW when peak memory is more important than the lowest possible latency.
-Use the HAWK `ResidentProver` when the host has enough memory to load the full
-proving key and benefits from reusing it. Use lower-level `Prover` only when the
-host already owns a `.wtns` assignment.
+Use SPARROW when peak memory matters more than latency. Use the HAWK
+`ResidentProver` when the host can hold the full proving key and reuse it. Use
+the lower-level `Prover` only when the host already has a `.wtns` assignment.
 
 ## Enable SPARROW
 
-SPARROW and SAGE are excluded from the default crate and WASM builds.
+SPARROW and SAGE are not in the default crate features or WASM builds.
 
 For native Rust:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.1", features = ["sparrow"] }
-curvy-witness = { version = "=0.1.1", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.2", features = ["sparrow"] }
+curvy-witness = { version = "=0.1.2", features = ["sage", "signet-v2"] }
 ```
 
 Add `parallel` when the application has a host-initialized Rayon pool:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.1", features = ["parallel", "sparrow"] }
-curvy-witness = { version = "=0.1.1", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.2", features = ["parallel", "sparrow"] }
+curvy-witness = { version = "=0.1.2", features = ["sage", "signet-v2"] }
 ```
 
 For direct WASM builds:
 
 ```bash
-scripts/build-wasm.sh web --sparrow
-scripts/build-wasm.sh web --threads --sparrow
+scripts/build.sh wasm-web --sparrow
+scripts/build.sh wasm-web-threads --sparrow
 ```
 
 The threaded build requires a cross-origin-isolated page and an initialized
-`wasm-bindgen-rayon` pool. SPARROW is not present in the normal published WASM
-entries. An application that distributes it should use a separate opt-in entry
-so ordinary users do not download SAGE or the streaming prover.
+`wasm-bindgen-rayon` pool. The published WASM packages do not include SPARROW;
+applications that ship it should load it from a separate opt-in entry.
 
 ## Artifact set
 
-A production integration should publish and pin these values together:
+Publish and pin these values together:
 
 | Item | Required metadata | Purpose |
 |---|---|---|
@@ -66,8 +63,8 @@ cargo run --release -p curvy-prover --features sparrow \
 ```
 
 The generator reopens the zkey and calls `ZkeyChunkManifest::verify_reader`
-before it writes a successful result. Publication pipelines should also run the
-artifact bundle validator and the upstream snarkjs ceremony and witness checks:
+before it reports success. Publication pipelines should also run the artifact
+bundle validator and the upstream snarkjs ceremony and witness checks:
 
 ```bash
 cargo run --release -p curvy-prover \
@@ -80,7 +77,7 @@ build. Do not select artifacts by filename alone.
 
 ## Native API
 
-The one-pass manifest flow is the preferred native integration:
+The one-pass manifest flow is the recommended native integration:
 
 ```rust,no_run
 use std::{fs, fs::File};
@@ -111,15 +108,15 @@ println!("{}", proof.proof_json);
 ```
 
 `prove_json_with_manifest` reads the zkey once and authenticates each complete
-chunk before any of its bytes reach the unchecked point parser. The fallback
-`prove_json` method authenticates the complete file, rewinds it, and hashes the
-proof pass again while parsing. Use the fallback only when a deployment cannot
-publish a chunk manifest.
+chunk before any of its bytes reach the point parser. Without a manifest,
+`prove_json` authenticates the complete file, rewinds it, and hashes the
+proving pass again while parsing. Use it only when a deployment cannot publish a
+chunk manifest.
 
-Choose `Limits::client()` for client circuits and `Limits::batch_prover()` for
-larger server-side circuits. These limits bound decoded graph dimensions and
-allocations; they are part of the deployment profile and should not be inferred
-from untrusted artifact contents.
+Use `Limits::client()` for client circuits and `Limits::batch_prover()` for
+larger server-side circuits. The limits bound decoded graph dimensions and
+allocations. Take them from the deployment profile, never from untrusted
+artifact contents.
 
 ## SAGE cache
 
@@ -143,31 +140,22 @@ The cache key must contain:
 - the source SIGNET SHA-256;
 - `sage::CACHE_VERSION` or the WASM `sageCacheVersion()` value;
 - the client or batch limits profile; and
-- the cache layout version owned by the host adapter.
+- the host's cache layout version.
 
 Every warm load must authenticate the cached program against an independently
-trusted program digest and supply the source graph digest to
-`from_compiled_sage_bytes` or `fromCompiledSageWithConfig`. Hashing a cache entry
-and using its own hash as the expected digest does not authenticate it. The
-source digest inside a compiled blob also does not prove correct compilation.
-Publish program digests through the trusted artifact channel. The JavaScript
-adapter accepts `expectedSageProgramSha256`; without it, it recompiles the
-authenticated source graph each session and neither reads nor writes the derived
-entry.
-Delete and rebuild an entry after any digest, metadata, format, dimension, index,
-or source-binding failure.
+trusted program digest and pass the source graph digest to
+`from_compiled_sage_bytes` or `fromCompiledSageWithConfig`. A cache entry's own
+hash is not a trusted digest, and the source digest inside a compiled blob does
+not prove correct compilation. Publish program digests through the trusted
+artifact channel.
 
-Raw cache bytes provide the lowest warm-load latency. Compression saves storage
-but adds decompression CPU and requires an additional bounded streaming decoder.
-Choose the storage representation from measurements on the deployment devices.
+Delete and rebuild an entry after any digest, metadata, format, dimension,
+index, or source-binding failure.
 
 ## Browser stream flow
 
-The preferred browser path uses Cache API because a cached `Response.body` is a
-sequential stream that maps directly to the manifest protocol. It does not call
-`arrayBuffer()` for the zkey.
-
-The host sequence is:
+In a browser, stream the zkey to the module chunk by chunk, for example from a
+cached `Response.body`, without buffering it whole:
 
 1. Initialize the portable or threaded SPARROW WASM module.
 2. Load or derive the SAGE program.
@@ -177,14 +165,10 @@ The host sequence is:
 6. Pass each complete chunk to `pushManifestZkeyChunk`.
 7. Call `finishManifestProof` and accept only its self-verified result.
 
-Keep the top-level proof operation in a dedicated worker. The Rust calls are
-synchronous once they enter WASM, so putting them on the UI thread can block
-rendering and wallet interactions.
+Run the proof in a dedicated worker. The WASM calls are synchronous and block
+the thread that makes them.
 
-Cache API and OPFS both use origin quota. Cache API is the simpler fit for the
-current sequential layout. Consider OPFS when an application needs resumable
-partial downloads, synchronous offset reads in a worker, parallel section reads,
-or application-managed files. In either case, request persistent storage where
+Cache API storage counts against origin quota. Request persistent storage where
 appropriate and handle eviction and `QuotaExceededError`.
 
 ## Memory lifecycle
@@ -194,9 +178,9 @@ Pippenger buckets, and a bounded base/scalar chunk. It does not retain the full
 zkey, coefficient table, or complete query vectors.
 
 For one proof on a memory-constrained host, use the one-shot WASM methods. They
-release the compiled SAGE program after successful witness calculation so its
-allocation can be reused by the QAP and MSM phases. Invalid input leaves the
-prover reusable.
+release the compiled SAGE program after successful witness calculation, so the
+QAP and MSM phases can reuse its memory. Invalid input leaves the prover
+reusable.
 
 `WasmStreamingProver` also exposes recovery for interrupted streams:
 
@@ -218,55 +202,46 @@ is no longer active.
 
 ## Window and chunk configuration
 
-Window width and MSM chunk size are performance and memory settings. They do
-not change the mathematical MSM result and are not part of any artifact digest.
+Window width and MSM chunk size affect only performance and memory. They do not
+change the MSM result and are not part of any artifact digest.
 
-Native callers should start with `StreamingConfig::native_adaptive()`. It selects
-a window independently for each authenticated query size and uses a bounded
-point batch. Browser and mobile hosts should pin values measured on their target
-devices because worker scheduling, process limits, and thermal behavior differ.
-
-Record the following values with benchmark and deployment metadata:
-
-- crate or WASM package version;
-- target and CPU architecture;
-- worker count;
-- window policy or fixed window bits;
-- MSM chunk points;
-- manifest chunk bytes; and
-- artifact digests.
-
-Change a pin only when repeated self-verifying runs show an improvement larger
-than normal thermal and scheduling noise. The benchmark package contains the
-window sweep and end-to-end comparison tools.
+Native callers should start with `StreamingConfig::native_adaptive()`, which
+selects a Pippenger window for each query from its point count and uses a
+bounded point batch. Browser and mobile hosts should pin values measured on
+their target devices.
 
 ## Security boundary
 
-SPARROW constructs bulk zkey points without repeating subgroup validation for
-every point. This is safe only behind the documented authentication boundary:
+SPARROW parses bulk zkey points without a per-point subgroup check. This is
+safe only behind this authentication boundary:
 
 - the native manifest path authenticates each complete chunk before parsing;
-- the native fallback and public `prove_reader` helpers use `AuthenticatedReader`,
-  authenticating the whole zkey and rechecking each chunk before parsing;
-- the browser two-response helper verifies second-response chunks against hashes
-  privately recorded during the successful first pass;
-- direct `StreamingProofBuilder` callers must provide an equivalent boundary; and
+- the native fallback and the public `prove_reader` helpers use
+  `AuthenticatedReader`, which authenticates the whole zkey and rechecks each
+  chunk before parsing;
+- the browser two-response helper checks second-response chunks against hashes
+  recorded during the successful first pass;
+- direct `StreamingProofBuilder` callers must provide an equivalent boundary;
+  its final digest does not make parsing of unauthenticated bytes safe; and
 - every completed proof is verified with arkworks before release.
 
 The manifest pin is the sole trust root for one-pass parsing. The zkey pin
 supplied with it (`expected_zkey_sha256` in `StreamingProver`, or the zkey
 argument of `ZkeyChunkManifest::from_bytes`) is only compared with the
-whole-file digest the manifest claims; that digest is not recomputed during
-proving, and recomputing it would reintroduce the whole-file pass the manifest
-exists to avoid. Artifact publication must call
-`ZkeyChunkManifest::verify_reader`, the only check that recomputes it, so the
-manifest's chunk table, length, and whole-file digest are known to describe the
-same zkey.
+whole-file digest the manifest claims; proving does not recompute that digest.
+Artifact publication must call `ZkeyChunkManifest::verify_reader`, the only
+check that recomputes it, so the manifest's chunk table, length, and whole-file
+digest are known to describe the same zkey.
 
-SPARROW retains arkworks for BN254 field arithmetic, group operations,
-randomness, Groth16 proof construction, and final verification. The Curvy-owned
-surface covers artifact framing, authentication order, SAGE and QAP evaluation,
-scalar recoding, bucket scheduling, and allocation lifetimes.
+Input checks:
+
+- all streaming headers reject domains above 2^22 before QAP allocation;
+- native, manifest, and WASM loads also cap the domain at the authenticated
+  zkey length divided by 64 (one 64-byte H-query point per domain element);
+- `prove_reader` and `prove_reader_owned` require `Read + Seek`; use a pinned
+  manifest for non-seekable input;
+- assignment element zero must equal one before streaming begins; and
+- verification-key anchors must be non-identity points.
 
 ## Verification
 
@@ -276,12 +251,3 @@ Run the feature-specific suite before distributing a SPARROW build:
 cargo test -p curvy-prover --features sparrow
 cargo test -p curvy-prover --features parallel,sparrow
 ```
-
-All streaming headers reject domains above 2^22 before QAP allocation. Native,
-manifest, and WASM adapters additionally cap the domain by authenticated zkey
-length divided by 64 (the H query requires one 64-byte point per domain element).
-Direct `StreamingProofBuilder::new` callers must still supply preauthenticated
-bytes: its final digest does not retroactively make untrusted parsing safe.
-`prove_reader` and `prove_reader_owned` now require `Read + Seek`; use a pinned
-manifest for nonseekable input. Assignment element zero must equal one before
-streaming begins, and verification-key anchors must be nonidentity points.

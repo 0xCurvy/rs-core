@@ -193,6 +193,59 @@ pub fn fr_from_be_32_checked(bytes: &[u8]) -> Option<Fr> {
     crate::secret_field::from_le_bytes(&encoded)
 }
 
+/// Failure to decode concatenated canonical 32-byte field elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackedFieldsError {
+    /// The byte length is not a multiple of 32.
+    Length(usize),
+    /// The element at this position is not below the modulus.
+    NonCanonical(usize),
+}
+
+impl fmt::Display for PackedFieldsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Length(length) => {
+                write!(f, "packed length {length} is not a multiple of 32 bytes")
+            }
+            Self::NonCanonical(index) => write!(
+                f,
+                "packed element {index} is not canonical: it is at or above the BN254 modulus"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PackedFieldsError {}
+
+/// Decode concatenated canonical 32-byte big-endian field elements, the encoding
+/// of bulk tree data at the binding boundaries. Like [`fr_from_be_32_checked`],
+/// an element at or above the modulus is rejected, not reduced.
+pub fn fr_from_be_32_packed(bytes: &[u8]) -> Result<Vec<Fr>, PackedFieldsError> {
+    let (elements, rest) = bytes.as_chunks::<32>();
+    if !rest.is_empty() {
+        return Err(PackedFieldsError::Length(bytes.len()));
+    }
+    elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            fr_from_be_32_checked(element).ok_or(PackedFieldsError::NonCanonical(index))
+        })
+        .collect()
+}
+
+/// Concatenate field elements as canonical 32-byte big-endian values, the
+/// inverse of [`fr_from_be_32_packed`].
+pub fn fr_to_be_32_packed(fields: &[Fr]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(fields.len() * 32);
+    for field in fields {
+        packed.extend_from_slice(&fr_to_be_32(field));
+    }
+    packed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +310,28 @@ mod tests {
 
         let modulus = <Fr as PrimeField>::MODULUS.to_bytes_be();
         assert_eq!(fr_from_be_32_checked(&modulus), None);
+    }
+
+    #[test]
+    fn packed_fields_roundtrip_and_reject_reduction_and_partial_elements() {
+        use ark_ff::AdditiveGroup;
+
+        let fields = [Fr::ZERO, Fr::from(5u64), -Fr::from(1u64)];
+        let packed = fr_to_be_32_packed(&fields);
+        assert_eq!(packed.len(), 96);
+        assert_eq!(fr_from_be_32_packed(&packed), Ok(fields.to_vec()));
+        assert_eq!(fr_from_be_32_packed(&[]), Ok(Vec::new()));
+        assert_eq!(
+            fr_from_be_32_packed(&packed[..95]),
+            Err(PackedFieldsError::Length(95))
+        );
+
+        let mut with_modulus = packed.clone();
+        with_modulus[32..64].copy_from_slice(&<Fr as PrimeField>::MODULUS.to_bytes_be());
+        assert_eq!(
+            fr_from_be_32_packed(&with_modulus),
+            Err(PackedFieldsError::NonCanonical(1))
+        );
     }
 
     #[test]

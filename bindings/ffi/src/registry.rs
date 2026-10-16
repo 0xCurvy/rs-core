@@ -30,7 +30,7 @@ impl<T> Registry<T> {
 
     pub fn insert(&self, value: T) -> u64 {
         let handle = NEXT_HANDLE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1).filter(|next| *next != 0)
             })
             .expect("Curvy FFI handle space exhausted");

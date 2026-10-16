@@ -36,7 +36,7 @@ fn deterministic_scalars(size: usize) -> Vec<Fr> {
     (0..size)
         .map(|_| {
             let mut bytes = [0_u8; 32];
-            for word in bytes.chunks_exact_mut(8) {
+            for word in bytes.as_chunks_mut::<8>().0 {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;

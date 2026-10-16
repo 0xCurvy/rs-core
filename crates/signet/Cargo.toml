@@ -1,6 +1,6 @@
 [package]
 name = "curvy-signet"
-description = "Builds SIGNET witness-graph artifacts from curvy-signet-builder output"
+description = "Builds SIGNET witness-graph artifacts from postcard witness graphs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

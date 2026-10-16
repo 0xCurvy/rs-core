@@ -154,11 +154,16 @@ fn decode<T: Element>(block: &Block) -> Params<T> {
 /// makes decoding cheaper, which is the bulk of per-arity load cost.
 fn decode_fields<T: Element>(encoded: &[u8]) -> Vec<T> {
     encoded
-        .chunks_exact(FIELD_BYTES)
+        .as_chunks::<FIELD_BYTES>()
+        .0
+        .iter()
         .map(|value| {
             let mut limbs = [0_u64; FIELD_BYTES / size_of::<u64>()];
-            for (limb, encoded_limb) in limbs.iter_mut().zip(value.chunks_exact(size_of::<u64>())) {
-                *limb = u64::from_le_bytes(encoded_limb.try_into().expect("64-bit limb"));
+            for (limb, encoded_limb) in limbs
+                .iter_mut()
+                .zip(value.as_chunks::<{ size_of::<u64>() }>().0)
+            {
+                *limb = u64::from_le_bytes(*encoded_limb);
             }
             T::from_ark(
                 Fr::from_bigint(BigInt::new(limbs))

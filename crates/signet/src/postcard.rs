@@ -242,8 +242,8 @@ pub enum WireNode<Op> {
     MontConstant(Fr),
     Op(Op, usize, usize),
     /// Black-box function: a name and its argument node indices. The only one the
-    /// exporter accepts is the `bbf_inv` closure introduced by
-    /// `patches/circomlib-iszero-bbf.patch`.
+    /// exporter accepts is `bbf_inv`, the inverse-or-zero that graphs built from an
+    /// `IsZero`-patched circomlib carry.
     Bbf(String, Vec<usize>),
 }
 
@@ -310,24 +310,27 @@ impl Graph {
         })
     }
 
-    /// Size of the input buffer the graph expects.
+    /// Size of the input buffer the graph expects: one past the last signal any
+    /// named input covers or any input node reads.
     ///
-    /// Upstream emits its `Input` nodes as one leading run, so the buffer is the
-    /// highest index in that run plus one. Scanning the whole node list instead
-    /// would be wrong for a graph that reuses an input later.
+    /// The input table decides it, since callers write through it and the evaluator
+    /// refuses a mapping that runs past the buffer. Optimization drops input nodes
+    /// nothing reads, so a graph whose last inputs are unused has no node for them,
+    /// and input nodes need not come first. The zero-hash placeholder `encode` drops
+    /// does not count.
     pub fn input_buffer_len(&self) -> usize {
-        let mut highest = 0_usize;
-        let mut started = false;
-        for node in &self.nodes {
-            match node {
-                Node::Input(index) => {
-                    highest = highest.max(*index);
-                    started = true;
-                }
-                _ if started => break,
-                _ => {}
-            }
-        }
-        highest + 1
+        let named = self
+            .input_mapping
+            .iter()
+            .filter(|mapping| mapping.hash != 0)
+            .map(|mapping| {
+                usize::try_from(mapping.signal_id.saturating_add(mapping.signal_size))
+                    .unwrap_or(usize::MAX)
+            });
+        let read = self.nodes.iter().filter_map(|node| match node {
+            Node::Input(index) => Some(index.saturating_add(1)),
+            _ => None,
+        });
+        named.chain(read).max().unwrap_or(1).max(1)
     }
 }

@@ -278,6 +278,34 @@ impl Imt {
         }
     }
 
+    /// Append `leaves` in order, all or none, hashing each changed node once
+    /// instead of one full path per leaf.
+    ///
+    /// Produces exactly the tree [`Self::insert`] produces one leaf at a time.
+    /// Fails before changing the tree if the leaves do not fit.
+    pub fn insert_many(&mut self, leaves: &[Fr]) -> Result<(), TreeError> {
+        if leaves.len() > self.capacity()?.saturating_sub(self.leaf_count()) {
+            return Err(TreeError::TreeFull { depth: self.depth });
+        }
+        if leaves.is_empty() {
+            return Ok(());
+        }
+        let mut first = self.leaf_count();
+        self.nodes[0].extend_from_slice(leaves);
+        for level in 0..self.depth {
+            // The nodes the batch changes on the level above are one run, from
+            // the parent of the first new node here to the last parent. The run
+            // starts at an even child, so its children pair up exactly as
+            // `from_leaves` pairs them, a missing right child reading as zero.
+            first >>= 1;
+            let parents = build_parent_level(&self.nodes[level][2 * first..], self.zeroes[level]);
+            let row = &mut self.nodes[level + 1];
+            row.truncate(first);
+            row.extend(parents);
+        }
+        Ok(())
+    }
+
     pub fn leaf_count(&self) -> usize {
         self.nodes[0].len()
     }
@@ -335,6 +363,31 @@ impl Imt {
         } else {
             self.nodes[self.depth][0]
         }
+    }
+
+    /// The left-hand node at each level where the next free leaf's path turns
+    /// right, and zero where it turns left (`depth` values, bottom→top).
+    ///
+    /// These are that leaf's siblings at the levels where they are already
+    /// fixed: everything to its left is complete, everything to its right is
+    /// empty. Appending a run of leaves from there needs nothing else from the
+    /// tree, which is what the calldata-bound pending-notes circuit takes as its
+    /// `frontier` input.
+    pub fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError> {
+        let index = self.leaf_count();
+        if index >= self.capacity()? {
+            return Err(TreeError::TreeFull { depth: self.depth });
+        }
+        Ok((0..self.depth)
+            .map(|level| {
+                let position = index >> level;
+                if position & 1 == 1 {
+                    self.nodes[level][position - 1]
+                } else {
+                    Fr::ZERO
+                }
+            })
+            .collect())
     }
 
     /// Inclusion proof for the leaf at `index` (`depth` siblings, bottom→top).
@@ -567,6 +620,29 @@ impl NotesFrontier {
         Ok((appended, siblings))
     }
 
+    /// The left-hand node at each level where the next free leaf's path turns
+    /// right, and zero where it turns left (`depth` values, bottom→top): the
+    /// stored subtrees, read where `leaf_count` has a set bit. Equal to
+    /// [`Imt::next_leaf_frontier`] for the same tree.
+    pub fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError> {
+        let capacity = tree_capacity(self.depth)?;
+        if self.leaf_count >= capacity {
+            return Err(TreeError::TreeFull { depth: self.depth });
+        }
+        (0..self.depth)
+            .map(|level| {
+                if (self.leaf_count >> level) & 1 == 0 {
+                    return Ok(Fr::ZERO);
+                }
+                self.frontier[level].ok_or_else(|| {
+                    TreeError::InvalidSnapshot(format!(
+                        "frontier level {level} is empty for occupied leaf-count bit",
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// [`NotesFrontier::append`] over a canonical big-endian 32-byte leaf.
     ///
     /// Every consumer reaching this type across a byte boundary - the wasm/TS
@@ -769,16 +845,9 @@ impl OrderedMerkleTree {
         Ok(index)
     }
 
+    /// Append `leaves` in order, all or none. See [`Imt::insert_many`].
     pub fn insert_many(&mut self, leaves: &[Fr]) -> Result<(), TreeError> {
-        if leaves.len() > self.tree.capacity()?.saturating_sub(self.leaf_count()) {
-            return Err(TreeError::TreeFull {
-                depth: self.depth(),
-            });
-        }
-        for leaf in leaves {
-            self.tree.insert(*leaf);
-        }
-        Ok(())
+        self.tree.insert_many(leaves)
     }
 
     pub fn create_proof_at(&self, index: usize) -> Result<InclusionProof, TreeError> {
@@ -853,7 +922,22 @@ impl IndexedMerkleTree {
         Ok(index)
     }
 
+    /// Append `leaves` in order, all or none.
+    ///
+    /// Capacity, repeats within the batch and leaves already in the tree are
+    /// checked before anything changes. The tree is then updated level by
+    /// level, each changed node hashed once (see [`Imt::insert_many`]), and ends
+    /// up exactly as inserting the leaves one at a time leaves it.
     pub fn insert_many(&mut self, leaves: &[Fr]) -> Result<(), TreeError> {
+        self.check_insert_many(leaves)?;
+        let first = self.leaf_count();
+        self.tree.insert_many(leaves)?;
+        self.indices
+            .extend(leaves.iter().copied().zip(first..first + leaves.len()));
+        Ok(())
+    }
+
+    fn check_insert_many(&self, leaves: &[Fr]) -> Result<(), TreeError> {
         if leaves.len() > self.tree.capacity()?.saturating_sub(self.leaf_count()) {
             return Err(TreeError::TreeFull {
                 depth: self.depth(),
@@ -865,10 +949,12 @@ impl IndexedMerkleTree {
                 return Err(TreeError::DuplicateLeaf);
             }
         }
-        for leaf in leaves {
-            self.insert(*leaf)?;
-        }
         Ok(())
+    }
+
+    /// See [`Imt::next_leaf_frontier`].
+    pub fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError> {
+        self.tree.next_leaf_frontier()
     }
 
     pub fn create_proof(&self, leaf: Fr) -> Result<InclusionProof, TreeError> {
@@ -898,6 +984,77 @@ impl IndexedMerkleTree {
         for leaf in removed {
             self.indices.remove(&leaf);
         }
+        Ok(())
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for super::IndexedMerkleTree {}
+    impl Sealed for super::NotesFrontier {}
+}
+
+/// A notes tree a pending batch is appended to: [`IndexedMerkleTree`] or
+/// [`NotesFrontier`]. Sealed, so only those two implement it.
+pub trait AppendableNotesTree: sealed::Sealed {
+    fn depth(&self) -> usize;
+    fn leaf_count(&self) -> usize;
+    fn root(&self) -> Fr;
+    /// The left-hand node at each level where the next free leaf's path turns
+    /// right, and zero where it turns left.
+    fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError>;
+    /// Append `leaves` in order, all or none.
+    fn append_all(&mut self, leaves: &[Fr]) -> Result<(), TreeError>;
+}
+
+impl AppendableNotesTree for IndexedMerkleTree {
+    fn depth(&self) -> usize {
+        IndexedMerkleTree::depth(self)
+    }
+
+    fn leaf_count(&self) -> usize {
+        IndexedMerkleTree::leaf_count(self)
+    }
+
+    fn root(&self) -> Fr {
+        IndexedMerkleTree::root(self)
+    }
+
+    fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError> {
+        IndexedMerkleTree::next_leaf_frontier(self)
+    }
+
+    /// Checks capacity and every duplicate, within the batch and against the
+    /// tree, before it inserts anything.
+    fn append_all(&mut self, leaves: &[Fr]) -> Result<(), TreeError> {
+        self.insert_many(leaves)
+    }
+}
+
+impl AppendableNotesTree for NotesFrontier {
+    fn depth(&self) -> usize {
+        NotesFrontier::depth(self)
+    }
+
+    fn leaf_count(&self) -> usize {
+        NotesFrontier::leaf_count(self)
+    }
+
+    fn root(&self) -> Fr {
+        NotesFrontier::root(self)
+    }
+
+    fn next_leaf_frontier(&self) -> Result<Vec<Fr>, TreeError> {
+        NotesFrontier::next_leaf_frontier(self)
+    }
+
+    /// A frontier holds at most one node per level, so appending to a copy and
+    /// swapping it in costs nothing next to the hashing.
+    fn append_all(&mut self, leaves: &[Fr]) -> Result<(), TreeError> {
+        let mut work = self.clone();
+        work.append_many(leaves)?;
+        *self = work;
         Ok(())
     }
 }
@@ -2553,5 +2710,255 @@ mod tests {
             Err(TreeError::NonCanonicalField),
         );
         assert_eq!(frontier.leaf_count(), 0, "rejected leaf must not be stored");
+    }
+}
+
+#[cfg(test)]
+mod batch_insert_tests {
+    //! The level-wise batch insert against the per-leaf algorithm it replaced,
+    //! compared on the trees' whole internal state.
+
+    use super::*;
+    use crate::field::fr_from_be_bytes_mod;
+
+    /// The reference: one full-path [`Imt::insert`] per leaf.
+    fn imt_insert_sequential(tree: &mut Imt, leaves: &[Fr]) {
+        for leaf in leaves {
+            tree.insert(*leaf);
+        }
+    }
+
+    /// The reference: [`IndexedMerkleTree::insert_many`] before the batch, the
+    /// same checks and then one [`IndexedMerkleTree::insert`] per leaf.
+    fn indexed_insert_sequential(
+        tree: &mut IndexedMerkleTree,
+        leaves: &[Fr],
+    ) -> Result<(), TreeError> {
+        tree.check_insert_many(leaves)?;
+        for leaf in leaves {
+            tree.insert(*leaf)?;
+        }
+        Ok(())
+    }
+
+    fn assert_same_imt(actual: &Imt, expected: &Imt, context: &str) {
+        assert_eq!(actual.depth, expected.depth, "{context}");
+        assert_eq!(actual.zero_leaf, expected.zero_leaf, "{context}");
+        assert_eq!(actual.zeroes, expected.zeroes, "{context}");
+        assert_eq!(actual.nodes, expected.nodes, "{context}");
+    }
+
+    fn assert_same_indexed(
+        actual: &IndexedMerkleTree,
+        expected: &IndexedMerkleTree,
+        context: &str,
+    ) {
+        assert_same_imt(&actual.tree, &expected.tree, context);
+        assert_eq!(actual.indices, expected.indices, "{context}");
+    }
+
+    /// SplitMix64, so every run sees the same batches.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform enough in `0..bound`; `bound` must not be zero.
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        /// A field element from 256 random bits, reduced.
+        fn field(&mut self) -> Fr {
+            let mut bytes = [0u8; 32];
+            for chunk in bytes.chunks_mut(8) {
+                chunk.copy_from_slice(&self.next().to_be_bytes());
+            }
+            fr_from_be_bytes_mod(&bytes)
+        }
+
+        fn fields(&mut self, count: usize) -> Vec<Fr> {
+            (0..count).map(|_| self.field()).collect()
+        }
+
+        /// A batch size for `remaining` free leaves: often one, sometimes all
+        /// of them, otherwise anything from zero up.
+        fn batch(&mut self, remaining: usize) -> usize {
+            match self.below(5) {
+                0 => remaining.min(1),
+                1 => remaining,
+                _ => self.below(remaining + 1),
+            }
+        }
+    }
+
+    /// Every start and every batch size, up to a full tree, from a bulk-built
+    /// and from an incrementally built start. Up to depth 3 also with a
+    /// leaf-level zero other than the field zero, as the sharded tree's cap has.
+    #[test]
+    fn imt_batch_equals_sequential_from_every_start_at_small_depths() {
+        for depth in 0..=4 {
+            let capacity = 1usize << depth;
+            let leaves: Vec<Fr> = (0..capacity as u64).map(|i| Fr::from(100 + i)).collect();
+            let zero_leaves = if depth <= 3 {
+                vec![Fr::ZERO, Fr::from(9u64)]
+            } else {
+                vec![Fr::ZERO]
+            };
+            for zero_leaf in zero_leaves {
+                let roots: Vec<Fr> = (0..=capacity)
+                    .map(|length| {
+                        Imt::from_leaves_with_zero(depth, zero_leaf, &leaves[..length]).root()
+                    })
+                    .collect();
+                for start in 0..=capacity {
+                    let bulk = Imt::from_leaves_with_zero(depth, zero_leaf, &leaves[..start]);
+                    let mut incremental = Imt::new_with_zero(depth, zero_leaf);
+                    imt_insert_sequential(&mut incremental, &leaves[..start]);
+                    for initial in [bulk, incremental] {
+                        for count in 0..=capacity - start {
+                            let context = format!("depth {depth}, start {start}, count {count}");
+                            let batch_leaves = &leaves[start..start + count];
+                            let mut batch = initial.clone();
+                            let mut sequential = initial.clone();
+                            batch.insert_many(batch_leaves).expect("the batch fits");
+                            imt_insert_sequential(&mut sequential, batch_leaves);
+                            assert_same_imt(&batch, &sequential, &context);
+                            assert_eq!(batch.root(), roots[start + count], "{context}");
+                        }
+                        // One leaf more than fits is refused before anything changes.
+                        let mut refused = initial.clone();
+                        let overflow = vec![Fr::from(7u64); capacity - start + 1];
+                        assert_eq!(
+                            refused.insert_many(&overflow),
+                            Err(TreeError::TreeFull { depth })
+                        );
+                        assert_same_imt(&refused, &initial, "refused");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Random batches of random leaves until the tree is exactly full, then a
+    /// refused leaf; repeated and present leaves are refused without change.
+    #[test]
+    fn indexed_batch_equals_sequential_on_random_batches() {
+        let mut rng = Rng(0x0dd_ba11);
+        for depth in [1, 2, 3, 5, 7] {
+            let capacity = 1usize << depth;
+            for _ in 0..12 {
+                let history_length = rng.below(capacity + 1);
+                let history = rng.fields(history_length);
+                let mut batch = if rng.below(2) == 0 {
+                    IndexedMerkleTree::from_leaves(depth, &history).expect("history fits")
+                } else {
+                    let mut tree = IndexedMerkleTree::new(depth).expect("depth is valid");
+                    indexed_insert_sequential(&mut tree, &history).expect("history fits");
+                    tree
+                };
+                let mut sequential = batch.clone();
+                let mut batches = 0;
+                while batch.leaf_count() < capacity || batches == 0 {
+                    let count = rng.batch(capacity - batch.leaf_count());
+                    let leaves = rng.fields(count);
+                    let context =
+                        format!("depth {depth}, start {}, count {count}", batch.leaf_count());
+                    batch.insert_many(&leaves).expect("the batch fits");
+                    indexed_insert_sequential(&mut sequential, &leaves).expect("the batch fits");
+                    assert_same_indexed(&batch, &sequential, &context);
+                    batches += 1;
+                }
+
+                let full = batch.clone();
+                assert_eq!(
+                    batch.insert_many(&[rng.field()]),
+                    Err(TreeError::TreeFull { depth })
+                );
+                assert_same_indexed(&batch, &full, "refused when full");
+            }
+
+            // Refusals leave the tree as it was, whatever the batch held before them.
+            if capacity < 4 {
+                continue;
+            }
+            let mut tree = IndexedMerkleTree::from_leaves(depth, &rng.fields(capacity / 2))
+                .expect("half fits");
+            let before = tree.clone();
+            let present = tree.leaves()[0];
+            let fresh = rng.field();
+            for leaves in [vec![fresh, present], vec![fresh, fresh]] {
+                assert_eq!(tree.insert_many(&leaves), Err(TreeError::DuplicateLeaf));
+                assert_same_indexed(&tree, &before, "refused duplicate");
+            }
+        }
+    }
+
+    /// One set of leaves in several orders, each cut into random batches.
+    #[test]
+    fn indexed_batch_equals_sequential_for_shuffled_orders_of_one_set() {
+        let mut rng = Rng(0x0de5);
+        let depth = 5;
+        let mut leaves = rng.fields(24);
+        let history = rng.fields(5);
+        for _ in 0..6 {
+            for index in (1..leaves.len()).rev() {
+                leaves.swap(index, rng.below(index + 1));
+            }
+            let mut batch = IndexedMerkleTree::from_leaves(depth, &history).expect("fits");
+            let mut sequential = batch.clone();
+            let mut rest = leaves.as_slice();
+            while !rest.is_empty() {
+                let (now, later) = rest.split_at(rng.batch(rest.len()));
+                batch.insert_many(now).expect("the batch fits");
+                indexed_insert_sequential(&mut sequential, now).expect("the batch fits");
+                assert_same_indexed(&batch, &sequential, "one set in order");
+                rest = later;
+            }
+            assert_eq!(batch.leaf_count(), history.len() + leaves.len());
+        }
+    }
+
+    /// The production depth, from the empty tree and from a 2,000-leaf tree:
+    /// batches that end exactly at the 2,048-leaf boundary, start right after
+    /// it, and cross the next 256-leaf one.
+    #[test]
+    fn indexed_batch_equals_sequential_at_production_depth() {
+        let mut rng = Rng(0x30);
+        let empty = IndexedMerkleTree::new(NOTES_TREE_DEPTH).expect("depth is valid");
+        let filled =
+            IndexedMerkleTree::from_leaves(NOTES_TREE_DEPTH, &rng.fields(2_000)).expect("fits");
+        for (initial, counts) in [(empty, vec![1, 0, 37, 1]), (filled, vec![1, 47, 1, 256, 3])] {
+            let mut batch = initial.clone();
+            let mut sequential = initial;
+            for count in counts {
+                let leaves = rng.fields(count);
+                let context = format!("start {}, count {count}", batch.leaf_count());
+                batch.insert_many(&leaves).expect("the batch fits");
+                indexed_insert_sequential(&mut sequential, &leaves).expect("the batch fits");
+                assert_same_indexed(&batch, &sequential, &context);
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_tree_batch_equals_sequential() {
+        let leaves = [5u64, 5, 9, 5, 1, 1].map(Fr::from);
+        let mut batch = OrderedMerkleTree::new(3).expect("depth is valid");
+        batch.insert(Fr::from(2u64)).expect("fits");
+        let mut sequential = batch.clone();
+        batch.insert_many(&leaves).expect("fits");
+        imt_insert_sequential(&mut sequential.tree, &leaves);
+        assert_same_imt(&batch.tree, &sequential.tree, "ordered");
+        assert_eq!(
+            batch.insert_many(&leaves[..2]),
+            Err(TreeError::TreeFull { depth: 3 })
+        );
     }
 }

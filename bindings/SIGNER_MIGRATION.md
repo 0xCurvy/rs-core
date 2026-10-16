@@ -15,8 +15,8 @@ needed. Existing keys and signing profiles remain compatible.
 | `ephemeralPubKey(scalarDecimal)` | `ephemeralPubKeyBytes(bytes)` | Exactly 32 bytes, little-endian; zero and all other 256-bit values are accepted |
 
 A seed and a scalar are different key profiles even though both occupy 32 bytes.
-Preserve the profile already used by the account. Stealth spend/view keys use
-their own APIs.
+Keep the profile the account already uses. Stealth spend and view keys use their
+own APIs.
 
 ## WASM ownership
 
@@ -41,28 +41,26 @@ try {
 }
 ```
 
-Use `SeedSigner` in the same pattern for seed-backed accounts. For a signer kept
-through an unlocked session, make account lock, logout, account replacement and
-worker shutdown explicitly call `free()`. The worker that owns the WASM instance
-also owns its signer. Keep only the opaque signer in application state.
-
-Existing decimal/hex key storage can be imported during migration, but creating
-those strings still creates copies that JavaScript cannot wipe. For the full
-benefit, store encrypted key bytes and decrypt directly to mutable bytes. A
-storage migration should verify that the derived public key is unchanged.
+- Use `SeedSigner` the same way for seed-backed accounts.
+- For a signer kept for an unlocked session, call `free()` on account lock,
+  logout, account replacement and worker shutdown.
+- The worker that owns the WASM instance also owns its signer. Keep only the
+  opaque signer in application state.
+- Decimal or hex key strings can still be imported, but JavaScript cannot wipe
+  them. Store encrypted key bytes and decrypt directly into mutable bytes.
+- When migrating key storage, verify that the derived public key is unchanged.
 
 ## C ownership
 
-Use `curvy_seed_signer_new` or `curvy_scalar_signer_new` with the corresponding
-32-byte buffer. Clear the caller buffer with the host's secure clearing routine
-after the constructor returns, including on error. Check `CurvyStatus` before
-using the returned handle.
-
-Wrap the handle in one owning application object. Route signing/public-key calls
-through it, release output JSON with `curvy_string_free`, and call the matching
-`curvy_*_signer_free` on every successful construction's cleanup path. Mark the
-wrapper closed after freeing it. C signer destruction waits for an active
-operation and clears the key before returning.
+- Call `curvy_seed_signer_new` or `curvy_scalar_signer_new` with the 32-byte
+  buffer. Clear the buffer with the host's secure clearing routine after the
+  constructor returns, including on error.
+- Check `CurvyStatus` before using the returned handle.
+- Wrap the handle in one owning application object. Route signing and
+  public-key calls through it and release output JSON with `curvy_string_free`.
+- Call the matching `curvy_*_signer_free` on the cleanup path of every
+  successful construction, then mark the wrapper closed. Freeing waits for an
+  active operation and clears the key before returning.
 
 ## Integration checks
 
@@ -70,19 +68,18 @@ operation and clears the key before returning.
   switching callers. Include a scalar whose leading bytes differ so endian
   mistakes cannot pass unnoticed.
 - Verify that clearing the import buffer does not break later signing.
-- Exercise constructor/signing failures, lock/logout and account switching;
+- Exercise constructor and signing failures, lock, logout and account switching;
   every owned signer must be released exactly once.
 - Remove plaintext key strings from application state, logs, errors and messages
-  between workers. Keep key loading and signing in the owning worker where possible.
+  between workers. Keep key loading and signing in the owning worker where
+  possible.
 
-These signer APIs are available in `curvy-wasm` and the C ABI. The native Node
-prover addon does not expose equivalent signer handles. Integrations using it
-for signing would first need corresponding exports. Witness builders that still
-take key strings need an adapter accepting a signer or signing callback; Rust's
-`build_withdrawal_with_signer` and `build_aggregation_with_signer` already support
-that pattern.
+## Scope
 
-Shared-secret hash and cipher string APIs are separate from these signer APIs.
-Eliminating secret strings from those calls would also require byte-input binding
-variants. Signer migration does not erase old JavaScript strings, runtime copies
-or private witness JSON.
+- Signer handles are available in `curvy-wasm` and the C ABI, not in the Node
+  binding.
+- In Rust, `build_withdrawal_with_signer` and `build_aggregation_with_signer`
+  take a signer instead of a key string.
+- Shared-secret hash and cipher APIs still take secret strings.
+- Moving to signers does not erase existing JavaScript strings, runtime copies or
+  private witness JSON.

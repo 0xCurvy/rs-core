@@ -64,7 +64,7 @@ Copyright (c) 2021 Georgios Konstantopoulos
 
 - `crates/prover/src/zkey.rs` - snarkjs `.zkey` parser, with the Wasmer-based witness calculator removed, unchecked bulk point deserialization behind a mandatory SHA-256 artifact digest, and parallel point conversion
 - `crates/prover/src/qap.rs` - the snarkjs-compatible R1CS-to-QAP reduction
-- `crates/prover/testdata/multiplier.zkey` - unmodified `test-vectors/test.zkey` fixture, used only by the prover integration test
+- `crates/prover/testdata/multiplier.zkey` - unmodified `test-vectors/test.zkey` fixture, used only in tests
 
 ---
 
@@ -77,8 +77,7 @@ Poseidon parameter sets, the EdDSA-Poseidon verification equation, the `.zkey`
 and `.wtns` container layouts, and the snarkjs proof/public-signal JSON shapes
 are formats and specifications that this code interoperates with. The
 implementations here were ported from the permissively licensed projects listed
-above, and the source comments record the points where behavior deliberately
-diverges from circomlibjs.
+above, and the source comments mark where behavior differs from circomlibjs.
 
 `crates/prover/src/wtns.rs` and `crates/witness/src/lib.rs` are original
 implementations written against the snarkjs `.wtns` container format and Curvy's

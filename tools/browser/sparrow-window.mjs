@@ -4,7 +4,7 @@
 // proofs (sparrow-window.html). Cases need manifestUrl, manifestPath and
 // manifestSha256 in addition to the serve.mjs fields. Point
 // CURVY_BROWSER_PKG_WEB / CURVY_BROWSER_PKG_WEB_THREADS at
-// `scripts/build-wasm.sh web [--threads] --sparrow` prover packages.
+// `scripts/build.sh wasm-web[-threads] --sparrow` prover packages.
 //
 // Each run is a fresh Chromium process tree for one mode and scenario: one
 // warm-up proof, then CURVY_BROWSER_SAMPLES (default 2) proofs per width in

@@ -14,7 +14,8 @@ use curvy_core::eddsa::{
 };
 use curvy_core::encoding::{try_dec_to_le_32, try_dec_to_u256};
 use curvy_core::field::{
-    Bn254Fr, Fr, fr_from_be_32_checked, fr_to_be_32, fr_to_dec, try_fr_from_dec,
+    Bn254Fr, Fr, fr_from_be_32_checked, fr_from_be_32_packed, fr_to_be_32, fr_to_be_32_packed,
+    fr_to_dec, try_fr_from_dec,
 };
 use curvy_core::hash_utils::sha256_bigint as core_sha256_bigint;
 use curvy_core::imt::{
@@ -28,7 +29,10 @@ use curvy_core::stealth;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
+mod bound;
 mod signers;
+
+pub use bound::{WasmBoundPendingCommitment, WasmCalldataBinding, bind_calldata};
 
 // Threaded builds export `initThreadPool(n)` - call it once (after `init()`)
 // on a cross-origin-isolated page before scans or bulk tree construction.
@@ -325,7 +329,7 @@ impl WasmMerkleTree {
     }
 
     pub fn leaves(&self) -> Vec<u8> {
-        pack_fields(self.inner.leaves())
+        fr_to_be_32_packed(self.inner.leaves())
     }
 
     #[wasm_bindgen(getter)]
@@ -692,7 +696,7 @@ impl WasmShardedNotesTree {
             .inner
             .rewind_live_to(leaf_count as usize)
             .map_err(js_tree_error)?;
-        Ok(pack_fields(&removed))
+        Ok(fr_to_be_32_packed(&removed))
     }
 
     pub fn root(&self) -> Vec<u8> {
@@ -731,7 +735,7 @@ impl WasmShardedNotesTree {
 
     #[wasm_bindgen(js_name = completedShardRoots)]
     pub fn completed_shard_roots(&self) -> Vec<u8> {
-        pack_fields(self.inner.completed_roots())
+        fr_to_be_32_packed(self.inner.completed_roots())
     }
 
     #[wasm_bindgen(js_name = completedShardRoot)]
@@ -747,7 +751,7 @@ impl WasmShardedNotesTree {
 
     #[wasm_bindgen(js_name = liveLeaves)]
     pub fn live_leaves(&self) -> Vec<u8> {
-        pack_fields(self.inner.live_leaves())
+        fr_to_be_32_packed(self.inner.live_leaves())
     }
 
     #[wasm_bindgen(js_name = drainDirtyOwnedNotes)]
@@ -792,7 +796,7 @@ impl WasmInclusionProof {
 
     #[wasm_bindgen(getter)]
     pub fn siblings(&self) -> Vec<u8> {
-        pack_fields(&self.0.siblings)
+        fr_to_be_32_packed(&self.0.siblings)
     }
 
     #[wasm_bindgen(getter)]
@@ -826,7 +830,7 @@ impl WasmOwnedNoteWitness {
         self.0
             .within_shard_siblings
             .as_deref()
-            .map(pack_fields)
+            .map(fr_to_be_32_packed)
             .unwrap_or_default()
     }
 }
@@ -840,24 +844,8 @@ fn decode_field(bytes: &[u8], what: &str) -> Result<Fr, JsError> {
 }
 
 fn decode_fields(bytes: &[u8], what: &str) -> Result<Vec<Fr>, JsError> {
-    if !bytes.len().is_multiple_of(32) {
-        return Err(JsError::new(&format!(
-            "sharded tree: packed {what} length {} is not divisible by 32",
-            bytes.len(),
-        )));
-    }
-    bytes
-        .chunks_exact(32)
-        .map(|raw| decode_field(raw, what))
-        .collect()
-}
-
-fn pack_fields(fields: &[Fr]) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(fields.len() * 32);
-    for field in fields {
-        packed.extend_from_slice(&fr_to_be_32(field));
-    }
-    packed
+    fr_from_be_32_packed(bytes)
+        .map_err(|error| JsError::new(&format!("sharded tree: {what}: {error}")))
 }
 
 fn js_tree_error(error: TreeError) -> JsError {

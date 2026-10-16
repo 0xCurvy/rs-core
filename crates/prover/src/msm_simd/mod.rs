@@ -1,6 +1,5 @@
 //! Opt-in (`wasm-simd-msm`) batch-affine MSM for portable WASM builds with
-//! simd128: the arithmetic from `poc/wasm-field` (see its README for the
-//! design, bounds argument and measurements).
+//! simd128. The representation and its bounds are documented in `u29x9`.
 //!
 //! BN254 Fq uses nine unsaturated 29-bit limbs; four independent bucket
 //! additions run in simd128 lanes (`i64x2.extmul_{low,high}_i32x4_u`), so

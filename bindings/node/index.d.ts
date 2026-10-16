@@ -10,10 +10,29 @@ export interface ResidentProver {
 
 /**
  * Native indexed Poseidon tree used by backend services. The tree itself is a
- * core primitive; `build_pending_commitment` is the canonical adapter for the
- * currently deployed pending-notes-commitment circuit input.
+ * core primitive; `build_bound_pending_commitment` is the adapter for the
+ * calldata-bound pending-notes circuit, `build_pending_commitment` for the
+ * SHA-256 one it replaces.
  */
 export declare class IndexedMerkleTree {
+  /**
+   * Append the batch and return the calldata-bound pending-notes circuit's
+   * input for it. Nothing changes unless every id is accepted: `batchSize` an
+   * integer from 1 to 4096, at least one id, at most `batchSize`, none zero,
+   * none repeated, none already in the tree.
+   */
+  buildBoundPendingCommitment(batchSize: number, pendingNoteIdsJson: string): BoundPendingCommitmentInput
+  /**
+   * Packed counterpart to `buildBoundPendingCommitment`. Each pending note id
+   * is a canonical 32-byte big-endian BN254 field element.
+   */
+  buildBoundPendingCommitmentPacked(batchSize: number, pendingNoteIds: Buffer): BoundPendingCommitmentInput
+  /**
+   * The calldata-bound circuit's `frontier` input for the next batch: the
+   * left-hand node at each level where the next free leaf's path turns right,
+   * and zero where it turns left. Decimal strings, bottom to top.
+   */
+  nextLeafFrontier(): Array<string>
   constructor(depth: number, leavesJson: string)
   /**
    * Construct directly from concatenated canonical 32-byte big-endian
@@ -27,6 +46,9 @@ export declare class IndexedMerkleTree {
   /**
    * Advance the tree transactionally: the live tree changes only after all
    * insertions, sibling proofs, and the circuit input hash succeed.
+   *
+   * The input of the SHA-256 pending-notes circuit. The calldata-bound circuit
+   * that replaces it takes `buildBoundPendingCommitment`'s.
    */
   buildPendingCommitment(batchSize: number, pendingNoteIdsJson: string): PendingCommitmentInput
   /**
@@ -50,6 +72,25 @@ export declare class IndexedMerkleTree {
  * Only a repeat inside one batch is rejected here.
  */
 export declare class NotesFrontier {
+  /**
+   * Append the batch and return the calldata-bound pending-notes circuit's
+   * input for it. Nothing changes unless every id is accepted: `batchSize` an
+   * integer from 1 to 4096, at least one id, at most `batchSize`, none zero,
+   * none repeated. A frontier holds no leaves, so an id already in the tree
+   * goes unnoticed.
+   */
+  buildBoundPendingCommitment(batchSize: number, pendingNoteIdsJson: string): BoundPendingCommitmentInput
+  /**
+   * Packed counterpart to `buildBoundPendingCommitment`. Each pending note id
+   * is a canonical 32-byte big-endian BN254 field element.
+   */
+  buildBoundPendingCommitmentPacked(batchSize: number, pendingNoteIds: Buffer): BoundPendingCommitmentInput
+  /**
+   * The calldata-bound circuit's `frontier` input for the next batch: the
+   * left-hand node at each level where the next free leaf's path turns right,
+   * and zero where it turns left. Decimal strings, bottom to top.
+   */
+  nextLeafFrontier(): Array<string>
   /**
    * An empty frontier. `shardHeight` must match whoever else reads the
    * snapshot; it does not affect roots or commitment inputs.
@@ -89,6 +130,9 @@ export declare class NotesFrontier {
    * `IndexedMerkleTree.buildPendingCommitment` returns for the same tree
    * and notes. Take `snapshot()` first to be able to go back if the commit
    * built from this input does not land.
+   *
+   * The input of the SHA-256 pending-notes circuit. The calldata-bound circuit
+   * that replaces it takes `buildBoundPendingCommitment`'s.
    */
   buildPendingCommitment(batchSize: number, pendingNoteIdsJson: string): PendingCommitmentInput
   /**
@@ -137,6 +181,52 @@ export declare class ResidentProver {
    * resolve at the same point.
    */
   close(): Promise<void>
+}
+
+/**
+ * Bind calldata words the way the aggregator's bound circuits and contract do:
+ * `commitment` is the Poseidon chain over the words, `x` is
+ * `keccak256(words ‖ commitment) mod r` and `y` the words evaluated at `x`.
+ * `wordsJson` is a JSON array of at most 8,192 decimal strings, each below the
+ * field modulus.
+ */
+export declare function bindCalldata(wordsJson: string): CalldataBinding
+
+/**
+ * Packed counterpart to `bindCalldata`. Each word is a canonical 32-byte
+ * big-endian BN254 field element.
+ */
+export declare function bindCalldataPacked(words: Buffer): CalldataBinding
+
+/**
+ * One pending batch as the calldata-bound pending-notes circuit and
+ * `commitPendingNotes` see it. Field elements are decimal strings.
+ */
+export interface BoundPendingCommitmentInput {
+  /**
+   * `VerifyPendingNotesCommitmentBound` input, `x` included: currentNoteIndex,
+   * currentNotesRoot, pendingNoteIds (the batch padded with zeros at the end),
+   * frontier and x.
+   */
+  circuitInputJson: string
+  /** What `commitPendingNotes` is sent: the batch without its padding. */
+  noteIds: Array<string>
+  newNotesRoot: string
+  newNoteIndex: number
+  /** The proof's public signals are `[commitment, y, x]`. */
+  commitment: string
+  y: string
+  x: string
+}
+
+/**
+ * The three values that tie a proof to its calldata words, in the order of
+ * the proof's public signals, `[commitment, y, x]`. Decimal strings.
+ */
+export interface CalldataBinding {
+  commitment: string
+  y: string
+  x: string
 }
 
 export interface PendingCommitmentInput {

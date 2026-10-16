@@ -300,7 +300,7 @@ fn owned_buffers_free_with_the_layout_they_were_allocated_with() {
     // Use a non-power-of-two size to exercise the exact allocation layout.
     let leaves: Vec<u8> = (1_u64..=5).flat_map(field_bytes).collect();
     let mut appended = 0_u32;
-    for leaf in leaves.chunks_exact(32) {
+    for leaf in leaves.as_chunks::<32>().0 {
         assert_eq!(
             unsafe {
                 curvy_ffi::curvy_merkle_insert(tree, leaf.as_ptr(), leaf.len(), &mut appended)
@@ -1002,4 +1002,211 @@ fn ephemeral_public_key_accepts_u256_and_rejects_overflow_without_panicking() {
     );
     assert!(output.is_null());
     assert!(!last_error().contains(input.to_str().unwrap()));
+}
+
+type BuildBound = unsafe extern "C" fn(u64, u32, *const u8, usize, *mut *mut c_char) -> CurvyStatus;
+
+/// A refused pending batch, or one with nowhere to write the result, leaves the
+/// tree as it was.
+#[test]
+fn refused_bound_pending_commitments_leave_the_tree_unchanged() {
+    use curvy_ffi::{
+        curvy_frontier_build_bound_pending_commitment, curvy_frontier_free,
+        curvy_frontier_leaf_count, curvy_frontier_new, curvy_merkle_build_bound_pending_commitment,
+        curvy_merkle_leaf_count,
+    };
+
+    let mut merkle = 0_u64;
+    assert_eq!(curvy_merkle_new(6, &mut merkle), CurvyStatus::Ok);
+    let mut frontier = 0_u64;
+    assert_eq!(curvy_frontier_new(6, 2, &mut frontier), CurvyStatus::Ok);
+    let trees: [(u64, BuildBound, extern "C" fn(u64, *mut u32) -> CurvyStatus); 2] = [
+        (
+            merkle,
+            curvy_merkle_build_bound_pending_commitment,
+            curvy_merkle_leaf_count,
+        ),
+        (
+            frontier,
+            curvy_frontier_build_bound_pending_commitment,
+            curvy_frontier_leaf_count,
+        ),
+    ];
+
+    let ids =
+        |values: &[u64]| -> Vec<u8> { values.iter().copied().flat_map(field_bytes).collect() };
+    let valid = ids(&[1, 2]);
+    let mut out: *mut c_char = std::ptr::null_mut();
+    for (handle, build, leaf_count) in trees {
+        let count = || {
+            let mut leaves = u32::MAX;
+            assert_eq!(leaf_count(handle, &mut leaves), CurvyStatus::Ok);
+            leaves
+        };
+        let refusals: [(u32, Vec<u8>); 9] = [
+            (0, valid.clone()),
+            (4097, valid.clone()),
+            (u32::MAX, valid.clone()),
+            (1, valid.clone()),
+            (4, Vec::new()),
+            (4, ids(&[1, 0])),
+            (4, ids(&[1, 1])),
+            (4, valid[..40].to_vec()),
+            (4, vec![0xff; 32]),
+        ];
+        for (batch_size, note_ids) in refusals {
+            assert_eq!(
+                unsafe {
+                    build(
+                        handle,
+                        batch_size,
+                        note_ids.as_ptr(),
+                        note_ids.len(),
+                        &mut out,
+                    )
+                },
+                CurvyStatus::InvalidArgument
+            );
+            assert!(!last_error().is_empty());
+            assert!(out.is_null());
+            assert_eq!(count(), 0);
+        }
+        assert_eq!(
+            unsafe { build(handle, 4, valid.as_ptr(), valid.len(), std::ptr::null_mut()) },
+            CurvyStatus::InvalidArgument
+        );
+        assert_eq!(count(), 0);
+
+        assert_eq!(
+            unsafe { build(handle, 4, valid.as_ptr(), valid.len(), &mut out) },
+            CurvyStatus::Ok
+        );
+        let result: Vec<String> =
+            serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+        unsafe { curvy_string_free(out) };
+        out = std::ptr::null_mut();
+        assert_eq!(result.len(), 6);
+        assert_eq!(result[2], "2");
+        assert_eq!(count(), 2);
+        // The last three are the proof's public signals, [commitment, y, x], and
+        // the circuit input carries x.
+        let input: serde_json::Value = serde_json::from_str(&result[0]).unwrap();
+        assert_eq!(input["x"], result[5].as_str());
+        assert_ne!(result[4], result[5]);
+    }
+
+    // Only the indexed tree keeps its leaves, so only it refuses one again: an
+    // id already in the tree is the caller's mistake, like any other refusal.
+    let again = ids(&[3, 1]);
+    assert_eq!(
+        unsafe {
+            curvy_merkle_build_bound_pending_commitment(
+                merkle,
+                4,
+                again.as_ptr(),
+                again.len(),
+                &mut out,
+            )
+        },
+        CurvyStatus::InvalidArgument
+    );
+    assert!(last_error().contains("already exists"));
+    assert!(out.is_null());
+    let mut leaves = 0_u32;
+    assert_eq!(
+        curvy_merkle_leaf_count(merkle, &mut leaves),
+        CurvyStatus::Ok
+    );
+    assert_eq!(leaves, 2);
+
+    curvy_merkle_free(merkle);
+    curvy_frontier_free(frontier);
+}
+
+/// A batch the tree has no room for is a failure of the call, not of its
+/// arguments, and changes nothing.
+#[test]
+fn a_bound_pending_commitment_into_a_full_tree_is_an_error() {
+    use curvy_ffi::{
+        curvy_frontier_build_bound_pending_commitment, curvy_frontier_free,
+        curvy_frontier_leaf_count, curvy_frontier_new,
+    };
+
+    let mut frontier = 0_u64;
+    assert_eq!(curvy_frontier_new(2, 1, &mut frontier), CurvyStatus::Ok);
+    let ids: Vec<u8> = (1_u64..=5).flat_map(field_bytes).collect();
+    let mut out: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            curvy_frontier_build_bound_pending_commitment(
+                frontier,
+                8,
+                ids.as_ptr(),
+                ids.len(),
+                &mut out,
+            )
+        },
+        CurvyStatus::Error
+    );
+    assert!(last_error().contains("full"));
+    assert!(out.is_null());
+    let mut leaves = u32::MAX;
+    assert_eq!(
+        curvy_frontier_leaf_count(frontier, &mut leaves),
+        CurvyStatus::Ok
+    );
+    assert_eq!(leaves, 0);
+    curvy_frontier_free(frontier);
+}
+
+#[test]
+fn calldata_words_must_be_canonical_field_elements() {
+    use curvy_ffi::curvy_bind_calldata;
+
+    let mut out: *mut c_char = std::ptr::null_mut();
+    let too_many = serde_json::to_string(&vec!["1"; 8193]).unwrap();
+    for words in [
+        "[]",
+        r#"["21888242871839275222246405745257275088548364400416034343698204186575808495617"]"#,
+        r#"["01"]"#,
+        r#"["-1"]"#,
+        r#"[1]"#,
+        too_many.as_str(),
+    ] {
+        let words = CString::new(words).unwrap();
+        assert_eq!(
+            unsafe { curvy_bind_calldata(words.as_ptr(), &mut out) },
+            CurvyStatus::InvalidArgument,
+            "{words:?}"
+        );
+        assert!(out.is_null());
+        assert!(!last_error().is_empty());
+    }
+}
+
+/// `[commitment, y, x]`, the order of the proof's public signals.
+#[test]
+fn calldata_binding_is_returned_in_public_signal_order() {
+    use curvy_core::calldata::bind_calldata;
+    use curvy_core::field::{Fr, fr_to_dec};
+    use curvy_ffi::curvy_bind_calldata;
+
+    let words = CString::new(r#"["1","2","3"]"#).unwrap();
+    let mut out: *mut c_char = std::ptr::null_mut();
+    assert_eq!(
+        unsafe { curvy_bind_calldata(words.as_ptr(), &mut out) },
+        CurvyStatus::Ok
+    );
+    let result: Vec<String> =
+        serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+    unsafe { curvy_string_free(out) };
+    let binding = bind_calldata(&[Fr::from(1u64), Fr::from(2u64), Fr::from(3u64)]).unwrap();
+    assert_eq!(
+        result,
+        [
+            fr_to_dec(&binding.commitment),
+            fr_to_dec(&binding.y),
+            fr_to_dec(&binding.x),
+        ]
+    );
 }

@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           target: wasm32-unknown-unknown
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -38,9 +38,7 @@ jobs:
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: cargo test --locked -p curvy-ffi
       - run: scripts/build.sh wasm-nodejs
-      - run: cbindgen -q --verify --config bindings/ffi/cbindgen.toml --lockfile Cargo.lock --output bindings/ffi/include/curvy.h bindings/ffi
-      - run: node scripts/check-ffi-surface.mjs
-      - run: node scripts/check-ffi-vectors.mjs
+      - run: scripts/check.sh ffi
 
   node-native:
     name: Node-API binding (Linux x64, Node 22)
@@ -50,7 +48,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -64,6 +62,22 @@ jobs:
         working-directory: bindings/node
       - run: npm run package:preview
         working-directory: bindings/node
+
+  # Builds the shipped Linux x64 binary exactly as scripts/lib/node-release.mjs
+  # does, with bindings/node/Dockerfile.release. The image pins its own Rust, so
+  # this is what catches a toolchain bump the image has not followed.
+  node-release-image:
+    name: Node-API release image (Linux x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: >-
+          docker buildx build --platform linux/amd64
+          --file bindings/node/Dockerfile.release --target artifact
+          --build-arg NODE_RELEASE_TARGET=linux-x64
+          --output "type=local,dest=$RUNNER_TEMP/node-release" .
+      - run: test -s "$RUNNER_TEMP/node-release/curvy_rs_core_node.linux-x64-gnu.node"
 
   # Builds the binding natively with MSVC and runs the Node suite on Windows.
   # This is not the shipped Windows artifact: releases cross-compile that one
@@ -80,7 +94,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -94,7 +108,7 @@ jobs:
         working-directory: bindings/node
 
   # Builds and tests the binding natively on Apple Silicon, as
-  # scripts/build-node-release.mjs does for the shipped darwin-arm64 artifact
+  # scripts/lib/node-release.mjs does for the shipped darwin-arm64 artifact
   # (same target and deployment floor).
   node-native-macos:
     name: Node-API binding (macOS arm64, Node 22)
@@ -104,7 +118,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -130,25 +144,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           components: rustfmt
       - run: cargo fmt --all --check
       - run: cargo run --locked -p curvy-benchmarks --bin generate_poseidon_optimized -- --check
       # The unrolled 9x29 kernels of the opt-in WASM SIMD features are generated.
-      - run: python3 crates/prover/scripts/gen_simd_u29.py --check
+      - run: scripts/check.sh kernels
       - run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      # Both artifact-pipeline suites drive this validator example
-      # (target/debug/examples/artifact_manifest_check).
-      - run: cargo build -p curvy-prover --example artifact_manifest_check --features sage --locked
-      - run: python3 tools/artifacts/test_release.py
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - run: npm ci --prefix tools/artifacts --ignore-scripts
       - run: npm audit --prefix tools/artifacts --audit-level=high
-      - run: python3 tools/artifacts/test_pipeline.py
+      - run: scripts/check.sh artifacts
       - run: cargo install cargo-deny --version 0.19.9 --locked
       - run: cargo deny check
       - run: scripts/build.sh native
@@ -169,7 +179,7 @@ jobs:
           grep -qx examples/artifact_manifest_check.rs <<<"$prover_contents"
           grep -qx examples/derive_sage_cache.rs <<<"$prover_contents"
           grep -qx examples/zkey_chunk_manifest.rs <<<"$prover_contents"
-          if grep -Eq 'MOBILE_HARNESS|^examples/.*bench\.rs$|native_window_sweep' <<<"$prover_contents"; then
+          if grep -Eq '^examples/.*bench\.rs$|native_window_sweep' <<<"$prover_contents"; then
             echo "::error::curvy-prover includes harness or benchmark example files"
             exit 1
           fi
@@ -253,7 +263,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           components: ${{ matrix.components }}
           # rust-cache keys on the job id, which every entry shares. A per-entry
           # key keeps each feature set's target directory from evicting another's.
@@ -270,34 +280,31 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           target: wasm32-unknown-unknown
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: node --test crates/prover/js/*.test.mjs scripts/*.test.mjs
+      - run: scripts/check.sh js
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: scripts/build.sh wasm-nodejs
-      - run: node crates/wasm/smoke-test.cjs
       - name: Check production prover bindings exclude SPARROW and SAGE
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmResidentProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
-      # Run a real self-verified Groth16 proof through each Node build, not just
-      # an export check: pinned fixture, publicSignals ["33"], VK digest equal
-      # to the snarkjs export, and a corrupted key refused.
-      - run: node tools/browser/node-proof-check.mjs
-      - run: node crates/prover/js/signet-v2-cross-target.cjs --expect-v2-disabled
-      - run: scripts/build-wasm.sh nodejs --signet-v2
+      # Golden vectors, a real self-verified Groth16 proof (pinned fixture,
+      # publicSignals ["33"], VK digest equal to the snarkjs export, a corrupted
+      # key refused) and SIGNET v2 refused, then accepted by the v2 builds.
+      - run: scripts/check.sh wasm
+      - run: scripts/build.sh wasm-nodejs --signet-v2
       - name: Check standalone SIGNET v2 bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
-      - run: node tools/browser/node-proof-check.mjs
-      - run: node crates/prover/js/signet-v2-cross-target.cjs
-      - run: scripts/build-wasm.sh nodejs --sparrow
+      - run: scripts/check.sh wasm --signet-v2
+      - run: scripts/build.sh wasm-nodejs --sparrow
       - name: Check opt-in SPARROW and SAGE bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); const streaming = wasm.WasmStreamingProver; if (typeof wasm.WasmResidentProver !== "function" || typeof streaming !== "function" || typeof wasm.sageCacheVersion !== "function" || typeof streaming.fromSignetWithConfig !== "function" || typeof streaming.prototype.compiledSageProgram !== "function" || wasm.benchSha256 !== undefined) process.exit(1)'
-      - run: node tools/browser/node-proof-check.mjs
+      - run: scripts/check.sh wasm --signet-v2
       # The browser package (scripts/build.sh wasm-web) is built and proved by
       # the wasm-browser job below.
       - run: scripts/build.sh wasm-bundler
@@ -318,7 +325,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           target: wasm32-unknown-unknown
           components: clippy
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -347,16 +354,16 @@ jobs:
           tar -xzf "$archive" --strip-components=1 "wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux/wasm-tools"
           echo "WASM_TOOLS=$RUNNER_TEMP/wasm-tools" >> "$GITHUB_ENV"
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - run: scripts/build-wasm.sh nodejs --sparrow --simd --simd-selftest
+      - run: scripts/build.sh wasm-nodejs --sparrow --simd --simd-selftest
       # `i64x2.extmul` must not degrade into emulated `i64x2.mul` (2x slower).
-      - run: node scripts/check-simd-codegen.mjs
+      - run: scripts/check.sh simd-codegen
       # Fixed seeds, then 60 s of random seeds; a failure prints its --repro.
-      - run: node scripts/simd-selftest.mjs --seeds 3 --stress 60 --bench-rounds 0
+      - run: scripts/check.sh simd --seeds 3 --stress 60 --bench-rounds 0
       # SIMD kernel vs the arkworks batch-affine path on one input in one
       # process: a ratio, so the runner's speed does not matter.
       - name: SIMD MSM speed gate
-        run: node scripts/simd-selftest.mjs --seeds 0 --bench-rounds 7 --min-speedup 1.4
-      - run: node tools/browser/node-proof-check.mjs
+        run: scripts/check.sh simd --seeds 0 --bench-rounds 7 --min-speedup 1.4
+      - run: scripts/check.sh wasm --signet-v2
 
   # Build every browser configuration that ships in @0xcurvy/rs-core-wasm with
   # the exact release command (release.yml.disabled, scripts/build.sh npm) and
@@ -372,19 +379,19 @@ jobs:
       matrix:
         include:
           - name: threaded release
-            toolchain: nightly-2026-07-03
+            toolchain: nightly-2026-08-15
             components: rust-src
             build: scripts/build.sh wasm-web-threads
             mode: threaded
             artifact: wasm-web-threads
             artifact-dir: pkg-web-threads
           - name: threaded compact-matrix
-            toolchain: nightly-2026-07-03
+            toolchain: nightly-2026-08-15
             components: rust-src
-            build: scripts/build-wasm.sh web --threads --compact-matrix
+            build: scripts/build.sh wasm-web-threads --compact-matrix
             mode: threaded
           - name: portable release
-            toolchain: 1.94.0
+            toolchain: 1.99.0
             components: ""
             build: scripts/build.sh wasm-web
             mode: portable
@@ -394,18 +401,18 @@ jobs:
           # and the development-only self-tests; the proof check runs on the
           # --simd build as it would ship, which must not export them.
           - name: threaded SIMD
-            toolchain: nightly-2026-07-03
+            toolchain: nightly-2026-08-15
             components: rust-src
-            selftest-build: scripts/build-wasm.sh web --threads --sparrow --simd --simd-selftest
-            build: scripts/build-wasm.sh web --threads --simd
+            selftest-build: scripts/build.sh wasm-web-threads --sparrow --simd --simd-selftest
+            build: scripts/build.sh wasm-web-threads --simd
             mode: threaded
             simd: true
             package-dir: pkg-web-threads
           - name: portable SIMD
-            toolchain: 1.94.0
+            toolchain: 1.99.0
             components: ""
-            selftest-build: scripts/build-wasm.sh web --sparrow --simd --simd-selftest
-            build: scripts/build-wasm.sh web --simd
+            selftest-build: scripts/build.sh wasm-web --sparrow --simd --simd-selftest
+            build: scripts/build.sh wasm-web --simd
             mode: portable
             simd: true
             package-dir: pkg-web
@@ -437,10 +444,10 @@ jobs:
           CURVY_WASM_OUT_DIR: ${{ env.SIMD_SELFTEST_DIR }}
       # Checks the cargo output of the build just made (it keeps function names).
       - if: matrix.selftest-build
-        run: node scripts/check-simd-codegen.mjs
+        run: scripts/check.sh simd-codegen
       - run: ${{ matrix.build }}
       - if: matrix.simd
-        run: node scripts/check-simd-codegen.mjs
+        run: scripts/check.sh simd-codegen
       - name: Check SIMD builds exclude the self-tests
         if: matrix.simd
         run: |
@@ -460,9 +467,9 @@ jobs:
       # here it is reported only.
       - if: matrix.selftest-build
         run: >-
-          node scripts/simd-selftest.mjs --engine chromium --mode ${{ matrix.mode }}
+          scripts/check.sh simd --engine chromium --mode ${{ matrix.mode }}
           --pkg "$SIMD_SELFTEST_DIR/prover/${{ matrix.package-dir }}" --stress 30 --min-speedup 0
-      - run: node tools/browser/check.mjs ${{ matrix.mode }}
+      - run: scripts/check.sh browser ${{ matrix.mode }}
       # Hand the proved release builds to the npm-package job.
       - if: matrix.artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -496,14 +503,7 @@ jobs:
         with:
           name: wasm-web-threads
           path: crates
-      - run: node scripts/build-npm.mjs --pack
-      - name: Smoke-test the packed tarball
-        run: |
-          install_dir="$(mktemp -d)"
-          cd "$install_dir"
-          npm init -y > /dev/null
-          npm install --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/0xcurvy-rs-core-wasm-*.tgz
-          node "$GITHUB_WORKSPACE/scripts/smoke-npm.mjs" "$install_dir"
+      - run: scripts/check.sh npm
 
   parser-fuzz:
     name: Authenticated parser fuzz smoke tests
@@ -513,40 +513,47 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: nightly-2026-07-03
+          toolchain: nightly-2026-08-15
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - run: cargo +nightly-2026-07-03 fetch --manifest-path fuzz/Cargo.toml --locked
+      - run: cargo +nightly-2026-08-15 fetch --manifest-path fuzz/Cargo.toml --locked
       # The fuzz crate's default `compact-matrix` feature selects the compact CSR
       # zkey parser; --no-default-features builds the nested parse_matrices path
       # that Rust, C and WASM ship by default. Build every target both ways; the
       # second build recompiles only curvy-prover and the fuzz binaries.
-      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build --no-default-features
-      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz build
+      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz build --no-default-features
+      - run: CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz build
       - run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Exercise parsers after digest authentication
         run: |
           for target in graph sage prover_formats input_json; do
-            CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
+            CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
           done
       # prover_formats is the only target that uses curvy-prover. It starts from
       # the corpus the compact run above just grew.
       - name: Exercise the nested zkey matrix parser
-        run: CARGO_NET_OFFLINE=true cargo +nightly-2026-07-03 fuzz run --no-default-features prover_formats -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
+        run: CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz run --no-default-features prover_formats -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
 
-  # crates/signet/generator is its own workspace, so nothing above compiles it.
-  # Drive the whole graph pipeline (circom -> generator -> graph.bin -> signet
-  # export -> evaluator round trip) on a three-signal circuit. Only the root
-  # workspace target is cached: the generator's build script does not track
-  # WITNESS_CPP (see build-graph.sh), so its target starts empty every run.
-  signet-generator:
-    name: SIGNET generator smoke
+  # Drives the graph pipeline (build-graph.sh with circom's R1CS as the proving
+  # key's -> curvy-signet-ir-builder -> graph.bin -> signet export -> evaluator
+  # round trip -> parity against circom's own witness) on a small circuit with
+  # input-dependent selects, and checks that a different circuit's R1CS is
+  # refused. The builder is installed from the commit in
+  # crates/signet/scripts/ir-builder.pin into a cached directory outside target/.
+  signet-graph:
+    name: SIGNET graph pipeline smoke
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SIGNET_IR_BUILDER_ROOT: ${{ github.workspace }}/../signet-ir-builder
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
+          cache-directories: ${{ github.workspace }}/../signet-ir-builder
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
       # circom v2.2.3: the tag's commit, built with circom's own Cargo.lock.
       # rust-cache keeps ~/.cargo/bin, so warm runs skip the build. The toolchain
       # action's `-D warnings` is cleared for this step only: it would fail the
@@ -555,10 +562,10 @@ jobs:
         env:
           RUSTFLAGS: ""
       - run: test "$(circom --version)" = "circom compiler 2.2.3"
-      - run: crates/signet/scripts/smoke-generator.sh
-      # The smoke builds without --locked; a drifted lockfile would mean it
-      # tested something other than the pinned generator.
-      - run: git diff --exit-code -- Cargo.lock crates/signet/generator/Cargo.lock
+      # Installs the pinned builder on a cold cache; the script clears the lint
+      # flags for that install only, so signet itself still builds with them.
+      - run: scripts/check.sh graph
+      - run: git diff --exit-code -- Cargo.lock
 
   # Lints every workflow, including the disabled release workflow, with pinned
   # actionlint and shellcheck release binaries checked against their SHA-256.

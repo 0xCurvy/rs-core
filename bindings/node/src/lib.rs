@@ -2,11 +2,12 @@ use std::{collections::HashSet, fs::File, io::BufReader, sync::Arc, time::Instan
 
 use curvy_core::{
     Fr,
-    field::{Bn254Fr, fr_from_be_32_checked, fr_to_be_32, fr_to_biguint, fr_to_dec},
+    field::{Bn254Fr, fr_from_be_32_packed, fr_to_be_32, fr_to_biguint, fr_to_dec},
     hash_utils::sha256_bigint,
     imt::{
         IndexedMerkleTree as RustIndexedMerkleTree, NotesFrontier as RustNotesFrontier, TreeError,
     },
+    witness::MAX_PENDING_BATCH_SIZE,
 };
 use curvy_prover::{
     Prover, ResidentProver as RustResidentProver,
@@ -22,20 +23,30 @@ use napi_derive::napi;
 use rayon::ThreadPoolBuilder;
 use zeroize::Zeroizing;
 
+mod bound;
 mod queue;
+pub use bound::{
+    BoundPendingCommitmentInput, CalldataBinding, bind_calldata, bind_calldata_packed,
+};
 use queue::{Rejection, SerialQueue};
 
-/// Resource ceiling for the pending-commitment adapter (including zero padding).
-const MAX_PENDING_BATCH_SIZE: u32 = 4096;
-fn validate_batch_size(batch_size: u32) -> Result<()> {
-    if !(1..=MAX_PENDING_BATCH_SIZE).contains(&batch_size) {
-        return Err(Error::new(
+/// A JavaScript number is a batch size only as an integer from 1 to
+/// `MAX_PENDING_BATCH_SIZE`, padding included. The `u32` conversion would wrap
+/// `2 ** 32 + 4` and truncate `4.9`, both to 4.
+fn batch_size_from_js(batch_size: f64) -> Result<usize> {
+    if batch_size.fract() == 0.0 && (1.0..=MAX_PENDING_BATCH_SIZE as f64).contains(&batch_size) {
+        Ok(batch_size as usize)
+    } else {
+        Err(Error::new(
             Status::InvalidArg,
-            "batchSize must be between 1 and 4096",
-        ));
+            format!("batchSize must be an integer between 1 and {MAX_PENDING_BATCH_SIZE}"),
+        ))
     }
-    Ok(())
 }
+
+/// JSON bytes budgeted per decimal field element: 77 digits, two quotes and a
+/// comma, with room to spare.
+const DECIMAL_JSON_BYTES_PER_FIELD: usize = 82;
 
 /// Resource ceiling for one frontier `append` call: 32 MiB of packed leaves.
 const MAX_APPEND_LEAVES: usize = 1 << 20;
@@ -520,8 +531,9 @@ pub struct PendingCommitmentInput {
 }
 
 /// Native indexed Poseidon tree used by backend services. The tree itself is a
-/// core primitive; `build_pending_commitment` is the canonical adapter for the
-/// currently deployed pending-notes-commitment circuit input.
+/// core primitive; `build_bound_pending_commitment` is the adapter for the
+/// calldata-bound pending-notes circuit, `build_pending_commitment` for the
+/// SHA-256 one it replaces.
 #[napi]
 pub struct IndexedMerkleTree {
     tree: RustIndexedMerkleTree,
@@ -567,20 +579,17 @@ impl IndexedMerkleTree {
 
     /// Advance the tree transactionally: the live tree changes only after all
     /// insertions, sibling proofs, and the circuit input hash succeed.
+    ///
+    /// The input of the SHA-256 pending-notes circuit. The calldata-bound circuit
+    /// that replaces it takes `buildBoundPendingCommitment`'s.
     #[napi(catch_unwind)]
     pub fn build_pending_commitment(
         &mut self,
-        batch_size: u32,
+        batch_size: f64,
         pending_note_ids_json: String,
     ) -> Result<PendingCommitmentInput> {
-        validate_batch_size(batch_size)?;
-        if pending_note_ids_json.len() > batch_size as usize * 82 + 2 {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "pending note ids JSON exceeds the batch byte budget",
-            ));
-        }
-        let pending_note_ids = parse_fields_json(&pending_note_ids_json, "pending note ids")?;
+        let batch_size = batch_size_from_js(batch_size)?;
+        let pending_note_ids = parse_pending_note_ids_json(&pending_note_ids_json, batch_size)?;
         self.build_pending_commitment_fields(batch_size, pending_note_ids)
     }
 
@@ -589,11 +598,11 @@ impl IndexedMerkleTree {
     #[napi(js_name = "buildPendingCommitmentPacked", catch_unwind)]
     pub fn build_pending_commitment_packed(
         &mut self,
-        batch_size: u32,
+        batch_size: f64,
         pending_note_ids: Buffer,
     ) -> Result<PendingCommitmentInput> {
-        validate_batch_size(batch_size)?;
-        if pending_note_ids.len() > batch_size as usize * 32 {
+        let batch_size = batch_size_from_js(batch_size)?;
+        if pending_note_ids.len() > batch_size * 32 {
             return Err(Error::new(
                 Status::InvalidArg,
                 "pending note ids exceed batch size",
@@ -605,7 +614,7 @@ impl IndexedMerkleTree {
 
     fn build_pending_commitment_fields(
         &mut self,
-        batch_size: u32,
+        batch_size: usize,
         pending_note_ids: Vec<Fr>,
     ) -> Result<PendingCommitmentInput> {
         build_pending_commitment_input(&mut self.tree, batch_size, pending_note_ids)
@@ -723,20 +732,17 @@ impl NotesFrontier {
     /// `IndexedMerkleTree.buildPendingCommitment` returns for the same tree
     /// and notes. Take `snapshot()` first to be able to go back if the commit
     /// built from this input does not land.
+    ///
+    /// The input of the SHA-256 pending-notes circuit. The calldata-bound circuit
+    /// that replaces it takes `buildBoundPendingCommitment`'s.
     #[napi(catch_unwind)]
     pub fn build_pending_commitment(
         &mut self,
-        batch_size: u32,
+        batch_size: f64,
         pending_note_ids_json: String,
     ) -> Result<PendingCommitmentInput> {
-        validate_batch_size(batch_size)?;
-        if pending_note_ids_json.len() > batch_size as usize * 82 + 2 {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "pending note ids JSON exceeds the batch byte budget",
-            ));
-        }
-        let pending_note_ids = parse_fields_json(&pending_note_ids_json, "pending note ids")?;
+        let batch_size = batch_size_from_js(batch_size)?;
+        let pending_note_ids = parse_pending_note_ids_json(&pending_note_ids_json, batch_size)?;
         self.build_pending_commitment_fields(batch_size, pending_note_ids)
     }
 
@@ -745,11 +751,11 @@ impl NotesFrontier {
     #[napi(js_name = "buildPendingCommitmentPacked", catch_unwind)]
     pub fn build_pending_commitment_packed(
         &mut self,
-        batch_size: u32,
+        batch_size: f64,
         pending_note_ids: Buffer,
     ) -> Result<PendingCommitmentInput> {
-        validate_batch_size(batch_size)?;
-        if pending_note_ids.len() > batch_size as usize * 32 {
+        let batch_size = batch_size_from_js(batch_size)?;
+        if pending_note_ids.len() > batch_size * 32 {
             return Err(Error::new(
                 Status::InvalidArg,
                 "pending note ids exceed batch size",
@@ -761,7 +767,7 @@ impl NotesFrontier {
 
     fn build_pending_commitment_fields(
         &mut self,
-        batch_size: u32,
+        batch_size: usize,
         pending_note_ids: Vec<Fr>,
     ) -> Result<PendingCommitmentInput> {
         // The indexed tree rejects any note id it already holds. A frontier
@@ -855,7 +861,7 @@ impl PendingNotesTree for RustNotesFrontier {
 /// have succeeded.
 fn build_pending_commitment_input<T: PendingNotesTree>(
     tree: &mut T,
-    batch_size: u32,
+    batch_size: usize,
     pending_note_ids: Vec<Fr>,
 ) -> Result<PendingCommitmentInput> {
     if pending_note_ids.is_empty() {
@@ -864,7 +870,7 @@ fn build_pending_commitment_input<T: PendingNotesTree>(
             "pending note ids must not be empty".to_owned(),
         ));
     }
-    if pending_note_ids.len() > batch_size as usize {
+    if pending_note_ids.len() > batch_size {
         return Err(Error::new(
             Status::InvalidArg,
             format!(
@@ -880,10 +886,10 @@ fn build_pending_commitment_input<T: PendingNotesTree>(
         .expect("zero is canonical")
         .into_inner();
     let mut padded_note_ids = pending_note_ids;
-    padded_note_ids.resize(batch_size as usize, zero);
+    padded_note_ids.resize(batch_size, zero);
 
     let mut work = tree.clone();
-    let mut siblings = Vec::with_capacity(batch_size as usize);
+    let mut siblings = Vec::with_capacity(batch_size);
     for &note_id in &padded_note_ids {
         if note_id == zero {
             siblings.push(vec!["0".to_owned(); tree.depth()]);
@@ -943,6 +949,8 @@ fn native_error(context: &str, error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, format!("{context}: {error}"))
 }
 
+/// A JSON array of canonical decimal field elements. A value that is not one
+/// is the caller's mistake, like a malformed array.
 fn parse_fields_json(json: &str, label: &str) -> Result<Vec<Fr>> {
     let values: Vec<String> = serde_json::from_str(json).map_err(|_| {
         Error::new(
@@ -952,36 +960,36 @@ fn parse_fields_json(json: &str, label: &str) -> Result<Vec<Fr>> {
     })?;
     values
         .iter()
-        .map(|value| {
+        .enumerate()
+        .map(|(index, value)| {
             Bn254Fr::try_from_dec(value)
                 .map(Bn254Fr::into_inner)
-                .map_err(|error| native_error(&format!("parse {label} field element"), error))
+                .map_err(|error| {
+                    Error::new(
+                        Status::InvalidArg,
+                        format!("{label} field element {index}: {error}"),
+                    )
+                })
         })
         .collect()
 }
 
-fn parse_fields_packed(bytes: &[u8], label: &str) -> Result<Vec<Fr>> {
-    if !bytes.len().is_multiple_of(32) {
+/// Pending note ids as JSON, refused before parsing once they exceed the byte
+/// budget of a full batch.
+fn parse_pending_note_ids_json(json: &str, batch_size: usize) -> Result<Vec<Fr>> {
+    let budget = batch_size * DECIMAL_JSON_BYTES_PER_FIELD + 2;
+    if json.len() > budget {
         return Err(Error::new(
             Status::InvalidArg,
-            format!("packed {label} length must be a multiple of 32 bytes"),
+            format!("pending note ids JSON exceeds the batch byte budget of {budget} bytes"),
         ));
     }
-    bytes
-        .chunks_exact(32)
-        .enumerate()
-        .map(|(index, bytes)| {
-            let encoded: &[u8; 32] = bytes
-                .try_into()
-                .expect("chunks_exact(32) always yields 32 bytes");
-            fr_from_be_32_checked(encoded).ok_or_else(|| {
-                Error::new(
-                    Status::InvalidArg,
-                    format!("packed {label} field element {index} is not canonical"),
-                )
-            })
-        })
-        .collect()
+    parse_fields_json(json, "pending note ids")
+}
+
+fn parse_fields_packed(bytes: &[u8], label: &str) -> Result<Vec<Fr>> {
+    fr_from_be_32_packed(bytes)
+        .map_err(|error| Error::new(Status::InvalidArg, format!("{label}: {error}")))
 }
 
 #[cfg(test)]

@@ -4,9 +4,7 @@ wasm-bindgen exports for `curvy-core`: Poseidon, seed-backed and direct-scalar
 BabyJubjub signing, note encryption and commitments, Merkle trees, witness-input
 builders, and stealth addressing.
 
-This crate is the JavaScript binding for core cryptography and tree operations.
-Groth16 proving is emitted as a separate WASM module by `curvy-prover`, allowing
-applications to ship only the functionality they use.
+Groth16 proving is a separate WASM module built from `curvy-prover`.
 
 ## Build
 
@@ -23,38 +21,36 @@ Portable builds are single-threaded. The threaded browser build exports
 `initThreadPool(n)`, requires cross-origin isolation, and uses `n` as this
 module's worker-pool size.
 
-The generated TypeScript declarations are the JavaScript API reference for each
-concrete output package. Rust item documentation on
-[docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) describes the underlying
-wasm-bindgen exports and boundary validation.
+See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for output
+directories, per-target requirements, and worker-budget configuration.
 
-Both signing profiles are supported:
+## API
+
+The generated TypeScript declarations are the JavaScript API reference for each
+output package. [docs.rs/curvy-wasm](https://docs.rs/curvy-wasm) documents the
+underlying exports and their input validation.
 
 | JavaScript API | Profile |
 |---|---|
 | `pubFromPrivateKey`, `sign` | Seed-backed BLAKE-512/prune derivation |
 | `pubFromScalar`, `signWithScalar`, `verifyScalarSignature` | Checked direct-scalar derivation |
 
-See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for exact
-output directories, per-target requirements, and worker-budget configuration.
+- Decimal crypto exports throw ordinary JavaScript errors for malformed input,
+  including `poseidon`, commitments, signing, ephemeral keys, cipher inputs, and
+  SHA-256 integers. Errors do not repeat the input.
+- Poseidon requires 1–16 inputs. Reducing field strings are limited to 4096
+  characters; raw integers must fit 256 bits and use at most 78 decimal digits.
+- `version()` reports the compiled workspace version.
+- `get_meta` returns both private keys. Treat it, `new_meta`, `scan`, and
+  full-witness exports as secret data.
+- After an unexpected `WebAssembly.RuntimeError`, discard the instance. Checked
+  input errors are ordinary `Error` values and leave the instance usable.
+- `verifyMerkleProof(depth, leaf, index, packedSiblings, root)` takes the
+  verifier's expected tree depth first. It returns `true` only for a proof with
+  exactly `depth` siblings that reaches `root`, so a truncated proof whose leaf
+  is an internal node, or a zero-sibling proof with `leaf == root`, returns
+  `false`. Four-argument calls without `depth` throw.
 
-All decimal crypto exports throw ordinary JavaScript errors for malformed
-input, including `poseidon`, commitments, signing, ephemeral keys, cipher inputs,
-and SHA-256 integers. Errors do not repeat the input. Poseidon requires 1–16
-inputs. Reducing field strings are limited to 4096 characters; raw integers must
-fit 256 bits and use at most 78 decimal digits. Valid results are unchanged.
-
-`version()` reports the compiled workspace version. The compatibility
-`get_meta` result includes both private keys; treat it, `new_meta`, `scan`, and full-witness exports as secret data.
-Unexpected `WebAssembly.RuntimeError` still requires discarding that instance;
-checked input errors are ordinary `Error` values and the instance remains usable.
-
-`verifyMerkleProof(depth, leaf, index, packedSiblings, root)` takes the
-verifier's expected tree depth first. It returns `true` only for a proof with
-exactly `depth` siblings that reaches `root`, so a truncated proof whose leaf is
-an internal node, or a zero-sibling proof with `leaf == root`, returns `false`.
-With the generated bindings, calls still using the earlier four-argument form
-throw instead of verifying.
 ## Byte-based signing keys
 
 `SeedSigner` imports a 32-byte seed. `ScalarSigner` imports a canonical nonzero
@@ -79,12 +75,14 @@ try {
 }
 ```
 
-`SeedSigner.sign` accepts unsigned decimal messages below `2^256`.
-`ScalarSigner.sign` requires a canonical BN254 field message. `free()` erases
-the owned key; subsequent method calls throw. Callers must erase their input
-buffers themselves and avoid converting keys to JavaScript strings.
-`ephemeralPubKeyBytes` accepts a 32-byte little-endian scalar, including zero,
-and returns `[x, y]`. String-based APIs remain available.
+- `SeedSigner.sign` accepts unsigned decimal messages below `2^256`.
+  `ScalarSigner.sign` requires a canonical BN254 field message.
+- `free()` erases the owned key; later method calls throw.
+- Callers must erase their own input buffers and avoid converting keys to
+  JavaScript strings.
+- `ephemeralPubKeyBytes` accepts a 32-byte little-endian scalar, including zero,
+  and returns `[x, y]`.
+- String-based APIs are also available.
 
 See the [application migration guide](../../bindings/SIGNER_MIGRATION.md) for
 profile mapping, storage and worker ownership, cleanup and integration checks.

@@ -168,7 +168,7 @@ pub fn from_hex_exact<const N: usize>(s: &str) -> Result<[u8; N], HexDecodeError
         });
     }
     let mut decoded = zeroize::Zeroizing::new([0u8; N]);
-    for (pair_index, pair) in bytes.chunks_exact(2).enumerate() {
+    for (pair_index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let index = pair_index * 2;
         let hi = hex_nibble(pair[0]).ok_or(HexDecodeError::InvalidCharacter {
             character: pair[0] as char,

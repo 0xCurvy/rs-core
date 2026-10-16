@@ -559,8 +559,10 @@ impl StreamingProofBuilder {
             (3, SectionProcessor::Small(bytes)) => {
                 let header = self.header()?;
                 let points = bytes
-                    .chunks_exact(G1_BYTES)
-                    .map(decode_g1)
+                    .as_chunks::<G1_BYTES>()
+                    .0
+                    .iter()
+                    .map(|point| decode_g1(point))
                     .collect::<Result<Vec<_>, _>>()?;
                 if points.iter().any(|point| !valid_g1(point)) {
                     return invalid("invalid verification-key IC point");
@@ -988,11 +990,11 @@ impl CoefficientAccumulator {
                 self.carry = Vec::with_capacity(COEFFICIENT_BYTES);
             }
         }
-        let mut records = bytes.chunks_exact(COEFFICIENT_BYTES);
-        for record in &mut records {
+        let (records, remainder) = bytes.as_chunks::<COEFFICIENT_BYTES>();
+        for record in records {
             self.queue_record(record)?;
         }
-        self.carry.extend_from_slice(records.remainder());
+        self.carry.extend_from_slice(remainder);
         Ok(())
     }
 
@@ -1020,8 +1022,10 @@ impl CoefficientAccumulator {
         #[cfg(not(feature = "parallel"))]
         let terms = self
             .batch
-            .chunks_exact(COEFFICIENT_BYTES)
-            .map(decode)
+            .as_chunks::<COEFFICIENT_BYTES>()
+            .0
+            .iter()
+            .map(|record| decode(record))
             .collect::<Result<Vec<_>, _>>()?;
         for term in terms {
             if term.matrix == 0 {
@@ -1525,11 +1529,8 @@ fn limbs(bytes: &[u8]) -> Result<BigInt<4>, StreamingError> {
         return invalid("invalid field element width");
     }
     let mut words = [0_u64; 4];
-    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
-        let limb: [u8; 8] = chunk
-            .try_into()
-            .map_err(|_| StreamingError::InvalidZkey("invalid field limb width".into()))?;
-        *word = u64::from_le_bytes(limb);
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
     }
     Ok(BigInt(words))
 }

@@ -1,6 +1,6 @@
 //! Emits C ABI golden vectors as JSON.
 //!
-//! `scripts/check-ffi-vectors.mjs` compares this output with the same calls
+//! `scripts/check.sh ffi` compares this output with the same calls
 //! through `curvy-wasm`. The binary calls exported FFI functions directly so it
 //! also covers marshalling and ownership.
 
@@ -111,6 +111,11 @@ fn main() {
         "nullifier".into(),
         take_string(|out| unsafe { curvy_nullifier(secret.as_ptr(), x.as_ptr(), y.as_ptr(), out) })
             .into(),
+    );
+
+    report.insert(
+        "bind_calldata_1_2_3".into(),
+        take_string(|out| unsafe { curvy_bind_calldata(one_two_three.as_ptr(), out) }).into(),
     );
 
     // BabyJubJub and EdDSA
@@ -256,6 +261,27 @@ fn main() {
     );
     report.insert("merkle_proof_verifies".into(), (valid == 1).into());
     curvy_proof_free(proof);
+    report.insert(
+        "merkle_next_leaf_frontier_depth8_leaves1to5".into(),
+        hex(&take_bytes(|out| {
+            curvy_merkle_next_leaf_frontier(tree, out)
+        }))
+        .into(),
+    );
+    let pending: Vec<u8> = (6_u64..=7).flat_map(field_bytes).collect();
+    report.insert(
+        "merkle_bound_pending_commitment_batch4_ids6to7".into(),
+        take_string(|out| unsafe {
+            curvy_merkle_build_bound_pending_commitment(
+                tree,
+                4,
+                pending.as_ptr(),
+                pending.len(),
+                out,
+            )
+        })
+        .into(),
+    );
     curvy_merkle_free(tree);
 
     // Sharded notes tree
@@ -289,6 +315,27 @@ fn main() {
     report.insert(
         "frontier_root_depth10_shard2_9notes".into(),
         hex(&take_bytes(|out| curvy_frontier_root(frontier, out))).into(),
+    );
+    report.insert(
+        "frontier_next_leaf_frontier_depth10_shard2_9notes".into(),
+        hex(&take_bytes(|out| {
+            curvy_frontier_next_leaf_frontier(frontier, out)
+        }))
+        .into(),
+    );
+    let pending: Vec<u8> = (10_u64..=12).flat_map(field_bytes).collect();
+    report.insert(
+        "frontier_bound_pending_commitment_batch4_ids10to12".into(),
+        take_string(|out| unsafe {
+            curvy_frontier_build_bound_pending_commitment(
+                frontier,
+                4,
+                pending.as_ptr(),
+                pending.len(),
+                out,
+            )
+        })
+        .into(),
     );
     curvy_frontier_free(frontier);
 

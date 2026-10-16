@@ -316,3 +316,73 @@ assertBoundaryError(() => wasm.send(metaBigK, "0.0"));
 assertBoundaryError(() => wasm.viewerScan(metaV, "0.0", [], []));
 assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
 console.log("Identity-point regressions passed");
+
+// Calldata binding and the calldata-bound pending-notes commitment, against real
+// proofs of the bound circuits (words and the [commitment, y, x] each verified with)
+// and an independent implementation for word counts and tree states no proof covers.
+const calldataVectors = require(path.join(TD, "calldata_binding_vectors.json"));
+const packFields = (values) =>
+  Uint8Array.from(Buffer.concat(values.map((value) => Buffer.from(BigInt(value).toString(16).padStart(64, "0"), "hex"))));
+const unpackFields = (bytes) =>
+  Array.from({ length: bytes.length / 32 }, (_, i) => BigInt(`0x${Buffer.from(bytes.slice(32 * i, 32 * i + 32)).toString("hex")}`).toString());
+const unpackField = (bytes) => {
+  assert.equal(bytes.length, 32);
+  return unpackFields(bytes)[0];
+};
+for (const vector of [...calldataVectors.spend, ...calldataVectors.binding]) {
+  const name = vector.circuit ?? vector.name;
+  const binding = wasm.bindCalldata(vector.words);
+  eq(binding.commitment, vector.commitment, `${name} commitment`);
+  eq(binding.y, vector.y, `${name} y`);
+  eq(binding.x, vector.x, `${name} x`);
+}
+assertBoundaryError(() => wasm.bindCalldata([]));
+assertBoundaryError(() =>
+  wasm.bindCalldata(["21888242871839275222246405745257275088548364400416034343698204186575808495617"]),
+);
+assertBoundaryError(() => wasm.bindCalldata(Array.from({ length: 8193 }, () => "1")));
+// The packed bound commitment against the decimal vectors: every field it
+// returns is packed, the circuit input is JSON.
+const checkBound = (bound, expected, label) => {
+  eq(unpackField(bound.newNotesRoot), expected.newNotesRoot, `${label} newNotesRoot`);
+  eq(String(bound.newNoteIndex), expected.newNoteIndex, `${label} newNoteIndex`);
+  eq(unpackField(bound.commitment), expected.commitment, `${label} commitment`);
+  eq(unpackField(bound.y), expected.y, `${label} y`);
+  eq(unpackField(bound.x), expected.x, `${label} x`);
+  assert.deepEqual(unpackFields(bound.noteIds), expected.noteIds);
+  eq(JSON.parse(bound.circuitInputJson).x, expected.x, `${label} circuit input x`);
+};
+{
+  const { batchSize, treeDepth, commits } = calldataVectors.pendingNotesCommitment;
+  const frontier = wasm.NotesFrontier.production();
+  const tree = new wasm.MerkleTree(treeDepth);
+  for (const commit of commits) {
+    eq(Buffer.from(frontier.nextLeafFrontier()).toString("hex"), Buffer.from(tree.nextLeafFrontier()).toString("hex"), "frontier");
+    const fromFrontier = frontier.buildBoundPendingCommitment(batchSize, packFields(commit.noteIds));
+    const fromTree = tree.buildBoundPendingCommitment(batchSize, packFields(commit.noteIds));
+    checkBound(fromFrontier, commit, "bound from the frontier");
+    checkBound(fromTree, commit, "bound from the tree");
+  }
+  const root = Buffer.from(tree.root()).toString("hex");
+  const leafCount = tree.leafCount;
+  assertBoundaryError(() => tree.buildBoundPendingCommitment(4, packFields(["7", "0"])));
+  assertBoundaryError(() => tree.buildBoundPendingCommitment(4, packFields([commits[0].noteIds[0]])));
+  // Batch sizes are integers in range, never wrapped or truncated into one.
+  for (const batchSize of [2 ** 32 + 4, 4.9, -1, Number.NaN, 0, 4097]) {
+    assertBoundaryError(() => tree.buildBoundPendingCommitment(batchSize, packFields(["7"])));
+    assertBoundaryError(() => frontier.buildBoundPendingCommitment(batchSize, packFields(["7"])));
+  }
+  eq(Buffer.from(tree.root()).toString("hex"), root, "a refused batch leaves the tree unchanged");
+  eq(tree.leafCount, leafCount, "a refused batch leaves the leaf count unchanged");
+}
+{
+  const { batchSize, cases } = calldataVectors.pendingNotesCommitmentFromState;
+  for (const vector of cases) {
+    const frontier = wasm.NotesFrontier.restore(Buffer.from(vector.snapshot, "hex"));
+    eq(unpackField(frontier.root()), vector.currentNotesRoot, `${vector.name} root`);
+    assert.deepEqual(unpackFields(frontier.nextLeafFrontier()), vector.frontier);
+    checkBound(frontier.buildBoundPendingCommitment(batchSize, packFields(vector.noteIds)), vector, vector.name);
+    frontier.free();
+  }
+}
+console.log("Calldata binding and bound pending-commitment vectors passed");

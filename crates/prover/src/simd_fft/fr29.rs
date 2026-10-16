@@ -1,6 +1,5 @@
 //! BN254 scalar field Fr in nine 29-bit limbs (same algorithm and bounds as
-//! poc/wasm-field's u29x9 for Fq; r < 2^254 as well, so every bound carries
-//! over). Constants derived with Python from
+//! `msm_simd::u29x9` for Fq; r < 2^254 as well, so every bound carries over). Constants derived with Python from
 //! r = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001.
 //!
 //! Data trick: an arkworks Fr stores x * 2^256 mod r. Reinterpreting that

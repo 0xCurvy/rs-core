@@ -120,6 +120,37 @@ fn the_upstream_placeholder_mapping_is_dropped() {
     assert_eq!(u32::from_le_bytes(bytes[56..60].try_into().unwrap()), 1);
 }
 
+/// Optimization drops input nodes nothing reads. A graph whose last input is unused
+/// still needs a buffer that covers every named input, or the evaluator refuses the
+/// input table.
+#[test]
+fn unused_trailing_inputs_are_covered_by_the_input_buffer() {
+    let mut graph = graph();
+    graph.input_mapping.push(InputMapping {
+        hash: fnv1a("b"),
+        signal_id: 2,
+        signal_size: 3,
+    });
+    assert_eq!(graph.input_buffer_len(), 5);
+    for version in [FormatVersion::V1, FormatVersion::V2] {
+        let bytes = encode(&graph, [0; 32], Envelope::Signet, version).expect("encode");
+        let digest = hex(&Sha256::digest(&bytes));
+        let assignment = WitnessGraph::from_bytes(&bytes, &digest)
+            .expect("the evaluator must accept a buffer covering every input")
+            .calculate_json(r#"{"a":"6","b":["1","2","3"]}"#)
+            .expect("evaluate");
+        assert_eq!(assignment[1].into_bigint().0[0], 43, "{version:?}");
+    }
+}
+
+/// Input nodes need not come first: the buffer covers an input read late.
+#[test]
+fn input_nodes_after_other_nodes_count() {
+    let mut graph = graph();
+    graph.nodes.push(Node::Input(4));
+    assert_eq!(graph.input_buffer_len(), 5);
+}
+
 /// A graph the exporter cannot faithfully represent must fail loudly rather than
 /// emit something that evaluates differently.
 #[test]

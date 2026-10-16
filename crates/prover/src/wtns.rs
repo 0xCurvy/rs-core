@@ -92,12 +92,10 @@ pub fn read_wtns(bytes: &[u8]) -> Result<Vec<Fr>, WtnsError> {
                 witness_count = Some(count);
             }
             2 => {
-                if data_section
-                    .replace((section_start, section_size))
-                    .is_some()
-                {
+                if data_section.is_some() {
                     return Err(WtnsError::DuplicateSection(section_id));
                 }
+                data_section = Some((section_start, section_size));
             }
             _ => {}
         }

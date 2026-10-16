@@ -11,7 +11,7 @@
 *.profdata
 
 # Generated wasm-bindgen output. Rebuild it with `scripts/build.sh` or
-# `scripts/build-wasm.sh`; published Rust crates never include these directories.
+# `scripts/build.sh wasm-*`; published Rust crates never include these directories.
 crates/wasm/pkg-node
 crates/wasm/pkg-web
 crates/wasm/pkg-web-threads
@@ -21,7 +21,7 @@ crates/prover/pkg-web
 crates/prover/pkg-web-threads
 crates/prover/pkg-bundler
 
-# Assembled npm package (scripts/build-npm.mjs) and its tarball. Rebuild it
+# Assembled npm package (scripts/build.sh npm) and its tarball. Rebuild it
 # from the wasm-bindgen output; CI publishes it from a tagged release.
 /dist
 *.tgz

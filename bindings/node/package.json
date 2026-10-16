@@ -1,6 +1,6 @@
 {
   "name": "@0xcurvy/rs-core-node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Native Node-API bindings for the Curvy Rust core and Groth16 prover",
   "license": "MIT",
   "repository": {
@@ -50,8 +50,8 @@
   "scripts": {
     "build": "napi build --no-js --platform --release",
     "build:debug": "napi build --no-js --platform",
-    "build:release": "node ../../scripts/build-node-release.mjs",
-    "package:metadata": "node ../../scripts/prepare-node-package.mjs",
+    "build:release": "node ../../scripts/lib/node-release.mjs",
+    "package:metadata": "node ../../scripts/lib/prepare-node-package.mjs",
     "package:preview": "npm run package:metadata && npm pack --dry-run --ignore-scripts",
     "test": "node --test test/*.test.mjs"
   },

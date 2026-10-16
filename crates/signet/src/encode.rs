@@ -148,10 +148,11 @@ fn encode_v2_node(bytes: &mut Vec<u8>, index: usize, node: &Node) -> Result<(), 
 
 /// The only black-box function the exporter understands.
 ///
-/// `patches/circomlib-iszero-bbf.patch` moves circomlib's dynamic `IsZero`
-/// ternary into a named closure so the graph can carry it as one node. Anything
-/// else is a circuit the exporter has not been shown to handle, and guessing at
-/// its semantics would produce a graph that evaluates to the wrong witness.
+/// `bbf_inv` is the inverse of its first argument, or zero for zero: circomlib's
+/// `IsZero` ternary moved into a named function, which graphs built from a
+/// circomlib patched that way carry as one node. Anything else is a circuit the
+/// exporter has not been shown to handle, and guessing at its semantics would
+/// produce a graph that evaluates to the wrong witness.
 fn inverse_source(name: &str, parameters: &[usize]) -> Result<usize, SignetError> {
     if strip_suffix_number(name) != "bbf_inv" || parameters.is_empty() {
         return Err(SignetError::UnsupportedBlackBox {

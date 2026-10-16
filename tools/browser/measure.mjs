@@ -5,7 +5,7 @@
 // CURVY_BROWSER_MODES (default portable,threaded).
 //
 // Build comparison: CURVY_BROWSER_BUILDS=label=mode:DIR[,label=mode:DIR...]
-// names prover package directories (for example scripts/build-wasm.sh output
+// names prover package directories (for example scripts/build.sh wasm-* output
 // written under CURVY_WASM_OUT_DIR). This script then starts one serve.mjs per
 // build with CURVY_BROWSER_ARTIFACTS and that build's package override, and
 // alternates the builds (ABBA order) in each of CURVY_BROWSER_ROUNDS rounds.

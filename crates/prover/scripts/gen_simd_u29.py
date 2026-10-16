@@ -20,13 +20,7 @@ stays in memory and nothing moves. The emitted code names the modulus only
 symbolically (`P`, `MU` from the constants module); the generator derives the
 limb constants from the preset's modulus and checks that module against them,
 so a wrong constant fails here rather than in a differential test. The
-readable loop forms (`mont_mul_ref`, `mul4_ref`, ...) and the PoC's
-differential tests live in poc/wasm-field/src (u29x9.rs, simd.rs, check.rs).
-
-Moved from poc/wasm-field/gen.py. Changes since: field presets and the
-constants check; `p_splat` reads through `black_box` (the crate forbids
-`unsafe`; the PoC used a volatile load); the PoC-only `mul4_split` variant is
-gone.
+`wasm-simd-selftest` build checks the kernels against arkworks.
 """
 
 import argparse
@@ -199,7 +193,7 @@ P_SPLAT = '''/// p limbs splatted to all four lanes. Read through `black_box` so
 /// generic `mul(zext, zext)`, and once one operand becomes a u64x2 constant
 /// the backend emits `i64x2.mul`, which V8 emulates on arm64 (NEON has no
 /// 64-bit lane multiply) instead of a single UMULL.
-/// scripts/check-simd-codegen.mjs guards this in CI.
+/// `scripts/check.sh simd-codegen` guards this in CI.
 static P_SPLAT: [v128; 9] = [
     u32x4(P[0], P[0], P[0], P[0]), u32x4(P[1], P[1], P[1], P[1]), u32x4(P[2], P[2], P[2], P[2]),
     u32x4(P[3], P[3], P[3], P[3]), u32x4(P[4], P[4], P[4], P[4]), u32x4(P[5], P[5], P[5], P[5]),
@@ -274,8 +268,7 @@ def render(name):
 //! limb constants from `{preset["constants"]}` (checked against p).
 //!
 //! Fully unrolled 9x29 Montgomery kernels: {", ".join(f"`{f}`" for f in fns)}
-//! (scalar, and 4-way simd128 for wasm32). Same algorithms and bounds as the
-//! loop forms in poc/wasm-field/src (u29x9.rs, simd.rs).
+//! (scalar, and 4-way simd128 for wasm32).
 #![allow(unused_mut, unused_assignments, clippy::all)]
 
 use {preset["constants"]}::{{MASK, MU, P, W}};

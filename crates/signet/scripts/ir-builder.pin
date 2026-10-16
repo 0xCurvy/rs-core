@@ -1,0 +1,8 @@
+# The curvy-signet-ir-builder that builds SIGNET graphs; ir-builder.sh reads it.
+#
+# rev is a full circom-witness-rs commit that contains ir-builder/, and lock_sha256
+# the SHA-256 of ir-builder/Cargo.lock at that commit. Together they fix the builder
+# and every dependency it compiles, circom's crates included. Bump both together.
+git=https://github.com/0xCurvy/circom-witness-rs
+rev=9fe1e5fa84f76e4d1ea2a97e0f49ce1152db162f
+lock_sha256=646f5dc0ce3c860e72e557baa71b238a6cfcc7fab4134126462901102fe5434a

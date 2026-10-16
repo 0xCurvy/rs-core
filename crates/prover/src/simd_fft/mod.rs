@@ -1,9 +1,7 @@
 //! Opt-in (`wasm-simd-fft`, wasm32 + simd128 only): the witness map's BN254
-//! Fr transforms on a 4-lane simd128 9x29-bit Montgomery multiply. Prototype
-//! from poc/wasm-fft; results are bit-identical to ark-poly (the PoC tests
-//! every size 2^3..2^18 against fft/ifft/coset fft and this exact step;
-//! `simdFftSelfTest` and `simdFftStress` check `qap::finish_evaluations` and
-//! the NTTs in a `wasm-simd-selftest` build of the shipped code).
+//! Fr transforms on a 4-lane simd128 9x29-bit Montgomery multiply. Results
+//! are bit-identical to ark-poly: `simdFftSelfTest` and `simdFftStress` check
+//! `qap::finish_evaluations` and the NTTs in a `wasm-simd-selftest` build.
 //!
 //! The inverse transform, coset scaling and forward transform run fused,
 //! depth-first over the packed data (see ntt.rs). With `parallel`, each

@@ -37,8 +37,8 @@ pub(crate) fn negate(value: Element) -> Element {
 /// Copying the residue avoids value-dependent canonicalization in arkworks.
 pub(crate) fn from_ark(value: Fr) -> Element {
     let mut bytes = Zeroizing::new([0_u8; 32]);
-    for (chunk, limb) in bytes.chunks_exact_mut(8).zip(value.0.0) {
-        chunk.copy_from_slice(&limb.to_le_bytes());
+    for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(value.0.0) {
+        *chunk = limb.to_le_bytes();
     }
     Element::from_montgomery(U256::from_le_slice(&bytes[..]))
 }
@@ -46,8 +46,8 @@ pub(crate) fn from_ark(value: Fr) -> Element {
 pub(crate) fn into_ark(value: Element) -> Fr {
     let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(value.as_montgomery().to_le_bytes().into());
     let mut limbs = Zeroizing::new([0_u64; 4]);
-    for (limb, chunk) in limbs.iter_mut().zip(bytes.chunks_exact(8)) {
-        *limb = u64::from_le_bytes(chunk.try_into().expect("64-bit field limb"));
+    for (limb, chunk) in limbs.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *limb = u64::from_le_bytes(*chunk);
     }
     // Element maintains a reduced Montgomery residue with the same modulus/radix.
     Fr::new_unchecked(BigInt::new(*limbs))

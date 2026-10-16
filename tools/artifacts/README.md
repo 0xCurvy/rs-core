@@ -13,9 +13,9 @@ python3 tools/artifacts/validate_release.py \
   --output /path/new-release-bundle
 ```
 
-Use the ceremony pin from independently reviewed protocol metadata. The command copies bounded regular files into a private staging directory, verifies the ceremony and circuit/witness relationships, and emits pins for those exact bytes. It does not publish, replace an existing bundle, or certify the ceremony's contributors. The bundle contains the witness/input fixture, so use an intended release fixture.
+Take the ceremony pin from independently reviewed protocol metadata. The command copies bounded regular files into a private staging directory, verifies the ceremony and the circuit/witness relationships, and emits pins for those exact bytes. It does not publish, replace an existing bundle, or certify the ceremony's contributors. The bundle contains the witness and input fixture, so use an intended release fixture.
 
-The standalone Rust example validates local compatibility and supports an optional input JSON for full graph/SAGE witness comparison. The Python command additionally requires the external transcript, R1CS, and SAGE gates; use it to create a release bundle.
+The `artifact_manifest_check` example on its own validates local compatibility and accepts an optional input JSON for a full graph/SAGE witness comparison. To create a release bundle, use the Python command, which also enforces the external transcript, R1CS, and SAGE gates.
 
 Regression tests:
 
@@ -25,6 +25,6 @@ python3 tools/artifacts/test_release.py
 python3 tools/artifacts/test_pipeline.py
 ```
 
-The full pipeline test generates a small ceremony with deliberately public test entropy. None of its outputs are suitable for production. Production PTAU/R1CS inputs are not checked into this repository.
+The pipeline test generates a small ceremony from public test entropy; none of its outputs are suitable for production. Production PTAU and R1CS inputs are not in this repository.
 
-The lockfile pins snarkjs 0.7.6. An override selects Underscore 1.13.8 for the transitive jsonpath dependency to address [GHSA-qpx9-hpmf-5gmw](https://github.com/advisories/GHSA-qpx9-hpmf-5gmw). These tools are development dependencies and are not part of Rust, Node, or WASM runtime packages.
+The lockfile pins snarkjs 0.7.6 and overrides Underscore to 1.13.8 for [GHSA-qpx9-hpmf-5gmw](https://github.com/advisories/GHSA-qpx9-hpmf-5gmw). These are development dependencies, not part of the Rust, Node, or WASM runtime packages.

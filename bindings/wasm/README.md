@@ -3,9 +3,9 @@
 Browser WebAssembly builds of the [Curvy Rust core](https://github.com/0xCurvy/rs-core) - stealth-address
 crypto (Poseidon, BabyJubjub/EdDSA, the note cipher, Merkle state, scanning) and the Groth16 prover.
 
-This package is generated output: `wasm-bindgen --target web`, published unmodified from a tagged
-release of the `rs-core` repository. The Rust crates themselves live on [crates.io](https://crates.io)
-(`curvy-core`, `curvy-witness`, `curvy-prover`, `curvy-wasm`); this is the artifact for JavaScript.
+Generated with `wasm-bindgen --target web` from a tagged `rs-core` release and published unmodified.
+The Rust crates are on [crates.io](https://crates.io) (`curvy-core`, `curvy-witness`, `curvy-prover`,
+`curvy-wasm`).
 
 Most applications should use [`@0xcurvy/curvy-sdk`](https://www.npmjs.com/package/@0xcurvy/curvy-sdk)
 instead of consuming these bindings directly.
@@ -20,7 +20,7 @@ instead of consuming these bindings directly.
 | `@0xcurvy/rs-core-wasm/prover-threads` | Rayon | requires cross-origin isolation |
 
 Each entry also exports its raw binary (`@0xcurvy/rs-core-wasm/core/curvy_wasm_bg.wasm`) for
-`?url`-style imports and for Node, which reads the bytes off disk.
+`?url`-style imports and for Node.
 
 ```js
 import init, { poseidon } from "@0xcurvy/rs-core-wasm/core";
@@ -32,11 +32,10 @@ await init(); // resolves curvy_wasm_bg.wasm relative to this module
 
 The generated glue locates its binary with `new URL('curvy_wasm_bg.wasm', import.meta.url)`, and the
 threaded builds spawn their Rayon workers with `new Worker(new URL('./workerHelpers.js', import.meta.url),
-{ type: 'module' })`. Both are the patterns bundlers are expected to resolve, and both depend on the
-files staying where they are on disk.
+{ type: 'module' })`. Both require the files to stay where they are in the package.
 
-**Vite** - exclude this package from dependency pre-bundling. The optimizer copies dependency code
-into `node_modules/.vite/deps/`, where those relative URLs no longer point at anything:
+**Vite** - exclude this package from dependency pre-bundling, which moves the code to
+`node_modules/.vite/deps/` and breaks those relative URLs:
 
 ```js
 export default defineConfig({
@@ -44,10 +43,10 @@ export default defineConfig({
 });
 ```
 
-**webpack 5** resolves both patterns natively; no configuration is needed.
+**webpack 5** resolves both patterns; no configuration is needed.
 
-For any bundler that does neither, pass the binary in yourself - `init({ module_or_path: url })`
-accepts a URL, a `Response`, bytes, or a compiled `WebAssembly.Module`.
+For other bundlers, pass the binary in yourself - `init({ module_or_path: url })` accepts a URL, a
+`Response`, bytes, or a compiled `WebAssembly.Module`.
 
 ## Threads
 
@@ -79,8 +78,7 @@ await init({ module_or_path: wasm });
 
 ## Versioning
 
-The version tracks the `rs-core` workspace version exactly: `@0xcurvy/rs-core-wasm@x.y.z` is built from
-tag `vx.y.z`, and all four entries always come from that single commit. Releases are published from CI
-with [npm provenance](https://docs.npmjs.com/generating-provenance-statements).
+`@0xcurvy/rs-core-wasm@x.y.z` is built from tag `vx.y.z` of `rs-core`, and all four entries come from
+that single commit.
 
 Licensed MIT. See `THIRD-PARTY-NOTICES.md` for the dependencies compiled into the binaries.

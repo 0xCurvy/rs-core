@@ -1012,7 +1012,7 @@ fn checked_input(input: usize, index: usize, length: usize) -> Result<NodeRecord
 }
 
 fn constant_from_bytes(encoded: [u8; 32], index: usize) -> Result<Fr, WitnessError> {
-    Fr::from_bigint(bigint_from_le_bytes(encoded)?).ok_or(WitnessError::NonCanonicalConstant(index))
+    Fr::from_bigint(bigint_from_le_bytes(encoded)).ok_or(WitnessError::NonCanonicalConstant(index))
 }
 
 #[cfg(feature = "signet-v2")]
@@ -1106,13 +1106,12 @@ fn field_to_biguint(value: Fr) -> BigUint {
     BigUint::from_bytes_le(&value.into_bigint().to_bytes_le())
 }
 
-fn bigint_from_le_bytes(bytes: [u8; 32]) -> Result<BigInt<4>, WitnessError> {
+fn bigint_from_le_bytes(bytes: [u8; 32]) -> BigInt<4> {
     let mut limbs = [0_u64; 4];
-    for (limb, chunk) in limbs.iter_mut().zip(bytes.chunks_exact(8)) {
-        let encoded: [u8; 8] = chunk.try_into().map_err(|_| WitnessError::Truncated)?;
-        *limb = u64::from_le_bytes(encoded);
+    for (limb, chunk) in limbs.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *limb = u64::from_le_bytes(*chunk);
     }
-    Ok(BigInt(limbs))
+    BigInt(limbs)
 }
 
 fn fnv1a(value: &str) -> u64 {

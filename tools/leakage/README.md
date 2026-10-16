@@ -11,8 +11,8 @@ node tools/leakage/public-transcripts.cjs /tmp/curvy-public-transcripts.json
 
 `dudect` uses pinned upstream [dudect](https://github.com/oreparaz/dudect).
 `timecop` uses Valgrind Memcheck and needs Linux with the Valgrind development
-headers. The `leakage` Cargo feature these builds enable is development-only; no
-binding's production build turns it on.
+headers. These builds enable the development-only `leakage` Cargo feature; no
+production binding build enables it.
 
 WASM, after the native runs:
 
@@ -21,7 +21,7 @@ bash tools/leakage/build-wasm.sh
 node tools/leakage/wasm.mjs /tmp/curvy-wasm-timing 100000 chromium firefox
 ```
 
-`--seconds-per-case=60` caps the time per case on slow engines and
+`--seconds-per-case=60` caps the time per case on slow engines, and
 `--cases=poseidon_secret,owner_hash_decimal,sign_seed,sign_scalar` selects
 operations. The browser runner uses the Playwright installation in
 `tools/browser`.

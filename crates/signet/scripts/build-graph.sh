@@ -2,91 +2,68 @@
 #
 # Circuit half of the graph pipeline: .circom -> graph.bin (postcard).
 #
-# Needs `circom`, a C++ toolchain, and a circuits tree. Everything downstream of
-# the graph.bin it writes is pure Rust and lives in the `signet` binary, so this
-# script deliberately stops there.
-#
 #   CIRCUITS_DIR=/path/to/packages/zk-circuits \
+#   PROVING_KEY_R1CS=/path/to/circuit.r1cs \
 #     scripts/build-graph.sh v2/instances/verifyPendingNotesCommitment_5_30.circom /tmp/pending.bin
 #
-# It prints the optimised R1CS digest, which is what `signet export` takes as its
-# provenance argument.
+# The circuit path is relative to $CIRCUITS_DIR/circuits. Everything downstream of
+# the graph.bin this writes is pure Rust and lives in the `signet` binary, so the
+# script deliberately stops there.
+#
+# The graph comes from curvy-signet-ir-builder (see ir-builder.sh), which compiles
+# the circuit with circom 2.2.3 and writes the graph only if that compilation
+# describes the circuit in PROVING_KEY_R1CS, the R1CS the proving key was made
+# from: the same header, the same witness layout and the same constraints. Hints
+# (`<--`) add no constraints, so that check does not cover the values they compute;
+# `signet validate` against circom's witness for a real input does.
+#
+# Without PROVING_KEY_R1CS the script checks nothing itself: it reports the digest
+# of the builder's own R1CS, the compilation the graph came from, and the caller
+# must compare that with the proving key's R1CS digest, as the monorepo's
+# export-native-witness-graphs.sh does.
+#
+# Prints key=value lines: builder=, builder_version= and builder_sha256= (what
+# built the graph), postcard_graph=, r1cs= and r1cs_sha256=, the digest `signet
+# export` takes as its provenance argument.
 
 set -euo pipefail
 
-CRATE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# The generator is an ordinary cargo dependency of ../generator, pinned in that
-# crate's Cargo.lock. Nothing here clones a repository or executes code from a URL;
-# cargo fetches and verifies it like any other dependency.
-#
-# It carries what used to be applied here as a zero-context patch: bitwise OR/XOR,
-# canonical-integer evaluation for non-field operations, and the build_graph entry
-# point. See its README for the consequence that matters: Operation variant order
-# differs from upstream, so graph.bin files are not interchangeable.
-GENERATOR_MANIFEST="$CRATE_DIR/generator/Cargo.toml"
+source "$(cd "$(dirname "$0")" && pwd)/ir-builder.sh"
 
-CIRCUIT_RELATIVE_PATH="${1:?usage: build-graph.sh <circuit-relative-path> <output.bin>}"
-OUTPUT_PATH="${2:?usage: build-graph.sh <circuit-relative-path> <output.bin>}"
+[[ $# -eq 2 ]] || { echo "usage: build-graph.sh <circuit-relative-path> <output.bin>" >&2; exit 2; }
+CIRCUIT_RELATIVE_PATH="$1"
+OUTPUT_PATH="$2"
 CIRCUITS_DIR="${CIRCUITS_DIR:?set CIRCUITS_DIR to the zk-circuits package}"
-
-for tool in circom cargo patch cmp; do
-  command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
-done
-
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/signet-graph.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
-
-mkdir -p "$WORK_DIR/zk-circuits/node_modules"
-cp -R "$CIRCUITS_DIR/circuits" "$WORK_DIR/zk-circuits/circuits"
-cp -RL "$CIRCUITS_DIR/node_modules/circomlib" "$WORK_DIR/zk-circuits/node_modules/circomlib"
-patch --quiet -d "$WORK_DIR/zk-circuits" -p1 < "$CRATE_DIR/patches/circomlib-iszero-bbf.patch"
-
-ORIGINAL_CIRCUIT="$CIRCUITS_DIR/circuits/$CIRCUIT_RELATIVE_PATH"
-PATCHED_CIRCUIT="$WORK_DIR/zk-circuits/circuits/$CIRCUIT_RELATIVE_PATH"
+CIRCUIT="$CIRCUITS_DIR/circuits/$CIRCUIT_RELATIVE_PATH"
 CIRCUIT_NAME="$(basename "$CIRCUIT_RELATIVE_PATH" .circom)"
+test -f "$CIRCUIT" || { echo "no circuit at $CIRCUIT" >&2; exit 1; }
 
-# The gate that makes the patch safe to use: moving circomlib's IsZero ternary
-# into a black box must leave the constraint system byte-identical. If this cmp
-# ever fails, the graph would be proving a different circuit than the deployed
-# verifier checks.
-mkdir -p "$WORK_DIR/original-r1cs" "$WORK_DIR/patched-r1cs"
-circom "$ORIGINAL_CIRCUIT" --r1cs --O2 -o "$WORK_DIR/original-r1cs"
-circom "$PATCHED_CIRCUIT" --r1cs --O2 -o "$WORK_DIR/patched-r1cs"
-cmp "$WORK_DIR/original-r1cs/$CIRCUIT_NAME.r1cs" "$WORK_DIR/patched-r1cs/$CIRCUIT_NAME.r1cs"
+# Resolved first, so a missing pin or a failed install stops the script before
+# anything is compiled.
+signet_ir_builder
+signet_work_dir
 
-# The generator writes graph.bin into its working directory, so run it in the
-# scratch dir rather than in the crate.
-# `curvy-signet-builder`'s build script also writes generated C++ next to its
-# own source. Cargo registry sources may be read-only and must never be mutated,
-# so give this invocation a checksum-verified, writable vendor copy.
-VENDOR_CONFIG="$WORK_DIR/vendor-config.toml"
-cargo vendor --locked --manifest-path "$GENERATOR_MANIFEST" \
-  "$WORK_DIR/vendor" > "$VENDOR_CONFIG"
-(
-  cd "$WORK_DIR"
-  WITNESS_CPP="$PATCHED_CIRCUIT" \
-    CARGO_TARGET_DIR="$WORK_DIR/generator-target" \
-    cargo run --quiet --release --offline --config "$VENDOR_CONFIG" \
-      --manifest-path "$GENERATOR_MANIFEST"
-)
+if [[ -n "${PROVING_KEY_R1CS:-}" ]]; then
+  test -f "$PROVING_KEY_R1CS" || { echo "no R1CS at $PROVING_KEY_R1CS" >&2; exit 1; }
+  # One private copy is both checked and hashed, so the digest printed is that of
+  # the bytes the graph was checked against.
+  R1CS="$SIGNET_WORK/proving-key.r1cs"
+  cp "$PROVING_KEY_R1CS" "$R1CS"
+  R1CS_SOURCE="$PROVING_KEY_R1CS"
+  R1CS_OPTION=(--expect-r1cs "$R1CS")
+else
+  R1CS="$SIGNET_WORK/$CIRCUIT_NAME.r1cs"
+  R1CS_SOURCE="this compilation (no PROVING_KEY_R1CS: compare r1cs_sha256 with the proving key's)"
+  R1CS_OPTION=(--r1cs "$R1CS")
+fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-cp "$WORK_DIR/graph.bin" "$OUTPUT_PATH"
+# circom's compilation summary goes to stdout; keep stdout for the key=value
+# lines below.
+"$SIGNET_BUILDER" "$CIRCUIT" -o "$OUTPUT_PATH" "${R1CS_OPTION[@]}" >&2
 
-# Report what actually produced this graph. The checksum is the durable half: a
-# crates.io version cannot be republished with different bytes.
-awk '/name = "curvy-signet-builder"/{f=1} f&&/^version/{v=$3} f&&/^checksum/{print "generator=curvy-signet-builder " v; print "generator_checksum=" $3; exit}' \
-  "$CRATE_DIR/generator/Cargo.lock" | tr -d '"'
+R1CS_SHA256="$(signet_sha256 "$R1CS")"
+signet_ir_builder_provenance
 echo "postcard_graph=$OUTPUT_PATH"
-echo -n "r1cs_sha256="
-shasum -a 256 "$WORK_DIR/original-r1cs/$CIRCUIT_NAME.r1cs" | cut -d' ' -f1
-
-# The upstream build dependency does not emit
-# `cargo:rerun-if-env-changed=WITNESS_CPP`. A shared Cargo target can therefore
-# reuse a circuit compiled by an earlier invocation even when `WITNESS_CPP`
-# changes. Keeping the generator target under this run's scratch directory is
-# part of the correctness boundary, not merely build hygiene.
-#
-# Build one graph at a time. Each run writes hundreds of MB of C++ objects, and
-# two concurrent generations have exhausted a disk here - surfacing as a
-# misleading `ar: internal ranlib command failed`.
+echo "r1cs=$R1CS_SOURCE"
+echo "r1cs_sha256=$R1CS_SHA256"

@@ -183,8 +183,8 @@ pub fn ephemeral_pub_key(scalar: &BigUint) -> Point {
     assert!(scalar.bits() <= 256, "ephemeral scalar exceeds 256 bits");
     let mut bytes = Zeroizing::new([0_u8; 32]);
     let mut digits = scalar.iter_u64_digits();
-    for chunk in bytes.chunks_exact_mut(8) {
-        chunk.copy_from_slice(&digits.next().unwrap_or(0).to_le_bytes());
+    for chunk in bytes.as_chunks_mut::<8>().0 {
+        *chunk = digits.next().unwrap_or(0).to_le_bytes();
     }
     ephemeral_pub_key_bytes(&bytes)
 }

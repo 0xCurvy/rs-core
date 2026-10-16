@@ -2,7 +2,7 @@
 //
 // Usage: node tools/browser/node-proof-check.mjs [path/to/curvy_prover.js]
 //
-// The default is the `scripts/build.sh wasm-nodejs` output. scripts/smoke-npm.mjs
+// The default is the `scripts/build.sh wasm-nodejs` output. scripts/lib/smoke-npm.mjs
 // reuses `checkResidentProver` for the portable entry of the packed npm tarball.
 // `prove` only returns after the proof verifies against the key's own verifying
 // key, so a returned bundle is a self-verified proof. The checks below pin that

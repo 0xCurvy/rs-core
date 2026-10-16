@@ -451,7 +451,7 @@ fn announcement_inputs(
     }
     let mut rs = Vec::with_capacity(pairs.len() / 2);
     let mut tags = Vec::with_capacity(pairs.len() / 2);
-    for pair in pairs.chunks_exact(2) {
+    for pair in pairs.as_chunks::<2>().0 {
         rs.push(pair[0].to_owned());
         tags.push(pair[1].to_owned());
     }

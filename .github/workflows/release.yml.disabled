@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
       - name: Optimized Poseidon matches the reference on 160k cases
         shell: bash
         run: |
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: 1.94.0
+          toolchain: 1.99.0
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: scripts/build.sh wasm-web
@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
-          toolchain: nightly-2026-07-03
+          toolchain: nightly-2026-08-15
           components: rust-src
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
@@ -153,10 +153,11 @@ jobs:
           name: wasm-web-threads
           path: crates
 
-      - name: Pack
+      # Packs the tarball, installs it in an empty project and proves with it.
+      - name: Pack and smoke-test
         id: pack
         run: |
-          node scripts/build-npm.mjs --pack
+          scripts/check.sh npm
           shopt -s nullglob
           tarballs=(0xcurvy-rs-core-wasm-*.tgz)
           if [ "${#tarballs[@]}" -ne 1 ]; then
@@ -166,7 +167,7 @@ jobs:
           version="$(tar -xOzf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
           # npm refuses a prerelease without an explicit dist-tag, and a
           # prerelease must never become `latest`. Same `next` tag as
-          # scripts/build-node-release.mjs uses for the native packages.
+          # scripts/lib/node-release.mjs uses for the native packages.
           if [[ "${version%%+*}" == *-* ]]; then dist_tag=next; else dist_tag=latest; fi
           {
             echo "tarball=$tarball"
@@ -184,19 +185,9 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match package version v$VERSION" && exit 1
           fi
 
-      - name: Smoke-test the packed tarball
-        env:
-          TARBALL: ${{ steps.pack.outputs.tarball }}
-        run: |
-          install_dir="$(mktemp -d)"
-          cd "$install_dir"
-          npm init -y > /dev/null
-          npm install --ignore-scripts --no-audit --no-fund "$TARBALL"
-          node "$GITHUB_WORKSPACE/scripts/smoke-npm.mjs" "$install_dir"
-
       # Version immutability is the registry's job: a re-run of the same tag
       # fails here instead of silently replacing a published artifact. The
-      # file published is the exact tarball smoke-tested above, not a re-pack.
+      # file published is the exact tarball smoke-tested by `check.sh npm`, not a re-pack.
       - name: Publish
         env:
           TARBALL: ${{ steps.pack.outputs.tarball }}

@@ -6,17 +6,20 @@
 //! Mutating calls validate out-pointers before changing state or creating
 //! handles, so callers can safely retry rejected calls.
 
-use std::ffi::c_int;
+use std::ffi::{c_char, c_int};
 
-use curvy_core::field::{Fr, fr_from_be_32_checked, fr_to_be_32};
-use curvy_core::imt::{
-    InclusionProof, IndexedMerkleTree, NotesFrontier, OrderedMerkleTree, ShardedNotesTree,
-    verify_proof_at_depth,
+use curvy_core::field::{
+    Fr, fr_from_be_32_checked, fr_from_be_32_packed, fr_to_be_32, fr_to_be_32_packed, fr_to_dec,
 };
+use curvy_core::imt::{
+    AppendableNotesTree, InclusionProof, IndexedMerkleTree, NotesFrontier, OrderedMerkleTree,
+    ShardedNotesTree, verify_proof_at_depth,
+};
+use curvy_core::witness::build_bound_pending_commitment_packed;
 
 use crate::abi::{
     CurvyBytes, CurvyStatus, Failure, bytes_in, bytes_out, failed, free_status, guard,
-    guard_result, invalid, null_output, set_last_error,
+    guard_result, invalid, null_output, set_last_error, str_vec_out,
 };
 use crate::registry::Registry;
 
@@ -37,24 +40,7 @@ fn decode_field(bytes: &[u8], what: &str) -> Result<Fr, Failure> {
 }
 
 fn decode_fields(bytes: &[u8], what: &str) -> Result<Vec<Fr>, Failure> {
-    if !bytes.len().is_multiple_of(32) {
-        return Err(invalid(format_args!(
-            "packed {what} length {} is not divisible by 32",
-            bytes.len()
-        )));
-    }
-    bytes
-        .chunks_exact(32)
-        .map(|raw| decode_field(raw, what))
-        .collect()
-}
-
-fn pack_fields(fields: &[Fr]) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(fields.len() * 32);
-    for field in fields {
-        packed.extend_from_slice(&fr_to_be_32(field));
-    }
-    packed
+    fr_from_be_32_packed(bytes).map_err(|error| invalid(format_args!("{what}: {error}")))
 }
 
 /// Appends a little-endian `u32` used by JS decoders.
@@ -240,9 +226,38 @@ pub extern "C" fn curvy_proof_siblings(handle: u64, out: *mut CurvyBytes) -> Cur
     with_handle(
         &PROOFS,
         handle,
-        |proof| Ok(pack_fields(&proof.siblings)),
+        |proof| Ok(fr_to_be_32_packed(&proof.siblings)),
         |value| bytes_out(value, out),
     )
+}
+
+// Calldata-bound pending commitments
+
+/// Appends `note_ids` as one pending batch and returns
+/// `[circuitInputJson, newNotesRoot, newNoteIndex, commitment, y, x]`. A
+/// refused batch is an invalid argument, anything else a failure.
+fn build_bound<T: AppendableNotesTree>(
+    tree: &mut T,
+    batch_size: u32,
+    packed_note_ids: &[u8],
+) -> Result<Vec<String>, Failure> {
+    let commitment =
+        build_bound_pending_commitment_packed(tree, batch_size as usize, packed_note_ids).map_err(
+            |error| {
+                if error.is_caller_error() {
+                    invalid(error)
+                } else {
+                    failed(error)
+                }
+            },
+        )?;
+    let mut values = vec![
+        commitment.circuit_input_json(),
+        fr_to_dec(&commitment.new_notes_root),
+        commitment.new_note_index.to_string(),
+    ];
+    values.extend(commitment.binding.public_signals().iter().map(fr_to_dec));
+    Ok(values)
 }
 
 // MerkleTree
@@ -317,7 +332,7 @@ pub extern "C" fn curvy_merkle_leaves(handle: u64, out: *mut CurvyBytes) -> Curv
     with_handle(
         &MERKLE,
         handle,
-        |tree| Ok(pack_fields(tree.leaves())),
+        |tree| Ok(fr_to_be_32_packed(tree.leaves())),
         |value| bytes_out(value, out),
     )
 }
@@ -407,6 +422,63 @@ pub extern "C" fn curvy_merkle_truncate(handle: u64, leaf_count: u32) -> CurvySt
         handle,
         |tree| tree.truncate(leaf_count as usize).map_err(failed),
         |()| CurvyStatus::Ok,
+    )
+}
+
+/// Appends a pending batch and builds the calldata-bound pending-notes
+/// circuit's input for it, as a JSON string array
+/// `[circuitInputJson, newNotesRoot, newNoteIndex, commitment, y, x]`.
+/// `circuitInputJson` is the witness input, `x` included; the other values are
+/// decimal, and the last three are the proof's public signals in their order.
+/// `commitPendingNotes` is sent the ids as passed here, without padding.
+///
+/// Nothing changes unless every id is accepted: `batch_size` between 1 and
+/// 4,096, at least one id, at most `batch_size`, none zero, none repeated, none
+/// already in the tree. Those refusals return `InvalidArgument`; a full tree
+/// returns `Error`.
+///
+/// # Safety
+/// `packed_note_ids`/`len` must describe a readable region of 32-byte fields.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn curvy_merkle_build_bound_pending_commitment(
+    handle: u64,
+    batch_size: u32,
+    packed_note_ids: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+) -> CurvyStatus {
+    if out.is_null() {
+        return null_output();
+    }
+    with_handle_mut(
+        &MERKLE,
+        handle,
+        |tree| {
+            let bytes = unsafe { bytes_in(packed_note_ids, len) }
+                .map_err(|_| invalid("invalid pending note ids buffer"))?;
+            build_bound(tree, batch_size, bytes)
+        },
+        |values| str_vec_out(values, out),
+    )
+}
+
+/// The calldata-bound circuit's `frontier` input for the next batch, packed
+/// bottom to top: the left-hand node where the next free leaf's path turns
+/// right, zero where it turns left. Fails when the tree is full.
+#[unsafe(no_mangle)]
+pub extern "C" fn curvy_merkle_next_leaf_frontier(
+    handle: u64,
+    out: *mut CurvyBytes,
+) -> CurvyStatus {
+    with_handle(
+        &MERKLE,
+        handle,
+        |tree| {
+            Ok(fr_to_be_32_packed(
+                &tree.next_leaf_frontier().map_err(failed)?,
+            ))
+        },
+        |value| bytes_out(value, out),
     )
 }
 
@@ -731,7 +803,7 @@ pub extern "C" fn curvy_sharded_completed_shard_roots(
     with_handle(
         &SHARDED,
         handle,
-        |tree| Ok(pack_fields(tree.completed_roots())),
+        |tree| Ok(fr_to_be_32_packed(tree.completed_roots())),
         |value| bytes_out(value, out),
     )
 }
@@ -759,7 +831,7 @@ pub extern "C" fn curvy_sharded_live_leaves(handle: u64, out: *mut CurvyBytes) -
     with_handle(
         &SHARDED,
         handle,
-        |tree| Ok(pack_fields(tree.live_leaves())),
+        |tree| Ok(fr_to_be_32_packed(tree.live_leaves())),
         |value| bytes_out(value, out),
     )
 }
@@ -901,7 +973,7 @@ pub extern "C" fn curvy_sharded_rewind_live_to(
         handle,
         |tree| {
             tree.rewind_live_to(leaf_count as usize)
-                .map(|removed| pack_fields(&removed))
+                .map(|removed| fr_to_be_32_packed(&removed))
                 .map_err(failed)
         },
         |value| bytes_out(value, out),
@@ -950,7 +1022,7 @@ fn pack_owned_notes(notes: &[curvy_core::imt::OwnedNoteWitness]) -> Vec<u8> {
         let siblings = note
             .within_shard_siblings
             .as_deref()
-            .map(pack_fields)
+            .map(fr_to_be_32_packed)
             .unwrap_or_default();
         push_u32(&mut buffer, siblings.len() as u32);
         buffer.extend_from_slice(&siblings);
@@ -1173,6 +1245,52 @@ pub unsafe extern "C" fn curvy_frontier_append_many(
                 buffer.extend_from_slice(&fr_to_be_32(&shard.root));
             }
             Ok(buffer)
+        },
+        |value| bytes_out(value, out),
+    )
+}
+
+/// See [`curvy_merkle_build_bound_pending_commitment`]. A frontier keeps no
+/// leaves, so it cannot refuse an id that is already in the tree.
+///
+/// # Safety
+/// `packed_note_ids`/`len` must describe a readable region of 32-byte fields.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn curvy_frontier_build_bound_pending_commitment(
+    handle: u64,
+    batch_size: u32,
+    packed_note_ids: *const u8,
+    len: usize,
+    out: *mut *mut c_char,
+) -> CurvyStatus {
+    if out.is_null() {
+        return null_output();
+    }
+    with_handle_mut(
+        &FRONTIER,
+        handle,
+        |frontier| {
+            let bytes = unsafe { bytes_in(packed_note_ids, len) }
+                .map_err(|_| invalid("invalid pending note ids buffer"))?;
+            build_bound(frontier, batch_size, bytes)
+        },
+        |values| str_vec_out(values, out),
+    )
+}
+
+/// See [`curvy_merkle_next_leaf_frontier`].
+#[unsafe(no_mangle)]
+pub extern "C" fn curvy_frontier_next_leaf_frontier(
+    handle: u64,
+    out: *mut CurvyBytes,
+) -> CurvyStatus {
+    with_handle(
+        &FRONTIER,
+        handle,
+        |frontier| {
+            Ok(fr_to_be_32_packed(
+                &frontier.next_leaf_frontier().map_err(failed)?,
+            ))
         },
         |value| bytes_out(value, out),
     )

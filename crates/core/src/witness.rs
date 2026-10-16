@@ -16,6 +16,14 @@ use crate::imt::Imt;
 use crate::note as commitments;
 use crate::poseidon::poseidon;
 
+mod bound_pending;
+
+pub use crate::imt::AppendableNotesTree;
+pub use bound_pending::{
+    BoundPendingCommitment, BoundPendingCommitmentInput, PendingCommitmentError,
+    build_bound_pending_commitment, build_bound_pending_commitment_packed,
+};
+
 /// A note as the witness builders see it. `shared_secret`/`ephemeral_key` are
 /// BabyJubjub field coordinates (`< r`); they convert to raw `BigUint` for the
 /// cipher (where `< r` values pack identically).
@@ -423,6 +431,12 @@ pub fn build_aggregation_with_signer(
 
 // Pending-notes commitment
 
+/// Resource ceiling for one pending batch, padding included, for both
+/// pending-notes circuits: well above the batch sizes they are built for.
+/// [`build_bound_pending_commitment`] refuses a larger batch size, and the
+/// bindings refuse one before they parse anything.
+pub const MAX_PENDING_BATCH_SIZE: usize = 4096;
+
 #[derive(Serialize, PartialEq, Eq, Debug)]
 pub struct PendingCommitmentWitness {
     #[serde(rename = "currentNoteIndex")]
@@ -441,6 +455,9 @@ pub struct PendingCommitmentWitness {
 /// `generatePendingNotesCommitmentCircuitInputs`. Mutates a copy of the tree: each
 /// non-zero pending id is inserted (zero ids are skip slots with zero siblings).
 /// `inputHash = sha256BigInt([...paddedIds, currentRoot, newRoot, currentIndex, newIndex])`.
+///
+/// This is the input of the SHA-256 pending-notes circuit. The calldata-bound
+/// circuit that replaces it takes [`build_bound_pending_commitment`]'s input.
 pub fn build_pending_commitment(
     tree: &Imt,
     tree_depth: usize,

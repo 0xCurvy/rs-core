@@ -34,8 +34,8 @@ fn read_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
 
 fn limbs(bytes: &[u8]) -> BigInt<4> {
     let mut words = [0_u64; 4];
-    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
-        *word = u64::from_le_bytes(chunk.try_into().expect("eight-byte chunk"));
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
     }
     BigInt(words)
 }
@@ -130,8 +130,10 @@ fn scalar_window(scalar: &BigInt<4>, start_bit: usize, width: usize) -> usize {
 
 fn decode_pairs(bytes: &[u8], scalars: &[Fr]) -> Vec<(G1Affine, BigInt<4>)> {
     bytes
-        .chunks_exact(64)
-        .map(decode_g1)
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .map(|point| decode_g1(point))
         .zip(scalars)
         .filter(|(base, scalar)| !base.is_zero() && !scalar.is_zero())
         .map(|(base, scalar)| (base, scalar.into_bigint()))

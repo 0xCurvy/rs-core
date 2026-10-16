@@ -5,6 +5,52 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Every crate, binding and package shares one workspace version. The 0.1.0 release
 candidates could break APIs from one candidate to the next.
 
+## [0.1.2] - 2026-10-16
+
+Changes since `v0.1.1` (`fa3ce61`, 8 October 2026).
+
+### Added
+
+- Rust: `calldata` module with `bind_calldata` and `bind_calldata_packed` (commitment, challenge `x`, evaluation `y`), at most `MAX_CALLDATA_WORDS` (8,192) words. `CalldataBinding::public_signals()` returns `[commitment, y, x]`.
+- Rust: `build_bound_pending_commitment` and `build_bound_pending_commitment_packed` for the calldata-bound pending-notes circuit, on an `IndexedMerkleTree` or a `NotesFrontier`, with a batch size of at most `MAX_PENDING_BATCH_SIZE` (4,096). `PendingCommitmentError::is_caller_error()`.
+- Rust: `next_leaf_frontier` on `Imt`, `IndexedMerkleTree` and `NotesFrontier`.
+- Rust: `Imt::insert_many`, `field::fr_from_be_32_packed`, `field::fr_to_be_32_packed` and `PackedFieldsError`.
+- Node: `bindCalldata` and `bindCalldataPacked`; `buildBoundPendingCommitment`, `buildBoundPendingCommitmentPacked` and `nextLeafFrontier` on `IndexedMerkleTree` and `NotesFrontier`.
+- WASM: `bindCalldata` (`CalldataBinding`); `buildBoundPendingCommitment` (`BoundPendingCommitment`) and `nextLeafFrontier` on `MerkleTree` and `NotesFrontier`.
+- C: `curvy_bind_calldata`, returning `[commitment, y, x]`; `curvy_merkle_build_bound_pending_commitment` and `curvy_frontier_build_bound_pending_commitment`, returning `[circuitInputJson, newNotesRoot, newNoteIndex, commitment, y, x]`; `curvy_merkle_next_leaf_frontier` and `curvy_frontier_next_leaf_frontier`.
+- Test vectors for calldata bindings and bound pending commitments.
+- `scripts/publish.sh` publishes the crates, the WASM npm package or the native Node packages; `RELEASING.md` lists the release steps.
+
+### Changed
+
+- Minimum Rust version 1.99 (was 1.94); toolchain 1.99.0 (was 1.94.0), including the Node release image.
+- Threaded WASM build and fuzz targets use `nightly-2026-08-15` (was `nightly-2026-07-03`).
+- New dependency: `sha3` 0.12.
+- `IndexedMerkleTree::insert_many` and `OrderedMerkleTree::insert_many` are about 25 times faster for 256-leaf batches.
+- Node and WASM: `batchSize` must be an integer from 1 to 4,096, also in Node `buildPendingCommitment` and `buildPendingCommitmentPacked`.
+- Node: a JSON value that is not a canonical field element is `InvalidArg` (was `GenericFailure`).
+- Packed-field decode errors have the same messages in every binding.
+- `build_pending_commitment` and Node `buildPendingCommitment` name `build_bound_pending_commitment` as their successor.
+- SIGNET: `build-graph.sh` builds graphs with `curvy-signet-ir-builder`, at the commit and lockfile digest in `crates/signet/scripts/ir-builder.pin`; `SIGNET_IR_BUILDER` overrides it, and `ir-builder.sh` runs it directly. Without `PROVING_KEY_R1CS`, `build-graph.sh` reports the digest of its own compilation's R1CS. Its `generator=` and `generator_checksum=` output lines are now `builder=`, `builder_version=`, `builder_sha256=` and `r1cs=`.
+- SIGNET: `scripts/smoke-generator.sh` is now `scripts/smoke-graph.sh` and needs node; its CI job is `signet-graph`.
+- `scripts/build.sh` builds every target (`native`, `wasm-*` with build options such as `--simd`, `npm`, `node-release`, `ffi-header`, `kernels`, `graph`) and `scripts/check.sh` runs every check. The other scripts moved to `scripts/lib/`; `build-native.sh`, `build-wasm.sh`, `build-npm.mjs`, `generate-ffi-header.sh` and the `check-*` scripts are no longer entry points.
+- Development tools moved out of `crates/prover/js`: the mobile harness to `tools/mobile-harness`, the browser benchmarks to `tools/browser/bench`, the Node SPARROW benchmark to `tools/benchmarks`.
+- CI builds the Linux x64 Node release image.
+
+### Fixed
+
+- SIGNET: `signet export` accepts graphs whose last inputs no node reads.
+
+### Removed
+
+- SIGNET: the C++ graph generator (`crates/signet/generator`) and `crates/signet/patches/circomlib-iszero-bbf.patch`.
+- The `--poseidon-optimized` WASM build option, which had no effect.
+- The `poc/` WASM field and FFT prototypes.
+
+### Security
+
+- `ruzstd` 0.9.1 (RUSTSEC-2026-0344).
+
 ## [0.1.1] - 2026-10-08
 
 The first release after the 0.1.0 release candidates; there was no 0.1.0. The
@@ -155,6 +201,7 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.2]: https://github.com/0xCurvy/rs-core/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.7...v0.1.1
 [0.1.0-rc.7]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.6...v0.1.0-rc.7
 [0.1.0-rc.6]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.5...v0.1.0-rc.6

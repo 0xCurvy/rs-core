@@ -12,7 +12,7 @@ homepage.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 documentation = "https://docs.rs/curvy-prover"
-exclude = ["js/**", "scripts/**", "MOBILE_HARNESS.md"]
+exclude = ["js/**", "scripts/**"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -32,7 +32,7 @@ ark-relations = { workspace = true, default-features = false }
 ark-serialize = { workspace = true, default-features = false }
 ark-std = { workspace = true, default-features = false, features = ["getrandom"] }
 byteorder.workspace = true
-curvy-witness = { version = "=0.1.1", path = "../witness" }
+curvy-witness = { version = "=0.1.2", path = "../witness" }
 getrandom.workspace = true
 num-bigint.workspace = true
 rayon = { workspace = true, optional = true }
@@ -49,8 +49,7 @@ serde_json.workspace = true
 default = ["std"]
 bench = ["sparrow"]
 # Retain zkey constraint matrices as exact CSR arrays and evaluate the QAP
-# directly from them. This is a prototype feature; the arkworks-compatible
-# nested matrix remains the default until real-artifact RSS gates pass.
+# directly from them. The Node.js binding enables it.
 compact-matrix = []
 # Experimental caller-owned, bounded FFT and MSM-scalar buffers.
 scratch = ["compact-matrix"]
@@ -85,23 +84,22 @@ parallel = [
 signet-v2 = ["curvy-witness/signet-v2"]
 sage = ["curvy-witness/sage"]
 zkey-manifest = []
-# Prototype: witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
-# simd128 only; a no-op elsewhere). With `parallel` each witness-map
-# transform is parallel inside, on any pool size. See src/simd_fft and
-# poc/wasm-fft.
+# Opt-in witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
+# simd128 only; a no-op elsewhere). With `parallel` each transform runs in
+# parallel, on any pool size. See src/simd_fft.
 wasm-simd-fft = []
 sparrow = ["signet-v2", "sage", "zkey-manifest"]
 wasm = ["dep:wasm-bindgen"]
 # Opt-in SIMD batch-affine MSM (BN254 G1/G2) for WASM builds. Takes effect
 # only on wasm32 with `+simd128`; every other build ignores it. See
-# src/msm_simd and poc/wasm-field.
+# src/msm_simd.
 wasm-simd-msm = []
 # Development only, never shipped: in-WASM differential self-tests, randomized
 # stress cases and a kernel benchmark for `wasm-simd-msm` / `wasm-simd-fft`
 # (`simdMsmSelfTest`, `simdSparrowSelfTest`, `simdFftSelfTest`,
 # `simdFieldStress`, `simdMsmStress`, `simdFftStress`, `SimdMsmBench`,
 # `simdSelfTestInit`, `simdSelfTestPanic`), for
-# whichever of the two is enabled. Driven by scripts/simd-selftest.mjs.
+# whichever of the two is enabled. Run with `scripts/check.sh simd`.
 wasm-simd-selftest = ["wasm"]
 wasm-threads = ["wasm", "parallel", "dep:wasm-bindgen-rayon"]
 

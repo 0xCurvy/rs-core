@@ -70,6 +70,19 @@ enum CurvyStatus curvy_poseidon(const char *inputs_json, char **out);
 enum CurvyStatus curvy_sha256_bigint(const char *inputs_json, char **out);
 
 /**
+ * Binds calldata words the way the aggregator's bound circuits and contract
+ * do, as the proof's public signals `[commitment, y, x]`.
+ *
+ * Words must be canonical decimals below the field modulus: a word and that
+ * word plus the modulus are one value to the proof but two to the contract.
+ * At most 8,192 words.
+ *
+ * # Safety
+ * `words_json` must be a NUL-terminated JSON array of decimal strings.
+ */
+enum CurvyStatus curvy_bind_calldata(const char *words_json, char **out);
+
+/**
  * # Safety
  * All pointers must be NUL-terminated UTF-8 decimal strings.
  */
@@ -567,6 +580,35 @@ enum CurvyStatus curvy_merkle_get_index(uint64_t handle,
 enum CurvyStatus curvy_merkle_truncate(uint64_t handle, uint32_t leaf_count);
 
 /**
+ * Appends a pending batch and builds the calldata-bound pending-notes
+ * circuit's input for it, as a JSON string array
+ * `[circuitInputJson, newNotesRoot, newNoteIndex, commitment, y, x]`.
+ * `circuitInputJson` is the witness input, `x` included; the other values are
+ * decimal, and the last three are the proof's public signals in their order.
+ * `commitPendingNotes` is sent the ids as passed here, without padding.
+ *
+ * Nothing changes unless every id is accepted: `batch_size` between 1 and
+ * 4,096, at least one id, at most `batch_size`, none zero, none repeated, none
+ * already in the tree. Those refusals return `InvalidArgument`; a full tree
+ * returns `Error`.
+ *
+ * # Safety
+ * `packed_note_ids`/`len` must describe a readable region of 32-byte fields.
+ */
+enum CurvyStatus curvy_merkle_build_bound_pending_commitment(uint64_t handle,
+                                                             uint32_t batch_size,
+                                                             const uint8_t *packed_note_ids,
+                                                             uintptr_t len,
+                                                             char **out);
+
+/**
+ * The calldata-bound circuit's `frontier` input for the next batch, packed
+ * bottom to top: the left-hand node where the next free leaf's path turns
+ * right, zero where it turns left. Fails when the tree is full.
+ */
+enum CurvyStatus curvy_merkle_next_leaf_frontier(uint64_t handle, struct CurvyBytes *out);
+
+/**
  * # Safety
  * `leaf`/`len` must describe a readable region.
  */
@@ -770,6 +812,24 @@ enum CurvyStatus curvy_frontier_append_many(uint64_t handle,
                                             const uint8_t *packed_leaves,
                                             uintptr_t len,
                                             struct CurvyBytes *out);
+
+/**
+ * See [`curvy_merkle_build_bound_pending_commitment`]. A frontier keeps no
+ * leaves, so it cannot refuse an id that is already in the tree.
+ *
+ * # Safety
+ * `packed_note_ids`/`len` must describe a readable region of 32-byte fields.
+ */
+enum CurvyStatus curvy_frontier_build_bound_pending_commitment(uint64_t handle,
+                                                               uint32_t batch_size,
+                                                               const uint8_t *packed_note_ids,
+                                                               uintptr_t len,
+                                                               char **out);
+
+/**
+ * See [`curvy_merkle_next_leaf_frontier`].
+ */
+enum CurvyStatus curvy_frontier_next_leaf_frontier(uint64_t handle, struct CurvyBytes *out);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! Builds SIGNET witness-graph artifacts from `curvy-signet-builder` output.
+//! Builds SIGNET witness-graph artifacts from postcard witness graphs.
 //!
-//! This is the second half of the graph pipeline. The first half - running
-//! `circom`, proving the black-box patch leaves the R1CS byte-identical, and
-//! driving upstream's C++ backend - lives with the circuit sources and produces a
-//! postcard `graph.bin`. Everything downstream of that file is here:
+//! This is the second half of the graph pipeline. The first half -
+//! `scripts/build-graph.sh`, which runs `curvy-signet-ir-builder` on a circuit and
+//! checks its compilation against the proving key's R1CS - produces a postcard
+//! `graph.bin`. Everything downstream of that file is here:
 //!
 //! ```text
 //! graph.bin  ──encode──►  SIGNET artifact + SHA-256
@@ -239,8 +239,8 @@ pub enum SignetError {
     #[error("node {index}: {what} does not point at a prior node")]
     NotAPriorNode { what: &'static str, index: usize },
     #[error(
-        "unsupported black-box node {name:?} with {arity} arguments; only the \
-         patched `bbf_inv` closure is understood"
+        "unsupported black-box node {name:?} with {arity} arguments; only \
+         `bbf_inv` (inverse or zero) is understood"
     )]
     UnsupportedBlackBox { name: String, arity: usize },
     #[error("unknown envelope {0:?}, expected `cvywit` or `signet`")]
@@ -270,7 +270,7 @@ pub fn decode_sha256(value: &str) -> Result<[u8; 32], SignetError> {
         return Err(SignetError::InvalidR1csDigest);
     }
     let mut decoded = [0_u8; 32];
-    for (byte, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (byte, pair) in decoded.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
         *byte = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(decoded)

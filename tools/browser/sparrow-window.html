@@ -7,7 +7,7 @@
 <pre id="result" role="status">Ready</pre>
 <script type="module">
 // One-pass manifest SPARROW proofs at several fixed MSM window widths in one
-// page. Requires a `scripts/build-wasm.sh web [--threads] --sparrow` package
+// page. Requires a `scripts/build.sh wasm-web[-threads] --sparrow` package
 // and a serve.mjs case with manifestUrl/manifestSha256. Widths are rotated per
 // sample (and by `offset`) so every width sees each position equally often.
 import { proveManifestResponse, sha256Hex } from '/crates/prover/js/sparrow-cache-api.mjs';

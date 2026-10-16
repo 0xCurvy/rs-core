@@ -1,4 +1,4 @@
-// The SIMD self-test suite, shared by scripts/simd-selftest.mjs (Node) and
+// The SIMD self-test suite, shared by scripts/lib/simd-selftest.mjs (Node) and
 // simd-selftest.html (browsers). `wasm` is an initialized curvy-prover module
 // built with `--simd-selftest` (curvy-prover `wasm-simd-selftest`).
 //
@@ -138,7 +138,7 @@ export async function runSuite(wasm, options = {}, log = () => {}) {
             speedup: median(ratios), minSpeedup: o.minSpeedup, roundSpeedups: ratios.map(r => +r.toFixed(3))};
           report.bench.push(result);
           log(`bench G${curve} 2^${o.benchLog} w=${bench.width}: SIMD ${result.simdMs.toFixed(1)} ms, arkworks ${result.arkMs.toFixed(1)} ms, speedup ${result.speedup.toFixed(2)}x (gate ${o.minSpeedup}x)`);
-          if (result.speedup < o.minSpeedup) throw new Error(`SIMD MSM G${curve} speedup ${result.speedup.toFixed(2)}x is below ${o.minSpeedup}x (codegen regression? see scripts/check-simd-codegen.mjs)`);
+          if (result.speedup < o.minSpeedup) throw new Error(`SIMD MSM G${curve} speedup ${result.speedup.toFixed(2)}x is below ${o.minSpeedup}x (codegen regression? see scripts/check.sh simd-codegen)`);
         } finally { bench.free(); }
       }
     }

@@ -19,6 +19,9 @@ pub use trees::*;
 use std::ffi::{c_char, c_int};
 
 use curvy_core::babyjubjub::{BabyJubPoint, BabyJubScalar};
+use curvy_core::calldata::{
+    CalldataError, MAX_CALLDATA_WORDS, bind_calldata as core_bind_calldata,
+};
 use curvy_core::cipher::{decrypt_amount_token, encrypt_amount_token};
 use curvy_core::eddsa::{
     ScalarSignature, ScalarSigningKey, ephemeral_pub_key_bytes, pub_from_private_key_hex, sign_hex,
@@ -118,6 +121,46 @@ pub unsafe extern "C" fn curvy_sha256_bigint(
                 .collect::<Result<Vec<_>, _>>()
         );
         string_out(core_sha256_bigint(&integers).to_string(), out)
+    })
+}
+
+/// Binds calldata words the way the aggregator's bound circuits and contract
+/// do, as the proof's public signals `[commitment, y, x]`.
+///
+/// Words must be canonical decimals below the field modulus: a word and that
+/// word plus the modulus are one value to the proof but two to the contract.
+/// At most 8,192 words.
+///
+/// # Safety
+/// `words_json` must be a NUL-terminated JSON array of decimal strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn curvy_bind_calldata(
+    words_json: *const c_char,
+    out: *mut *mut c_char,
+) -> CurvyStatus {
+    guard(|| {
+        let words = match unsafe { str_vec_in(words_json) } {
+            Ok(values) => values,
+            Err(status) => return status,
+        };
+        // Refused before any word is parsed.
+        if words.len() > MAX_CALLDATA_WORDS {
+            crate::abi::set_last_error(
+                CalldataError::TooManyWords { count: words.len() }.to_string(),
+            );
+            return CurvyStatus::InvalidArgument;
+        }
+        let words = checked!(
+            words
+                .iter()
+                .map(|word| Bn254Fr::try_from_dec(word).map(Bn254Fr::into_inner))
+                .collect::<Result<Vec<_>, _>>()
+        );
+        let binding = checked!(core_bind_calldata(&words));
+        str_vec_out(
+            binding.public_signals().iter().map(fr_to_dec).collect(),
+            out,
+        )
     })
 }
 

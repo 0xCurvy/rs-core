@@ -238,7 +238,7 @@ mod optimized_tests {
                 let inputs = (0..arity)
                     .map(|_| {
                         let mut bytes = [0_u8; 32];
-                        for chunk in bytes.chunks_exact_mut(8) {
+                        for chunk in bytes.as_chunks_mut::<8>().0 {
                             seed ^= seed << 13;
                             seed ^= seed >> 7;
                             seed ^= seed << 17;

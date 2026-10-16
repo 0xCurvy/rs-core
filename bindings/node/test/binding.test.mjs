@@ -39,7 +39,7 @@ test("proves an authenticated generic circuit with one worker", async () => {
     threads: 1,
   });
 
-  assert.equal(binding.rsCoreVersion(), "0.1.1");
+  assert.equal(binding.rsCoreVersion(), "0.1.2");
   assert.equal(prover.mode, "resident");
   assert.equal(prover.profile, "HAWK");
   assert.equal(prover.threads, 1);
@@ -237,8 +237,8 @@ test("frontier batches that fail leave it unchanged", () => {
     [() => frontier.buildPendingCommitment(4, JSON.stringify(["6", "7", "8", "9"])), /tree is full/],
     [() => frontier.buildPendingCommitmentPacked(4, packFields([7n, 7n])), /leaf already exists/],
     [() => frontier.buildPendingCommitmentPacked(4, packFields([6n, 7n, 8n, 9n])), /tree is full/],
-    [() => frontier.buildPendingCommitment(0, '["1"]'), /batchSize must be between/],
-    [() => frontier.buildPendingCommitment(4097, '["1"]'), /batchSize must be between/],
+    [() => frontier.buildPendingCommitment(0, '["1"]'), /batchSize must be an integer between/],
+    [() => frontier.buildPendingCommitment(4097, '["1"]'), /batchSize must be an integer between/],
     [() => frontier.buildPendingCommitment(4, "[]"), /must not be empty/],
     [() => frontier.append(JSON.stringify(["6", "7", "8", "9"])), /tree is full/],
   ]) {
@@ -264,6 +264,179 @@ test("a frontier cannot see a note that is already in the tree", () => {
 
   assert.throws(() => tree.buildPendingCommitment(2, JSON.stringify(["5"])), /leaf already exists/);
   assert.equal(frontier.buildPendingCommitment(2, JSON.stringify(["5"])).paddedNoteIds[0], "5");
+});
+
+// Real proofs of the calldata-bound circuits: each vector records the words a proof
+// was made for and the [commitment, y, x] it verified with.
+const calldataVectors = JSON.parse(
+  await readFile(resolve(here, "../../../crates/core/testdata/calldata_binding_vectors.json"), "utf8"),
+);
+
+const fieldModulus = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const invalidArg = (pattern) => (error) => error.code === "InvalidArg" && pattern.test(error.message);
+
+test("binds calldata like the bound circuits, from JSON and packed words", () => {
+  // The proofs' vectors, then 1, 15 and 30 words from an independent implementation.
+  for (const vector of [...calldataVectors.spend, ...calldataVectors.binding]) {
+    const name = vector.circuit ?? vector.name;
+    const fromJson = binding.bindCalldata(JSON.stringify(vector.words));
+    // The proof's public signals, in their order.
+    assert.deepEqual(Object.entries(fromJson), [
+      ["commitment", vector.commitment],
+      ["y", vector.y],
+      ["x", vector.x],
+    ], name);
+    assert.deepEqual(binding.bindCalldataPacked(packFields(vector.words.map(BigInt))), fromJson, name);
+  }
+  assert.throws(() => binding.bindCalldata("[]"), invalidArg(/at least one word/));
+  assert.throws(() => binding.bindCalldataPacked(Buffer.alloc(0)), invalidArg(/at least one word/));
+  // The modulus is one value to the proof and another to the contract: refused,
+  // as an invalid argument, from JSON and packed alike.
+  assert.throws(() => binding.bindCalldata(JSON.stringify([String(fieldModulus)])), invalidArg(/modulus/));
+  assert.throws(() => binding.bindCalldataPacked(packFields([fieldModulus])), invalidArg(/not canonical/));
+  assert.throws(() => binding.bindCalldata('["01"]'), invalidArg(/non-canonical/));
+  assert.throws(() => binding.bindCalldataPacked(Buffer.alloc(33)), invalidArg(/multiple of 32/));
+});
+
+test("bindCalldata takes 8,192 words, and names its byte budget when JSON exceeds it", () => {
+  const words = Array.from({ length: 8192 }, (_, index) => String(fieldModulus - 1n - BigInt(index)));
+  const compact = binding.bindCalldata(JSON.stringify(words));
+  assert.deepEqual(binding.bindCalldataPacked(packFields(words.map(BigInt))), compact);
+  // The same words pretty-printed: legal JSON, but past the byte budget.
+  assert.throws(() => binding.bindCalldata(JSON.stringify(words, null, 2)), invalidArg(/byte budget/));
+  assert.throws(() => binding.bindCalldata(JSON.stringify([...words, "1"])), invalidArg(/at most 8192 words/));
+  assert.throws(() => binding.bindCalldataPacked(packFields([...words, "1"].map(BigInt))), invalidArg(/at most 8192 words/));
+});
+
+test("builds the bound pending-notes commitment the circuit proved, from either tree form", () => {
+  const { batchSize, treeDepth, commits } = calldataVectors.pendingNotesCommitment;
+  const frontier = binding.NotesFrontier.production();
+  const tree = new binding.IndexedMerkleTree(treeDepth, "[]");
+  const packedTree = new binding.IndexedMerkleTree(treeDepth, "[]");
+
+  for (const commit of commits) {
+    const json = JSON.stringify(commit.noteIds);
+    const fromFrontier = frontier.buildBoundPendingCommitment(batchSize, json);
+    const fromTree = tree.buildBoundPendingCommitment(batchSize, json);
+    const fromPacked = packedTree.buildBoundPendingCommitmentPacked(batchSize, packFields(commit.noteIds.map(BigInt)));
+    assert.deepEqual(fromTree, fromFrontier);
+    assert.deepEqual(fromPacked, fromFrontier);
+
+    assert.deepEqual(fromFrontier.noteIds, commit.noteIds);
+    assert.equal(fromFrontier.newNotesRoot, commit.newNotesRoot);
+    assert.equal(String(fromFrontier.newNoteIndex), commit.newNoteIndex);
+    assert.equal(fromFrontier.commitment, commit.commitment);
+    assert.equal(fromFrontier.x, commit.x);
+    assert.equal(fromFrontier.y, commit.y);
+
+    const input = JSON.parse(fromFrontier.circuitInputJson);
+    assert.deepEqual(Object.keys(input).sort(), ["currentNoteIndex", "currentNotesRoot", "frontier", "pendingNoteIds", "x"]);
+    assert.equal(input.pendingNoteIds.length, batchSize);
+    assert.equal(input.frontier.length, treeDepth);
+    assert.equal(input.x, commit.x);
+    assert.equal(frontier.root(), commit.newNotesRoot);
+  }
+});
+
+test("the next leaf's frontier is what the bound input carries", () => {
+  for (const historyLength of [0, 1, 2, 3, 7, 8, 9, 37]) {
+    const history = Array.from({ length: historyLength }, (_, index) => BigInt(1_000 + index));
+    const tree = binding.IndexedMerkleTree.fromPackedLeaves(30, packFields(history));
+    const frontier = binding.NotesFrontier.production();
+    frontier.appendPacked(packFields(history));
+
+    const expected = tree.nextLeafFrontier();
+    assert.equal(expected.length, 30);
+    assert.deepEqual(frontier.nextLeafFrontier(), expected);
+    // Zero wherever the next leaf's path turns left.
+    expected.forEach((node, level) => {
+      if (((historyLength >> level) & 1) === 0) assert.equal(node, "0");
+    });
+    const input = JSON.parse(frontier.buildBoundPendingCommitment(4, JSON.stringify(["9001"])).circuitInputJson);
+    assert.deepEqual(input.frontier, expected);
+  }
+});
+
+test("builds the bound pending-notes commitment from given tree states", () => {
+  // Shard boundaries and the production tree's capacity, from an independent
+  // implementation; each case starts from a frontier snapshot.
+  const { batchSize, treeDepth, cases } = calldataVectors.pendingNotesCommitmentFromState;
+  for (const vector of cases) {
+    const fromJson = binding.NotesFrontier.fromSnapshot(Buffer.from(vector.snapshot, "hex"));
+    const fromPacked = binding.NotesFrontier.fromSnapshot(Buffer.from(vector.snapshot, "hex"));
+    assert.equal(fromJson.depth, treeDepth);
+    assert.equal(fromJson.root(), vector.currentNotesRoot, vector.name);
+    assert.deepEqual(fromJson.nextLeafFrontier(), vector.frontier, vector.name);
+
+    const built = fromJson.buildBoundPendingCommitment(batchSize, JSON.stringify(vector.noteIds));
+    assert.deepEqual(
+      fromPacked.buildBoundPendingCommitmentPacked(batchSize, packFields(vector.noteIds.map(BigInt))),
+      built,
+    );
+    assert.deepEqual(built.noteIds, vector.noteIds);
+    assert.equal(built.newNotesRoot, vector.newNotesRoot, vector.name);
+    assert.equal(String(built.newNoteIndex), vector.newNoteIndex, vector.name);
+    assert.deepEqual([built.commitment, built.y, built.x], [vector.commitment, vector.y, vector.x], vector.name);
+    const input = JSON.parse(built.circuitInputJson);
+    assert.equal(input.currentNoteIndex, vector.currentNoteIndex);
+    assert.deepEqual(input.frontier, vector.frontier);
+  }
+});
+
+test("bound batches that fail leave the tree unchanged", () => {
+  // Depth 2 holds four leaves.
+  const tree = new binding.IndexedMerkleTree(2, JSON.stringify(["5"]));
+  const frontier = new binding.NotesFrontier(2, 1);
+  frontier.append(JSON.stringify(["5"]));
+  const modulus = String(fieldModulus);
+  for (const notes of [tree, frontier]) {
+    const root = notes.root();
+    for (const [build, error] of [
+      [() => notes.buildBoundPendingCommitment(4, "[]"), invalidArg(/must not be empty/)],
+      [() => notes.buildBoundPendingCommitment(2, JSON.stringify(["6", "7", "8"])), invalidArg(/exceeds batch size/)],
+      [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", "0"])), invalidArg(/zero is padding/)],
+      [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", "6"])), invalidArg(/repeats within the batch/)],
+      [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", modulus])), invalidArg(/modulus/)],
+      [() => notes.buildBoundPendingCommitmentPacked(4, packFields([6n, fieldModulus])), invalidArg(/not canonical/)],
+      [() => notes.buildBoundPendingCommitmentPacked(4, Buffer.alloc(40)), invalidArg(/multiple of 32/)],
+      [() => notes.buildBoundPendingCommitmentPacked(2, packFields([6n, 7n, 8n])), invalidArg(/exceeds batch size/)],
+      [() => notes.buildBoundPendingCommitment(0, '["6"]'), invalidArg(/batchSize must be an integer between/)],
+      // A full tree is not the caller's mistake.
+      [
+        () => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", "7", "8", "9"])),
+        (error) => error.code === "GenericFailure" && /tree is full/.test(error.message),
+      ],
+    ]) {
+      assert.throws(build, error);
+      assert.equal(notes.root(), root);
+      assert.equal(notes.leafCount, 1);
+    }
+  }
+  // Only the indexed tree holds its leaves, so only it refuses one again, as an
+  // invalid argument like every other refused id.
+  assert.throws(() => tree.buildBoundPendingCommitment(4, JSON.stringify(["5"])), invalidArg(/leaf already exists/));
+  assert.equal(tree.leafCount, 1);
+});
+
+test("batch sizes must be integers in range, not coerced to one", () => {
+  const tree = new binding.IndexedMerkleTree(30, "[]");
+  const frontier = binding.NotesFrontier.production();
+  for (const notes of [tree, frontier]) {
+    const root = notes.root();
+    for (const batchSize of [2 ** 32 + 4, 4.9, -1, -0, Number.NaN, Number.POSITIVE_INFINITY, 4097, 0]) {
+      for (const build of [
+        () => notes.buildBoundPendingCommitment(batchSize, '["1"]'),
+        () => notes.buildBoundPendingCommitmentPacked(batchSize, packFields([1n])),
+        () => notes.buildPendingCommitment(batchSize, '["1"]'),
+        () => notes.buildPendingCommitmentPacked(batchSize, packFields([1n])),
+      ]) {
+        assert.throws(build, invalidArg(/batchSize must be an integer between 1 and 4096/), String(batchSize));
+        assert.equal(notes.root(), root);
+        assert.equal(notes.leafCount, 0);
+      }
+    }
+    assert.equal(notes.buildBoundPendingCommitment(4096, '["1"]').newNoteIndex, 1);
+  }
 });
 
 test("rejects malformed frontier snapshots and geometries", () => {
@@ -469,8 +642,8 @@ test("pending batches reject resource-exhausting sizes without changing the tree
   const tree = new binding.IndexedMerkleTree(30, "[]");
   const before = tree.root();
   for (const count of [0,4097,200000,0xffffffff]) {
-    assert.throws(()=>tree.buildPendingCommitment(count,'["1"]'), /batchSize must be between/);
-    assert.throws(()=>tree.buildPendingCommitmentPacked(count,Buffer.alloc(32)), /batchSize must be between/);
+    assert.throws(()=>tree.buildPendingCommitment(count,'["1"]'), /batchSize must be an integer between/);
+    assert.throws(()=>tree.buildPendingCommitmentPacked(count,Buffer.alloc(32)), /batchSize must be an integer between/);
     assert.equal(tree.root(),before);
     assert.equal(tree.leafCount,0);
   }
