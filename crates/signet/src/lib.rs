@@ -110,7 +110,7 @@ pub const DEFAULT_COMPRESSION_LEVEL: i32 = 9;
 ///
 /// Prefers the system `zstd`, because ruzstd only implements level 1 - and its
 /// level 1 is itself ~39% weaker than libzstd's. Compression runs once at build
-/// time in a pipeline that already needs `circom`, `git` and a C++ toolchain, so
+/// time in a pipeline that already needs `circom` and `git`, so
 /// depending on `zstd` there costs nothing. The *decoder* stays pure Rust, which is
 /// the constraint that actually matters: it ships to wasm.
 ///
