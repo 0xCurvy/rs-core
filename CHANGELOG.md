@@ -5,6 +5,15 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Every crate, binding and package shares one workspace version. The 0.1.0 release
 candidates could break APIs from one candidate to the next.
 
+## [0.1.3] - 2026-10-19
+
+Changes since `v0.1.2` (`256f9bf`, 16 October 2026).
+
+### Changed
+
+- Minimum Rust version 1.97 (was 1.99): 0.1.2 builds on 1.97.
+- CI checks and tests `curvy-core`, `curvy-witness` and `curvy-prover` on the minimum Rust version.
+
 ## [0.1.2] - 2026-10-16
 
 Changes since `v0.1.1` (`fa3ce61`, 8 October 2026).
@@ -201,6 +210,7 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.3]: https://github.com/0xCurvy/rs-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/0xCurvy/rs-core/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.7...v0.1.1
 [0.1.0-rc.7]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.6...v0.1.0-rc.7

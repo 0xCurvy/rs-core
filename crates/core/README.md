@@ -9,10 +9,10 @@ generate Groth16 proofs.
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.2"
+curvy-core = "=0.1.3"
 ```
 
-Rust 1.99 or newer is required.
+Rust 1.97 or newer is required.
 
 ## Signing profiles
 
@@ -51,7 +51,7 @@ Merkle-tree construction:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.2", features = ["parallel"] }
+curvy-core = { version = "=0.1.3", features = ["parallel"] }
 ```
 
 Native applications can set the global Rayon pool size with

@@ -194,6 +194,28 @@ jobs:
           cargo package -p curvy-core --locked --no-verify
           cargo package -p curvy-witness --locked --no-verify
 
+  # The published crates on the oldest Rust they declare. The workspace's
+  # `rust-version` names it; RUSTUP_TOOLCHAIN overrides rust-toolchain.toml.
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          target: wasm32-unknown-unknown
+      - env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: |
+          cargo --version
+          cargo check --locked -p curvy-core -p curvy-witness -p curvy-prover --all-features --all-targets
+          cargo check --locked -p curvy-wasm --target wasm32-unknown-unknown
+          cargo test --locked -p curvy-core -p curvy-witness -p curvy-prover --features curvy-prover/parallel
+
   # Every test and clippy feature set, split across runners. Each entry runs its
   # commands in order and stops at the first failure, like consecutive steps.
   # Entries that mix serial and `parallel` sets compile two dependency feature

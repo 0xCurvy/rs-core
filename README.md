@@ -32,17 +32,17 @@ version of each.
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.2"
+curvy-core = "=0.1.3"
 ```
 
 For witness evaluation or proving, add:
 
 ```toml
-curvy-witness = "=0.1.2"
-curvy-prover = "=0.1.2"
+curvy-witness = "=0.1.3"
+curvy-prover = "=0.1.3"
 ```
 
-Requires Rust 1.99 or newer.
+Requires Rust 1.97 or newer.
 
 ## Signing profiles
 
@@ -127,7 +127,7 @@ fn prove(
 ### Native prover executable
 
 ```bash
-cargo install --locked curvy-prover --version 0.1.2 --bin curvy-native-prover
+cargo install --locked curvy-prover --version 0.1.3 --bin curvy-native-prover
 ```
 
 Add `--features parallel` for the multithreaded build that `scripts/build.sh native`
@@ -150,8 +150,8 @@ build refuses values above 1.
 `parallel` feature, which uses the host's Rayon global pool:
 
 ```toml
-curvy-core = { version = "=0.1.2", features = ["parallel"] }
-curvy-prover = { version = "=0.1.2", features = ["parallel"] }
+curvy-core = { version = "=0.1.3", features = ["parallel"] }
+curvy-prover = { version = "=0.1.3", features = ["parallel"] }
 ```
 
 Configure the pool with `RAYON_NUM_THREADS`, or with
