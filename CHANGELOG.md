@@ -9,6 +9,10 @@ candidates could break APIs from one candidate to the next.
 
 Changes since `v0.1.2` (`256f9bf`, 16 October 2026).
 
+Only the Rust crates change. `@0xcurvy/rs-core-wasm` and `@0xcurvy/rs-core-node` 0.1.3 are a sync-only
+publish that keeps every package on one version: they are built from the same code as 0.1.2 and differ only
+in the version they report. Upgrading them from 0.1.2 is optional.
+
 ### Changed
 
 - Minimum Rust version 1.97 (was 1.99): 0.1.2 builds on 1.97.
