@@ -26,7 +26,9 @@
 #   CURVY_WASM_LTO               release LTO mode (default: fat)
 #   CURVY_WASM_CODEGEN_UNITS     release codegen units (default: 1)
 #   CURVY_WASM_THREADS_TOOLCHAIN nightly for --threads (default: nightly-2026-08-15)
-#   CURVY_WASM_OPT               0 skips wasm-opt (default: 1)
+#   CURVY_WASM_OPT               1 runs wasm-opt when the pinned binaryen
+#                                release is on PATH, 0 skips it, required fails
+#                                without it (default: 1)
 #   CURVY_WASM_OUT_DIR           package root relative to the repository
 #                                (default: crates); writes <root>/wasm/pkg-<suffix>
 #                                and <root>/prover/pkg-<suffix>
@@ -34,6 +36,30 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+# Only this binaryen release post-optimizes the modules, so the published package
+# and CI's browser proofs run the same bytes. CI installs the same release.
+binaryen_version=133
+wasm_opt_mode="${CURVY_WASM_OPT:-1}"
+case "$wasm_opt_mode" in
+  0 | 1 | required) ;;
+  *)
+    echo "CURVY_WASM_OPT must be 0, 1 or required, not $wasm_opt_mode" >&2
+    exit 1
+    ;;
+esac
+run_wasm_opt=0
+if [ "$wasm_opt_mode" != "0" ]; then
+  found_binaryen=""
+  if command -v wasm-opt >/dev/null 2>&1; then
+    found_binaryen="$(wasm-opt --version | sed -n 's/^wasm-opt version \([0-9][0-9]*\).*/\1/p')"
+  fi
+  if [ "$found_binaryen" = "$binaryen_version" ]; then
+    run_wasm_opt=1
+  elif [ "$wasm_opt_mode" = "required" ]; then
+    echo "wasm-opt from binaryen $binaryen_version is required; found ${found_binaryen:-none}" >&2
+    exit 1
+  fi
+fi
 
 binding_target="${1:-nodejs}"
 if [ "$#" -gt 0 ]; then
@@ -198,7 +224,7 @@ wasm-bindgen --target "$binding_target" --out-dir "$core_output" \
 wasm-bindgen --target "$binding_target" --out-dir "$prover_output" \
   "$wasm_target_dir/curvy_prover.wasm"
 
-if [ "${CURVY_WASM_OPT:-1}" != "0" ] && command -v wasm-opt >/dev/null 2>&1; then
+if [ "$run_wasm_opt" = 1 ]; then
   optimization_dir="$(mktemp -d "${TMPDIR:-/tmp}/curvy-wasm-opt.XXXXXX")"
   cleanup_optimization_dir() {
     rm -f \
@@ -228,7 +254,7 @@ if [ "${CURVY_WASM_OPT:-1}" != "0" ] && command -v wasm-opt >/dev/null 2>&1; the
   cleanup_optimization_dir
   trap - EXIT
 else
-  echo "wasm-opt unavailable or disabled; generated module was not post-optimized" >&2
+  echo "wasm-opt from binaryen $binaryen_version unavailable or disabled; generated module was not post-optimized" >&2
 fi
 
 if [ "$binding_target" = "nodejs" ]; then

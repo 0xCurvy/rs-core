@@ -162,8 +162,8 @@ else
     echo "ci.yml on $(git rev-parse --short HEAD): $conclusion"
     if [[ "$conclusion" == none ]]; then
       # CI does not run for a commit that changes only Markdown or this script
-      # (ci.yml paths-ignore). Accept the newest earlier commit CI passed when
-      # nothing else changed since.
+      # (ci.yml paths), except the crate READMEs. Accept the newest earlier commit
+      # CI passed when nothing else changed since.
       passed=""
       while read -r sha; do
         if git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
@@ -173,7 +173,10 @@ else
       done < <(gh run list --workflow ci.yml --branch main --event push --status success \
         --limit 50 --json headSha --jq '.[].headSha' 2>/dev/null)
       if [[ -n "$passed" ]] &&
-        [[ -z "$(git diff --name-only "$passed" HEAD | grep -v -E '\.md$|^scripts/publish\.sh$' || true)" ]]; then
+        [[ -z "$(git diff --name-only "$passed" HEAD |
+          grep -v -E '\.md$|^scripts/publish\.sh$' || true)" ]] &&
+        [[ -z "$(git diff --name-only "$passed" HEAD |
+          grep -E '^crates/(core|prover|wasm|witness)/README\.md$' || true)" ]]; then
         echo "CI passed on $(git rev-parse --short "$passed"); only Markdown or scripts/publish.sh changed since"
         conclusion=success
       fi
@@ -197,24 +200,26 @@ npm_published() {
 }
 
 publish_crates() {
-  local crate dirty=()
+  local crate dirty=() pending=() packages=()
   ((dry_run)) && dirty=(--allow-dirty)
   for crate in curvy-core curvy-witness curvy-prover curvy-wasm; do
     if crate_published "$crate"; then
       echo "$crate $version is already on crates.io; skipping"
       continue
     fi
-    step "Packaging $crate"
+    pending+=("$crate")
+    packages+=(-p "$crate")
+    step "Files in $crate"
     cargo package --locked "${dirty[@]+"${dirty[@]}"}" -p "$crate" --list
-    if ((dry_run)); then
-      # curvy-prover and curvy-wasm verify against curvy-core and curvy-witness
-      # from crates.io, so only those two can be verified before publishing.
-      if [[ "$crate" == curvy-core || "$crate" == curvy-witness ]]; then
-        cargo publish --locked "${dirty[@]+"${dirty[@]}"}" -p "$crate" --dry-run
-      fi
-      continue
-    fi
-    cargo publish --locked -p "$crate" --dry-run
+  done
+  ((${#pending[@]})) || return 0
+  # Packaging them together builds each crate from its packaged sources against
+  # the others' packaged sources, so a crate that does not build stops the run
+  # before anything is published.
+  step "Packaging and building ${pending[*]}"
+  cargo package --locked "${dirty[@]+"${dirty[@]}"}" "${packages[@]}"
+  ((dry_run)) && return
+  for crate in "${pending[@]}"; do
     confirm "Publish $crate $version to crates.io?" || fail "stopped before $crate"
     cargo publish --locked -p "$crate"
     printf 'waiting for %s %s on the crates.io index' "$crate" "$version"

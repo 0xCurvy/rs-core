@@ -6,7 +6,7 @@ each with `scripts/publish.sh`:
 | Command | Publishes | Needs |
 |---|---|---|
 | `scripts/publish.sh crates` | `curvy-core`, `curvy-witness`, `curvy-prover`, `curvy-wasm` to crates.io | `cargo login` |
-| `scripts/publish.sh wasm` | `@0xcurvy/rs-core-wasm` to npm | `npm login`, wasm-bindgen 0.2.126, the threads nightly |
+| `scripts/publish.sh wasm` | `@0xcurvy/rs-core-wasm` to npm | `npm login`, wasm-bindgen 0.2.126, the threads nightly, `wasm-opt` from binaryen 133 |
 | `scripts/publish.sh node` | `@0xcurvy/rs-core-node` and its four platform packages to npm | `npm login`, an Apple Silicon Mac with Docker Buildx, a Windows x64 host to test on |
 
 Run any of them with `--dry-run` first: it builds and checks everything and
@@ -28,8 +28,9 @@ publishes nothing.
 3. Run the checks (`scripts/check.sh all`, plus the ones your change touches) and
    inspect `cargo package --list -p <crate>` for each crate.
 4. Merge to `main` and wait for CI to pass. CI does not run for changes to only
-   Markdown files or `scripts/publish.sh`; `scripts/publish.sh` then accepts the
-   newest earlier commit that CI passed.
+   Markdown files or `scripts/publish.sh`, except the READMEs of the four crates,
+   which are their docs and doctests; `scripts/publish.sh` then accepts the newest
+   earlier commit that CI passed.
 
 ## 2. Tag
 
@@ -47,10 +48,13 @@ other commit. A tag publishes nothing by itself.
 
 Check out the tagged commit with a clean tree, then:
 
-- **crates**: `scripts/publish.sh crates` publishes `curvy-core` and
-  `curvy-witness`, waits for each on the crates.io index, then publishes
-  `curvy-prover` and `curvy-wasm`.
-- **wasm**: `scripts/publish.sh wasm` builds the browser modules, packs the
+- **crates**: `scripts/publish.sh crates` first builds every crate it will publish
+  from its packaged sources, so a crate that does not build stops the run before
+  anything is published. It then publishes `curvy-core` and `curvy-witness`,
+  waits for each on the crates.io index, then publishes `curvy-prover` and
+  `curvy-wasm`.
+- **wasm**: `scripts/publish.sh wasm` builds the browser modules, optimizes them
+  with the pinned binaryen release (the release CI's browser proofs use), packs the
   package, installs it in an empty project, proves with it, and publishes that
   tarball.
 - **node**: `scripts/publish.sh node` builds macOS arm64 natively and Linux and

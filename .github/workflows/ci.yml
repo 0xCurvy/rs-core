@@ -1,17 +1,28 @@
 name: CI
 
 # Markdown and the publish script are neither built nor tested here, so a change
-# to only those does not run CI. scripts/publish.sh skips the same paths.
+# to only those does not run CI, except the four crate READMEs, which are the
+# crates' rustdoc and doctests. scripts/publish.sh skips the same paths.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**.md"
-      - scripts/publish.sh
+    paths:
+      - "**"
+      - "!**.md"
+      - "!scripts/publish.sh"
+      - crates/core/README.md
+      - crates/prover/README.md
+      - crates/wasm/README.md
+      - crates/witness/README.md
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - scripts/publish.sh
+    paths:
+      - "**"
+      - "!**.md"
+      - "!scripts/publish.sh"
+      - crates/core/README.md
+      - crates/prover/README.md
+      - crates/wasm/README.md
+      - crates/witness/README.md
 
 # One in-flight run per ref. Superseded PR pushes are cancelled; main is left
 # alone so every commit on the release branch keeps a complete result.
@@ -191,8 +202,9 @@ jobs:
             echo "::error::curvy-prover includes harness or benchmark example files"
             exit 1
           fi
-          cargo package -p curvy-core --locked --no-verify
-          cargo package -p curvy-witness --locked --no-verify
+          # Builds each published crate from its packaged sources against the
+          # others' packaged sources, as scripts/publish.sh does before publishing.
+          cargo package --locked -p curvy-core -p curvy-witness -p curvy-prover -p curvy-wasm
 
   # The published crates on the oldest Rust they declare. The workspace's
   # `rust-version` names it; RUSTUP_TOOLCHAIN overrides rust-toolchain.toml.
@@ -301,6 +313,26 @@ jobs:
       # -x echoes each command before it runs, so the log shows which one failed.
       - shell: bash --noprofile --norc -xeo pipefail {0}
         run: ${{ matrix.run }}
+
+  # Full differential gate for the generated Poseidon schedule: 10,000
+  # deterministic random inputs per arity against the direct reference. It is
+  # #[ignore]d in ordinary test runs because of its cost.
+  poseidon-gate:
+    name: Poseidon 160k gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.99.0
+      - name: Optimized Poseidon matches the reference on 160k cases
+        shell: bash
+        run: |
+          cargo test -p curvy-core --release --locked --lib -- --ignored --exact \
+            poseidon::optimized_tests::optimized_schedule_matches_160k_reference_cases | tee poseidon-gate.log
+          # A renamed test would otherwise "pass" with zero tests run.
+          grep -q '^test result: ok\. 1 passed' poseidon-gate.log
 
   wasm-portable:
     name: Portable WASM
@@ -449,6 +481,10 @@ jobs:
     env:
       WASM_TOOLS_VERSION: 1.260.0
       WASM_TOOLS_SHA256: 2112785b5cf397dc348002988ce65c4db48fea728543eb18e4df21f674c7fcdc
+      # The binaryen release scripts/lib/build-wasm.sh pins, so the proved
+      # packages are optimized as the published one is.
+      BINARYEN_VERSION: "133"
+      BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
       # SIMD self-test packages, kept apart from the proved release packages.
       SIMD_SELFTEST_DIR: target/simd-selftest
     steps:
@@ -468,14 +504,25 @@ jobs:
           echo "${WASM_TOOLS_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "$archive" --strip-components=1 "wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux/wasm-tools"
           echo "WASM_TOOLS=$RUNNER_TEMP/wasm-tools" >> "$GITHUB_ENV"
+      - name: Install binaryen
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSLO "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${archive}"
+          echo "${BINARYEN_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
       - if: matrix.selftest-build
         run: ${{ matrix.selftest-build }}
         env:
           CURVY_WASM_OUT_DIR: ${{ env.SIMD_SELFTEST_DIR }}
+          CURVY_WASM_OPT: "0"
       # Checks the cargo output of the build just made (it keeps function names).
       - if: matrix.selftest-build
         run: scripts/check.sh simd-codegen
       - run: ${{ matrix.build }}
+        env:
+          CURVY_WASM_OPT: required
       - if: matrix.simd
         run: scripts/check.sh simd-codegen
       - name: Check SIMD builds exclude the self-tests

@@ -11,7 +11,8 @@
 #   wasm-web-threads    threaded modules for browsers  crates/{wasm,prover}/pkg-web-threads
 #   all-portable        native, wasm-nodejs, wasm-web and wasm-bundler
 #   npm [--pack]        @0xcurvy/rs-core-wasm from wasm-web and wasm-web-threads:
-#                       dist/npm, and with --pack the .tgz in the repository root
+#                       dist/npm, and with --pack the .tgz in the repository root;
+#                       needs wasm-opt from the binaryen release build-wasm.sh pins
 #   node-release        @0xcurvy/rs-core-node packages (Apple Silicon Mac with
 #                       Docker): bindings/node/release
 #   ffi-header          bindings/ffi/include/curvy.h (cbindgen 0.29.4)
@@ -69,8 +70,8 @@ build() {
       wasm bundler
       ;;
     npm)
-      wasm web
-      wasm web --threads
+      CURVY_WASM_OPT=required wasm web
+      CURVY_WASM_OPT=required wasm web --threads
       node scripts/lib/build-npm.mjs "$@"
       ;;
     node-release) node scripts/lib/node-release.mjs "$@" ;;
