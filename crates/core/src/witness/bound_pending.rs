@@ -196,6 +196,10 @@ fn check_batch_size(batch_size: usize) -> Result<(), PendingCommitmentError> {
 /// [`IndexedMerkleTree`](crate::imt::IndexedMerkleTree), ids it already holds. A
 /// [`NotesFrontier`](crate::imt::NotesFrontier) holds no leaves, so it can refuse
 /// only a repeat inside the batch.
+///
+/// The tree may have any depth; the circuit fixes one. A `frontier` of another
+/// length is refused by the circuit's witness graph, which names the input and
+/// both lengths.
 pub fn build_bound_pending_commitment<T: AppendableNotesTree>(
     tree: &mut T,
     batch_size: usize,

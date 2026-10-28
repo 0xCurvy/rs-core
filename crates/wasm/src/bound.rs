@@ -16,21 +16,35 @@ use curvy_core::witness::{
 };
 use wasm_bindgen::prelude::*;
 
-use crate::{WasmMerkleTree, WasmNotesFrontier, js_tree_error};
+use crate::{WasmMerkleTree, WasmNotesFrontier, input_bytes, js_tree_error};
 
 /// Bind calldata words the way the aggregator's bound circuits and contract do.
-/// `words` are decimal field elements below the modulus, at most 8,192; the
-/// proof's public signals are `[commitment, y, x]`.
+/// `words` is an array of decimal field elements below the modulus, at most
+/// 8,192; the proof's public signals are `[commitment, y, x]`.
 #[wasm_bindgen(js_name = bindCalldata)]
-pub fn bind_calldata(words: Vec<String>) -> Result<WasmCalldataBinding, JsError> {
-    if words.len() > MAX_CALLDATA_WORDS {
+pub fn bind_calldata(
+    #[wasm_bindgen(unchecked_param_type = "string[]")] words: JsValue,
+) -> Result<WasmCalldataBinding, JsError> {
+    // A `Vec<String>` parameter would take any array-like, a string as its
+    // characters among them.
+    if !js_sys::Array::is_array(&words) {
+        return Err(JsError::new("words must be an array of decimal strings"));
+    }
+    let words = words.unchecked_into::<js_sys::Array>();
+    let count = words.length() as usize;
+    if count > MAX_CALLDATA_WORDS {
         return Err(JsError::new(
-            &CalldataError::TooManyWords { count: words.len() }.to_string(),
+            &CalldataError::TooManyWords { count }.to_string(),
         ));
     }
     let words = words
         .iter()
-        .map(|word| canonical_field_input(word))
+        .enumerate()
+        .map(|(index, word)| {
+            word.as_string()
+                .ok_or_else(|| JsError::new(&format!("word {index} is not a string")))
+                .and_then(|word| canonical_field_input(&word))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     core_bind_calldata(&words)
         .map(WasmCalldataBinding)
@@ -119,16 +133,20 @@ impl WasmBoundPendingCommitment {
     }
 }
 
-/// A JavaScript number is a batch size only as an integer from 1 to
-/// `MAX_PENDING_BATCH_SIZE`. The `u32` conversion would wrap `2 ** 32 + 4` and
-/// truncate `4.9`, both to 4.
-fn batch_size_from_js(value: f64) -> Result<usize, JsError> {
-    if value.fract() == 0.0 && (1.0..=MAX_PENDING_BATCH_SIZE as f64).contains(&value) {
-        Ok(value as usize)
-    } else {
-        Err(JsError::new(&format!(
+/// A batch size is a JavaScript number, and only an integer from 1 to
+/// `MAX_PENDING_BATCH_SIZE`. An `f64` parameter would convert `"4"` or `true`
+/// first, and the `u32` conversion would wrap `2 ** 32 + 4` and truncate `4.9`,
+/// both to 4.
+fn batch_size_from_js(value: &JsValue) -> Result<usize, JsError> {
+    match value.as_f64() {
+        Some(value)
+            if value.fract() == 0.0 && (1.0..=MAX_PENDING_BATCH_SIZE as f64).contains(&value) =>
+        {
+            Ok(value as usize)
+        }
+        _ => Err(JsError::new(&format!(
             "batchSize must be an integer between 1 and {MAX_PENDING_BATCH_SIZE}"
-        )))
+        ))),
     }
 }
 
@@ -137,10 +155,11 @@ fn batch_size_from_js(value: f64) -> Result<usize, JsError> {
 /// failures alike throw an `Error`, as every other call here does.
 fn build_bound<T: AppendableNotesTree>(
     tree: &mut T,
-    batch_size: f64,
-    packed_note_ids: &[u8],
+    batch_size: &JsValue,
+    packed_note_ids: &js_sys::Uint8Array,
 ) -> Result<WasmBoundPendingCommitment, JsError> {
     let batch_size = batch_size_from_js(batch_size)?;
+    let packed_note_ids = input_bytes(packed_note_ids, "packedNoteIds")?;
     // A batch longer than `batch_size` is the core builder's to refuse.
     let note_count = (packed_note_ids.len() / 32).min(batch_size);
     let new_note_index = tree
@@ -148,7 +167,7 @@ fn build_bound<T: AppendableNotesTree>(
         .checked_add(note_count)
         .and_then(|index| u32::try_from(index).ok())
         .ok_or_else(|| JsError::new("the new note index would not fit a u32"))?;
-    let commitment = build_bound_pending_commitment_packed(tree, batch_size, packed_note_ids)
+    let commitment = build_bound_pending_commitment_packed(tree, batch_size, &packed_note_ids)
         .map_err(|error| JsError::new(&error.to_string()))?;
     debug_assert_eq!(commitment.new_note_index, u64::from(new_note_index));
     Ok(WasmBoundPendingCommitment {
@@ -166,10 +185,10 @@ impl WasmMerkleTree {
     #[wasm_bindgen(js_name = buildBoundPendingCommitment)]
     pub fn build_bound_pending_commitment(
         &mut self,
-        batch_size: f64,
-        packed_note_ids: &[u8],
+        #[wasm_bindgen(unchecked_param_type = "number")] batch_size: JsValue,
+        packed_note_ids: &js_sys::Uint8Array,
     ) -> Result<WasmBoundPendingCommitment, JsError> {
-        build_bound(&mut self.inner, batch_size, packed_note_ids)
+        build_bound(&mut self.inner, &batch_size, packed_note_ids)
     }
 
     /// The calldata-bound circuit's `frontier` input for the next batch, packed
@@ -193,10 +212,10 @@ impl WasmNotesFrontier {
     #[wasm_bindgen(js_name = buildBoundPendingCommitment)]
     pub fn build_bound_pending_commitment(
         &mut self,
-        batch_size: f64,
-        packed_note_ids: &[u8],
+        #[wasm_bindgen(unchecked_param_type = "number")] batch_size: JsValue,
+        packed_note_ids: &js_sys::Uint8Array,
     ) -> Result<WasmBoundPendingCommitment, JsError> {
-        build_bound(&mut self.inner, batch_size, packed_note_ids)
+        build_bound(&mut self.inner, &batch_size, packed_note_ids)
     }
 
     /// See `MerkleTree.nextLeafFrontier`.

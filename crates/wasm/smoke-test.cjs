@@ -299,6 +299,34 @@ for (const invalid of [null, undefined, "1".repeat(32), Array(32).fill(1)]) {
 assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32)), ["0", "1"]);
 assert.deepEqual(wasm.ephemeralPubKeyBytes(new Uint8Array(32).fill(255)), wasm.ephemeralPubKey(((1n << 256n) - 1n).toString()));
 assert.equal(wasm.poseidon(["1"]), healthyPoseidon);
+// Field and snapshot bytes are Uint8Arrays (a Buffer is one), never another
+// array-like or typed array converted element by element.
+const byteTree = wasm.MerkleTree.fromLeaves(8, new Uint8Array(packed(leaves)));
+const byteShards = new wasm.ShardedNotesTree(8, 3);
+eq(byteTree.getIndex(new Uint8Array(be32(leaves[9]))), 9, "a plain Uint8Array field input");
+for (const bytes of [
+  Array.from(be32(leaves[9])),
+  "1".repeat(32),
+  new Uint16Array(16),
+  new Uint8ClampedArray(32),
+  new DataView(new ArrayBuffer(32)),
+  { length: 32 },
+  null,
+  undefined,
+]) {
+  assertBoundaryError(() => byteTree.getIndex(bytes));
+  assertBoundaryError(() => byteTree.insertMany(bytes));
+  assertBoundaryError(() => wasm.MerkleTree.fromLeaves(8, bytes));
+  assertBoundaryError(() => wasm.verifyMerkleProof(8, bytes, 0, bytes, bytes));
+  assertBoundaryError(() => wasm.NotesFrontier.restore(bytes));
+  assertBoundaryError(() => wasm.ShardedNotesTree.restore(bytes));
+  assertBoundaryError(() => byteShards.append(bytes));
+  assertBoundaryError(() => byteTree.buildBoundPendingCommitment(4, bytes));
+}
+eq(byteTree.leafCount, leaves.length, "refused byte inputs leave the tree unchanged");
+eq(byteShards.leafCount, 0, "refused byte inputs leave the sharded tree unchanged");
+byteTree.free();
+byteShards.free();
 console.log("Byte-input and signer lifecycle regressions passed");
 
 // The point at infinity ("0.0") is never a key or announcement: scans skip it,
@@ -341,6 +369,11 @@ assertBoundaryError(() =>
   wasm.bindCalldata(["21888242871839275222246405745257275088548364400416034343698204186575808495617"]),
 );
 assertBoundaryError(() => wasm.bindCalldata(Array.from({ length: 8193 }, () => "1")));
+// Only an array of strings: not a string's characters, any other array-like or
+// iterable, or values that would convert to strings.
+for (const words of ["123", new Set(["1"]), { length: 1, 0: "1" }, [1], ["1", 2], [, "1"]]) {
+  assertBoundaryError(() => wasm.bindCalldata(words));
+}
 // The packed bound commitment against the decimal vectors: every field it
 // returns is packed, the circuit input is JSON.
 const checkBound = (bound, expected, label) => {
@@ -367,8 +400,9 @@ const checkBound = (bound, expected, label) => {
   const leafCount = tree.leafCount;
   assertBoundaryError(() => tree.buildBoundPendingCommitment(4, packFields(["7", "0"])));
   assertBoundaryError(() => tree.buildBoundPendingCommitment(4, packFields([commits[0].noteIds[0]])));
-  // Batch sizes are integers in range, never wrapped or truncated into one.
-  for (const batchSize of [2 ** 32 + 4, 4.9, -1, Number.NaN, 0, 4097]) {
+  // Batch sizes are integers in range, never wrapped or truncated into one, and
+  // numbers, never converted from another type.
+  for (const batchSize of [2 ** 32 + 4, 4.9, -1, Number.NaN, 0, 4097, "4", true, [4], 4n, null, undefined]) {
     assertBoundaryError(() => tree.buildBoundPendingCommitment(batchSize, packFields(["7"])));
     assertBoundaryError(() => frontier.buildBoundPendingCommitment(batchSize, packFields(["7"])));
   }

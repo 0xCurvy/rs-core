@@ -40,6 +40,8 @@ underlying exports and their input validation.
   SHA-256 integers. Errors do not repeat the input.
 - Poseidon requires 1–16 inputs. Reducing field strings are limited to 4096
   characters; raw integers must fit 256 bits and use at most 78 decimal digits.
+- Field, packed-field and snapshot inputs of the trees and `verifyMerkleProof`
+  must be `Uint8Array`s (a Node `Buffer` is one); any other value throws.
 - `version()` reports the compiled workspace version.
 - `get_meta` returns both private keys. Treat it, `new_meta`, `scan`, and
   full-witness exports as secret data.

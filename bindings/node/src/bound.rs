@@ -19,7 +19,7 @@ use napi_derive::napi;
 
 use crate::{
     DECIMAL_JSON_BYTES_PER_FIELD, IndexedMerkleTree, NotesFrontier, batch_size_from_js,
-    native_error, parse_fields_json, parse_pending_note_ids_json,
+    native_error, parse_fields_json_at_most, parse_pending_note_ids_json,
 };
 
 /// One pending batch as the calldata-bound pending-notes circuit and
@@ -75,7 +75,10 @@ pub fn bind_calldata(words_json: String) -> Result<CalldataBinding> {
             ),
         ));
     }
-    let words = parse_fields_json(&words_json, "calldata words")?;
+    let words =
+        parse_fields_json_at_most(&words_json, "calldata words", MAX_CALLDATA_WORDS, |count| {
+            calldata_error(CalldataError::TooManyWords { count })
+        })?;
     core_bind_calldata(&words)
         .map(CalldataBinding::from)
         .map_err(calldata_error)

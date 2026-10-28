@@ -306,6 +306,10 @@ impl Imt {
         Ok(())
     }
 
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
     pub fn leaf_count(&self) -> usize {
         self.nodes[0].len()
     }

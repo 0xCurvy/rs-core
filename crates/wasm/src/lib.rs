@@ -268,7 +268,10 @@ impl WasmMerkleTree {
     }
 
     #[wasm_bindgen(js_name = fromLeaves)]
-    pub fn from_leaves(depth: u32, packed_leaves: &[u8]) -> Result<WasmMerkleTree, JsError> {
+    pub fn from_leaves(
+        depth: u32,
+        packed_leaves: &js_sys::Uint8Array,
+    ) -> Result<WasmMerkleTree, JsError> {
         Ok(Self {
             inner: IndexedMerkleTree::from_leaves(
                 depth as usize,
@@ -278,7 +281,7 @@ impl WasmMerkleTree {
         })
     }
 
-    pub fn insert(&mut self, leaf: &[u8]) -> Result<u32, JsError> {
+    pub fn insert(&mut self, leaf: &js_sys::Uint8Array) -> Result<u32, JsError> {
         let index = self
             .inner
             .insert(decode_field(leaf, "leaf")?)
@@ -287,21 +290,21 @@ impl WasmMerkleTree {
     }
 
     #[wasm_bindgen(js_name = insertMany)]
-    pub fn insert_many(&mut self, packed_leaves: &[u8]) -> Result<(), JsError> {
+    pub fn insert_many(&mut self, packed_leaves: &js_sys::Uint8Array) -> Result<(), JsError> {
         self.inner
             .insert_many(&decode_fields(packed_leaves, "leaves")?)
             .map_err(js_tree_error)
     }
 
     #[wasm_bindgen(js_name = getIndex)]
-    pub fn get_index(&self, leaf: &[u8]) -> Result<Option<u32>, JsError> {
+    pub fn get_index(&self, leaf: &js_sys::Uint8Array) -> Result<Option<u32>, JsError> {
         Ok(self
             .inner
             .get_index(decode_field(leaf, "leaf")?)
             .map(|index| index as u32))
     }
 
-    pub fn proof(&self, leaf: &[u8]) -> Result<WasmInclusionProof, JsError> {
+    pub fn proof(&self, leaf: &js_sys::Uint8Array) -> Result<WasmInclusionProof, JsError> {
         Ok(WasmInclusionProof(
             self.inner
                 .create_proof(decode_field(leaf, "leaf")?)
@@ -359,7 +362,10 @@ impl WasmOrderedMerkleTree {
     }
 
     #[wasm_bindgen(js_name = fromLeaves)]
-    pub fn from_leaves(depth: u32, packed_leaves: &[u8]) -> Result<WasmOrderedMerkleTree, JsError> {
+    pub fn from_leaves(
+        depth: u32,
+        packed_leaves: &js_sys::Uint8Array,
+    ) -> Result<WasmOrderedMerkleTree, JsError> {
         Ok(Self {
             inner: OrderedMerkleTree::from_leaves(
                 depth as usize,
@@ -369,7 +375,7 @@ impl WasmOrderedMerkleTree {
         })
     }
 
-    pub fn insert(&mut self, leaf: &[u8]) -> Result<u32, JsError> {
+    pub fn insert(&mut self, leaf: &js_sys::Uint8Array) -> Result<u32, JsError> {
         let index = self
             .inner
             .insert(decode_field(leaf, "leaf")?)
@@ -378,7 +384,7 @@ impl WasmOrderedMerkleTree {
     }
 
     #[wasm_bindgen(js_name = insertMany)]
-    pub fn insert_many(&mut self, packed_leaves: &[u8]) -> Result<(), JsError> {
+    pub fn insert_many(&mut self, packed_leaves: &js_sys::Uint8Array) -> Result<(), JsError> {
         self.inner
             .insert_many(&decode_fields(packed_leaves, "leaves")?)
             .map_err(js_tree_error)
@@ -418,10 +424,10 @@ impl WasmOrderedMerkleTree {
 #[wasm_bindgen(js_name = verifyMerkleProof)]
 pub fn verify_merkle_proof(
     depth: u32,
-    leaf: &[u8],
+    leaf: &js_sys::Uint8Array,
     index: u32,
-    packed_siblings: &[u8],
-    root: &[u8],
+    packed_siblings: &js_sys::Uint8Array,
+    root: &js_sys::Uint8Array,
 ) -> Result<bool, JsError> {
     let proof = InclusionProof {
         leaf: decode_field(leaf, "leaf")?,
@@ -459,13 +465,14 @@ impl WasmNotesFrontier {
     }
 
     #[wasm_bindgen(js_name = restore)]
-    pub fn restore(snapshot: &[u8]) -> Result<WasmNotesFrontier, JsError> {
+    pub fn restore(snapshot: &js_sys::Uint8Array) -> Result<WasmNotesFrontier, JsError> {
         Ok(Self {
-            inner: CoreNotesFrontier::from_snapshot_bytes(snapshot).map_err(js_tree_error)?,
+            inner: CoreNotesFrontier::from_snapshot_bytes(&input_bytes(snapshot, "snapshot")?)
+                .map_err(js_tree_error)?,
         })
     }
 
-    pub fn append(&mut self, leaf: &[u8]) -> Result<WasmFrontierAppend, JsError> {
+    pub fn append(&mut self, leaf: &js_sys::Uint8Array) -> Result<WasmFrontierAppend, JsError> {
         Ok(WasmFrontierAppend(
             self.inner
                 .append(decode_field(leaf, "leaf")?)
@@ -476,7 +483,7 @@ impl WasmNotesFrontier {
     #[wasm_bindgen(js_name = appendMany)]
     pub fn append_many(
         &mut self,
-        packed_leaves: &[u8],
+        packed_leaves: &js_sys::Uint8Array,
     ) -> Result<Vec<WasmCompletedShard>, JsError> {
         Ok(self
             .inner
@@ -612,9 +619,10 @@ impl WasmShardedNotesTree {
 
     /// Restore a versioned snapshot previously returned by [`Self::snapshot`].
     #[wasm_bindgen(js_name = restore)]
-    pub fn restore(snapshot: &[u8]) -> Result<WasmShardedNotesTree, JsError> {
+    pub fn restore(snapshot: &js_sys::Uint8Array) -> Result<WasmShardedNotesTree, JsError> {
         Ok(Self {
-            inner: CoreShardedNotesTree::from_snapshot_bytes(snapshot).map_err(js_tree_error)?,
+            inner: CoreShardedNotesTree::from_snapshot_bytes(&input_bytes(snapshot, "snapshot")?)
+                .map_err(js_tree_error)?,
         })
     }
 
@@ -624,8 +632,8 @@ impl WasmShardedNotesTree {
     pub fn restore_parts(
         depth: u32,
         shard_height: u32,
-        packed_completed_roots: &[u8],
-        packed_live_leaves: &[u8],
+        packed_completed_roots: &js_sys::Uint8Array,
+        packed_live_leaves: &js_sys::Uint8Array,
     ) -> Result<WasmShardedNotesTree, JsError> {
         Ok(Self {
             inner: CoreShardedNotesTree::from_parts(
@@ -639,7 +647,7 @@ impl WasmShardedNotesTree {
     }
 
     /// Append one canonical 32-byte note commitment.
-    pub fn append(&mut self, note_id: &[u8]) -> Result<(), JsError> {
+    pub fn append(&mut self, note_id: &js_sys::Uint8Array) -> Result<(), JsError> {
         self.inner
             .append(decode_field(note_id, "note id")?)
             .map_err(js_tree_error)
@@ -647,29 +655,33 @@ impl WasmShardedNotesTree {
 
     /// Append `N` concatenated 32-byte note commitments in one wasm call.
     #[wasm_bindgen(js_name = appendMany)]
-    pub fn append_many(&mut self, packed_note_ids: &[u8]) -> Result<(), JsError> {
+    pub fn append_many(&mut self, packed_note_ids: &js_sys::Uint8Array) -> Result<(), JsError> {
         let note_ids = decode_fields(packed_note_ids, "note ids")?;
         self.inner.append_many(&note_ids).map_err(js_tree_error)
     }
 
     #[wasm_bindgen(js_name = markOwned)]
-    pub fn mark_owned(&mut self, note_id: &[u8], leaf_index: u32) -> Result<(), JsError> {
+    pub fn mark_owned(
+        &mut self,
+        note_id: &js_sys::Uint8Array,
+        leaf_index: u32,
+    ) -> Result<(), JsError> {
         self.inner
             .mark_owned(decode_field(note_id, "note id")?, leaf_index as usize)
             .map_err(js_tree_error)
     }
 
     #[wasm_bindgen(js_name = unmarkOwned)]
-    pub fn unmark_owned(&mut self, note_id: &[u8]) -> Result<bool, JsError> {
+    pub fn unmark_owned(&mut self, note_id: &js_sys::Uint8Array) -> Result<bool, JsError> {
         Ok(self.inner.unmark_owned(decode_field(note_id, "note id")?))
     }
 
     #[wasm_bindgen(js_name = adoptFrozenWitness)]
     pub fn adopt_frozen_witness(
         &mut self,
-        note_id: &[u8],
+        note_id: &js_sys::Uint8Array,
         leaf_index: u32,
-        packed_siblings: &[u8],
+        packed_siblings: &js_sys::Uint8Array,
     ) -> Result<(), JsError> {
         self.inner
             .adopt_frozen_witness(
@@ -680,7 +692,7 @@ impl WasmShardedNotesTree {
             .map_err(js_tree_error)
     }
 
-    pub fn witness(&self, note_id: &[u8]) -> Result<WasmInclusionProof, JsError> {
+    pub fn witness(&self, note_id: &js_sys::Uint8Array) -> Result<WasmInclusionProof, JsError> {
         Ok(WasmInclusionProof(
             self.inner
                 .witness(decode_field(note_id, "note id")?)
@@ -835,16 +847,26 @@ impl WasmOwnedNoteWitness {
     }
 }
 
-fn decode_field(bytes: &[u8], what: &str) -> Result<Fr, JsError> {
-    fr_from_be_32_checked(bytes).ok_or_else(|| {
+/// A byte input, which must be a `Uint8Array` (a Node `Buffer` is one). A
+/// `&[u8]` parameter would copy any array-like instead, converting each element
+/// to a byte: a string's characters, or an array's numbers wrapped modulo 256.
+fn input_bytes(input: &js_sys::Uint8Array, what: &str) -> Result<Vec<u8>, JsError> {
+    if !input.is_instance_of::<js_sys::Uint8Array>() {
+        return Err(JsError::new(&format!("{what} must be a Uint8Array")));
+    }
+    Ok(input.to_vec())
+}
+
+fn decode_field(input: &js_sys::Uint8Array, what: &str) -> Result<Fr, JsError> {
+    fr_from_be_32_checked(&input_bytes(input, what)?).ok_or_else(|| {
         JsError::new(&format!(
             "sharded tree: {what} must be one canonical 32-byte big-endian field element",
         ))
     })
 }
 
-fn decode_fields(bytes: &[u8], what: &str) -> Result<Vec<Fr>, JsError> {
-    fr_from_be_32_packed(bytes)
+fn decode_fields(input: &js_sys::Uint8Array, what: &str) -> Result<Vec<Fr>, JsError> {
+    fr_from_be_32_packed(&input_bytes(input, what)?)
         .map_err(|error| JsError::new(&format!("sharded tree: {what}: {error}")))
 }
 

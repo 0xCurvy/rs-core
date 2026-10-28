@@ -952,12 +952,35 @@ fn native_error(context: &str, error: impl std::fmt::Display) -> Error {
 /// A JSON array of canonical decimal field elements. A value that is not one
 /// is the caller's mistake, like a malformed array.
 fn parse_fields_json(json: &str, label: &str) -> Result<Vec<Fr>> {
-    let values: Vec<String> = serde_json::from_str(json).map_err(|_| {
+    fields_from_decimals(&decimal_strings_json(json, label)?, label)
+}
+
+/// `parse_fields_json` for at most `max` values. A longer array is refused with
+/// `too_many(count)` before any value is parsed: a byte budget alone admits far
+/// more short values than `max`.
+fn parse_fields_json_at_most(
+    json: &str,
+    label: &str,
+    max: usize,
+    too_many: impl FnOnce(usize) -> Error,
+) -> Result<Vec<Fr>> {
+    let values = decimal_strings_json(json, label)?;
+    if values.len() > max {
+        return Err(too_many(values.len()));
+    }
+    fields_from_decimals(&values, label)
+}
+
+fn decimal_strings_json(json: &str, label: &str) -> Result<Vec<String>> {
+    serde_json::from_str(json).map_err(|_| {
         Error::new(
             Status::InvalidArg,
             format!("expected {label} as a JSON array of decimal strings"),
         )
-    })?;
+    })
+}
+
+fn fields_from_decimals(values: &[String], label: &str) -> Result<Vec<Fr>> {
     values
         .iter()
         .enumerate()
@@ -975,7 +998,7 @@ fn parse_fields_json(json: &str, label: &str) -> Result<Vec<Fr>> {
 }
 
 /// Pending note ids as JSON, refused before parsing once they exceed the byte
-/// budget of a full batch.
+/// budget of a full batch, or the batch size.
 fn parse_pending_note_ids_json(json: &str, batch_size: usize) -> Result<Vec<Fr>> {
     let budget = batch_size * DECIMAL_JSON_BYTES_PER_FIELD + 2;
     if json.len() > budget {
@@ -984,7 +1007,12 @@ fn parse_pending_note_ids_json(json: &str, batch_size: usize) -> Result<Vec<Fr>>
             format!("pending note ids JSON exceeds the batch byte budget of {budget} bytes"),
         ));
     }
-    parse_fields_json(json, "pending note ids")
+    parse_fields_json_at_most(json, "pending note ids", batch_size, |count| {
+        Error::new(
+            Status::InvalidArg,
+            format!("pending note id count {count} exceeds batch size {batch_size}"),
+        )
+    })
 }
 
 fn parse_fields_packed(bytes: &[u8], label: &str) -> Result<Vec<Fr>> {

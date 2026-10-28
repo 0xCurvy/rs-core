@@ -458,6 +458,12 @@ pub struct PendingCommitmentWitness {
 ///
 /// This is the input of the SHA-256 pending-notes circuit. The calldata-bound
 /// circuit that replaces it takes [`build_bound_pending_commitment`]'s input.
+///
+/// # Panics
+///
+/// Before allocating or inserting anything, if `batch_size` exceeds
+/// [`MAX_PENDING_BATCH_SIZE`], if the ids exceed `batch_size`, if `tree_depth` is
+/// not the tree's depth, or if the non-zero ids do not fit in the tree.
 pub fn build_pending_commitment(
     tree: &Imt,
     tree_depth: usize,
@@ -465,8 +471,25 @@ pub fn build_pending_commitment(
     pending_note_ids: &[Fr],
 ) -> PendingCommitmentWitness {
     assert!(
+        batch_size <= MAX_PENDING_BATCH_SIZE,
+        "batch size exceeds {MAX_PENDING_BATCH_SIZE}"
+    );
+    assert!(
         pending_note_ids.len() <= batch_size,
         "pending ids exceed batch size"
+    );
+    assert_eq!(
+        tree_depth,
+        tree.depth(),
+        "tree_depth is not the tree's depth"
+    );
+    let inserted = pending_note_ids
+        .iter()
+        .filter(|id| **id != Fr::ZERO)
+        .count();
+    assert!(
+        inserted <= tree.capacity().expect("imt: capacity overflow") - tree.leaf_count(),
+        "imt: tree is full"
     );
     let current_notes_root = tree.root();
     let current_note_index = tree.leaf_count() as u64;
@@ -506,6 +529,37 @@ pub fn build_pending_commitment(
             .map(|row| row.iter().map(fr_to_dec).collect())
             .collect(),
         new_notes_root: fr_to_dec(&new_notes_root),
+    }
+}
+
+#[cfg(test)]
+mod pending_commitment_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "batch size exceeds 4096")]
+    fn refuses_a_batch_size_past_the_ceiling() {
+        build_pending_commitment(&Imt::new(2), 2, usize::MAX, &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tree_depth is not the tree's depth")]
+    fn refuses_a_depth_other_than_the_trees() {
+        build_pending_commitment(&Imt::new(2), 3, 1, &[Fr::from(5_u64)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "imt: tree is full")]
+    fn refuses_ids_that_do_not_fit() {
+        let tree = Imt::from_leaves(1, &[Fr::from(5_u64)]);
+        build_pending_commitment(&tree, 1, 2, &[Fr::from(6_u64), Fr::from(7_u64)]);
+    }
+
+    #[test]
+    fn zero_slots_do_not_count_against_capacity() {
+        let tree = Imt::from_leaves(1, &[Fr::from(5_u64)]);
+        let witness = build_pending_commitment(&tree, 1, 2, &[Fr::from(6_u64), Fr::ZERO]);
+        assert_eq!(witness.pending_note_ids, ["6", "0"]);
     }
 }
 

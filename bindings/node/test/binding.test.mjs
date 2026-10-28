@@ -306,6 +306,10 @@ test("bindCalldata takes 8,192 words, and names its byte budget when JSON exceed
   assert.throws(() => binding.bindCalldata(JSON.stringify(words, null, 2)), invalidArg(/byte budget/));
   assert.throws(() => binding.bindCalldata(JSON.stringify([...words, "1"])), invalidArg(/at most 8192 words/));
   assert.throws(() => binding.bindCalldataPacked(packFields([...words, "1"].map(BigInt))), invalidArg(/at most 8192 words/));
+  // Short words fit far more than 8,192 in the byte budget; the count is refused
+  // before any word is parsed, so a bad first word is never reported.
+  const short = ["x", ...Array.from({ length: 100_000 }, () => "1")];
+  assert.throws(() => binding.bindCalldata(JSON.stringify(short)), invalidArg(/at most 8192 words; got 100001/));
 });
 
 test("builds the bound pending-notes commitment the circuit proved, from either tree form", () => {
@@ -394,6 +398,8 @@ test("bound batches that fail leave the tree unchanged", () => {
     for (const [build, error] of [
       [() => notes.buildBoundPendingCommitment(4, "[]"), invalidArg(/must not be empty/)],
       [() => notes.buildBoundPendingCommitment(2, JSON.stringify(["6", "7", "8"])), invalidArg(/exceeds batch size/)],
+      // The count is refused before any id is parsed.
+      [() => notes.buildBoundPendingCommitment(2, JSON.stringify(["x", "7", "8"])), invalidArg(/count 3 exceeds batch size 2/)],
       [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", "0"])), invalidArg(/zero is padding/)],
       [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", "6"])), invalidArg(/repeats within the batch/)],
       [() => notes.buildBoundPendingCommitment(4, JSON.stringify(["6", modulus])), invalidArg(/modulus/)],
