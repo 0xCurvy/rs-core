@@ -9,7 +9,7 @@ generate Groth16 proofs.
 
 ```toml
 [dependencies]
-curvy-core = "=0.1.3"
+curvy-core = "=0.1.4"
 ```
 
 Rust 1.97 or newer is required.
@@ -51,7 +51,7 @@ Merkle-tree construction:
 
 ```toml
 [dependencies]
-curvy-core = { version = "=0.1.3", features = ["parallel"] }
+curvy-core = { version = "=0.1.4", features = ["parallel"] }
 ```
 
 Native applications can set the global Rayon pool size with

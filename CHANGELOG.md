@@ -5,7 +5,43 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Every crate, binding and package shares one workspace version. The 0.1.0 release
 candidates could break APIs from one candidate to the next.
 
+## [0.1.4] - 2026-10-28
+
+Changes since `v0.1.3` (`305fa0a`, 19 October 2026). 0.1.3 was tagged but not published, so 0.1.4
+follows 0.1.2 on crates.io and npm and includes the 0.1.3 changes. Every crate and both npm packages
+are released at 0.1.4.
+
+### Security
+
+- `crypto-bigint` 0.7.10 (was 0.7.5); at least 0.7.9 is required. Versions 0.7.0 to 0.7.8 are yanked.
+  0.7.6 removed secret-dependent branches from Montgomery multiplication and `borrowing_sub`, which the
+  BabyJubjub signing arithmetic runs on secret keys and nonces. The WASM and Node packages and the C
+  library are built with 0.7.10.
+
+### Added
+
+- Rust: `Imt::depth`.
+
+### Changed
+
+- WASM: `bindCalldata` takes only an array of strings, and `buildBoundPendingCommitment` on
+  `MerkleTree` and `NotesFrontier` takes `batchSize` only as a number. Every field, packed-field and
+  snapshot input of `MerkleTree`, `OrderedMerkleTree`, `NotesFrontier`, `ShardedNotesTree` and
+  `verifyMerkleProof` takes only a `Uint8Array` (a Node `Buffer` is one). A string, another
+  array-like, another typed array or a value of another type is refused instead of converted.
+- Node: `bindCalldata` refuses more than 8,192 words, and `buildBoundPendingCommitment` and
+  `buildPendingCommitment` more ids than the batch size, before parsing any of them.
+- Rust: `build_pending_commitment` panics before it allocates or inserts anything when the batch size
+  exceeds `MAX_PENDING_BATCH_SIZE`, `tree_depth` is not the tree's depth, or the ids do not fit in the
+  tree.
+- The WASM package is optimized with `wasm-opt` from binaryen 133, the release CI's browser proofs use.
+- `scripts/publish.sh crates` builds every crate from its packaged sources before it publishes any, as
+  CI does. CI runs for changes to the four crate READMEs, which are their docs, and runs the 160,000-case
+  Poseidon comparison on every commit.
+
 ## [0.1.3] - 2026-10-19
+
+Tagged, not published; its changes are part of 0.1.4.
 
 Changes since `v0.1.2` (`256f9bf`, 16 October 2026).
 
@@ -214,6 +250,7 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.4]: https://github.com/0xCurvy/rs-core/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/0xCurvy/rs-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/0xCurvy/rs-core/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/0xCurvy/rs-core/compare/v0.1.0-rc.7...v0.1.1

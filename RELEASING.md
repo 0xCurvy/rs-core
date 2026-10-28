@@ -17,13 +17,13 @@ publishes nothing.
 1. Set the version everywhere:
 
    ```bash
-   scripts/publish.sh version 0.1.3
+   scripts/publish.sh version 0.1.4
    ```
 
    It updates `Cargo.toml`, the exact internal pins, `bindings/node` (package,
    lockfile and test), the version snippets in the docs and both lockfiles, then
    lists anything that still names the old version.
-2. Add the dated `## [0.1.3] - YYYY-MM-DD` entry to `CHANGELOG.md` and its compare
+2. Add the dated `## [0.1.4] - YYYY-MM-DD` entry to `CHANGELOG.md` and its compare
    link at the bottom.
 3. Run the checks (`scripts/check.sh all`, plus the ones your change touches) and
    inspect `cargo package --list -p <crate>` for each crate.
@@ -37,8 +37,8 @@ publishes nothing.
 On the merged commit:
 
 ```bash
-git tag -a v0.1.3 -m "rs-core 0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.4 -m "rs-core 0.1.4"
+git push origin v0.1.4
 ```
 
 `scripts/publish.sh` waits for this tag on `origin` and refuses to publish from any
