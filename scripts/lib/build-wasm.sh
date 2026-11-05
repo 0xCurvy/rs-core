@@ -36,6 +36,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+# The modules name dependency and standard-library sources by these prefixes
+# instead of this machine's paths, which include its home directory. Pass a
+# `+toolchain` for a toolchain other than rust-toolchain.toml's.
+remap_flags() {
+  local sysroot commit
+  sysroot="$(rustc "$@" --print sysroot)"
+  commit="$(rustc "$@" -vV | sed -n 's/^commit-hash: //p')"
+  printf -- '--remap-path-prefix=%s=/cargo-home --remap-path-prefix=%s/lib/rustlib/src/rust=/rustc/%s' \
+    "${CARGO_HOME:-$HOME/.cargo}" "$sysroot" "$commit"
+}
+
 # Only this binaryen release post-optimizes the modules, so the published package
 # and CI's browser proofs run the same bytes. CI installs the same release.
 binaryen_version=133
@@ -134,7 +145,7 @@ for mode in "$@"; do
 done
 wasm_release_lto="${CURVY_WASM_LTO:-fat}"
 wasm_release_codegen_units="${CURVY_WASM_CODEGEN_UNITS:-1}"
-portable_rust_flags='-C target-feature=+simd128,+bulk-memory'
+portable_rust_flags="-C target-feature=+simd128,+bulk-memory $(remap_flags)"
 
 case "$binding_target" in
   nodejs) portable_output_suffix="node" ;;
@@ -201,6 +212,7 @@ case "$thread_mode" in
     rust_flags+=' -C link-arg=--export=__heap_base -C link-arg=--export=__data_end'
     rust_flags+=' -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size'
     rust_flags+=' -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base'
+    rust_flags+=" $(remap_flags +"$thread_toolchain")"
     CARGO_PROFILE_RELEASE_LTO="$wasm_release_lto" \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$wasm_release_codegen_units" \
     RUSTFLAGS="$rust_flags" cargo +"$thread_toolchain" build --locked --release \

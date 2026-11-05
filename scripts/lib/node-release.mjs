@@ -8,7 +8,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -78,7 +78,7 @@ try {
     "npm",
     ["run", "build", "--", "--target", "aarch64-apple-darwin", "--", "--locked"],
     packageDir,
-    { MACOSX_DEPLOYMENT_TARGET: "11.0" },
+    { MACOSX_DEPLOYMENT_TARGET: "11.0", RUSTFLAGS: releaseRustflags() },
   );
   run("npm", ["test"], packageDir);
   verifyBinary(targets[0], join(packageDir, targets[0].filename));
@@ -214,6 +214,21 @@ try {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
+// The binary names dependency and standard-library sources by these prefixes instead of this
+// machine's paths, which include its home directory. They replace RUSTFLAGS from the environment
+// rather than add to it, so local flags never reach a published binary. Dockerfile.release sets
+// the same prefixes for the other three.
+function releaseRustflags() {
+  const sysroot = capture("rustc", ["--print", "sysroot"], root).trim();
+  const commit = capture("rustc", ["-vV"], root).match(/^commit-hash: (\S+)$/m)?.[1];
+  if (!commit) throw new Error("rustc -vV printed no commit-hash");
+  const cargoHome = process.env.CARGO_HOME || join(homedir(), ".cargo");
+  return [
+    `--remap-path-prefix=${cargoHome}=/cargo-home`,
+    `--remap-path-prefix=${sysroot}/lib/rustlib/src/rust=/rustc/${commit}`,
+  ].join(" ");
+}
+
 function warnUntested(target) {
   console.warn(
     `\nWARNING: ${target.filename} was cross-compiled in a Linux container and has NOT been ` +
@@ -268,7 +283,13 @@ function verifyBinary(target, path) {
   if (!target.format.test(description)) {
     throw new Error(`${target.filename} has unexpected format: ${description}`);
   }
-  const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
+  const bytes = readFileSync(path);
+  for (const buildPath of [homedir(), root]) {
+    if (bytes.includes(buildPath)) {
+      throw new Error(`${target.filename} contains the build path ${buildPath}`);
+    }
+  }
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
   console.log(`  ${target.filename}`);
   console.log(`    ${description}`);
   console.log(`    sha256=${sha256}`);

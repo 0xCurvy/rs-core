@@ -16,6 +16,7 @@
 
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -66,6 +67,13 @@ function assertBuilt({ subpath, source, module, threaded }) {
   }
   for (const required of [`${module}.js`, `${module}.d.ts`, `${module}_bg.wasm`]) {
     if (!present.includes(required)) throw new Error(`${source}/${required} is missing`);
+  }
+  // scripts/lib/build-wasm.sh remaps the build machine's paths out of the module.
+  const wasm = readFileSync(join(sourceDir, `${module}_bg.wasm`));
+  for (const buildPath of [homedir(), repoRoot]) {
+    if (wasm.includes(buildPath)) {
+      throw new Error(`${source}/${module}_bg.wasm contains the build path ${buildPath}`);
+    }
   }
   if (!threaded) return sourceDir;
 

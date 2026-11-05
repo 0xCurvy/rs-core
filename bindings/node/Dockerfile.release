@@ -8,6 +8,8 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 # The image keeps Cargo in /usr/local/cargo and only that bin directory is on
 # PATH; `cargo install` below writes to the new CARGO_HOME, so add its bin too.
+# The build names sources under CARGO_HOME and the Rust sysroot by the prefixes
+# scripts/lib/node-release.mjs gives the macOS binary.
 ENV CARGO_HOME=/root/.cargo
 ENV PATH="/root/.cargo/bin:${PATH}"
 
@@ -65,6 +67,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
         ;; \
     esac; \
     rustup target add "${rust_target}"; \
+    sysroot="$(rustc --print sysroot)"; \
+    commit="$(rustc -vV | sed -n 's/^commit-hash: //p')"; \
+    export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME}=/cargo-home --remap-path-prefix=${sysroot}/lib/rustlib/src/rust=/rustc/${commit}"; \
     cd bindings/node; \
     npm run build -- --target "${rust_target}" ${cross_flag} -- --locked; \
     if [ "${NODE_RELEASE_TARGET}" != windows-x64 ]; then npm test; fi; \
