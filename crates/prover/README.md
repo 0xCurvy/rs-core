@@ -17,7 +17,7 @@ prover WASM module.
 
 ```toml
 [dependencies]
-curvy-prover = "=0.1.4"
+curvy-prover = "=0.1.5"
 ```
 
 ## Prove from circuit input JSON

@@ -5,6 +5,81 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Every crate, binding and package shares one workspace version. The 0.1.0 release
 candidates could break APIs from one candidate to the next.
 
+## [0.1.5] - 2026-11-05
+
+Changes since `v0.1.4` (`58d6abd`, 28 October 2026). Every crate and both npm packages are released at
+0.1.5.
+
+### Security
+
+- A pinned witness graph can no longer make a client evaluate for tens of seconds. `Limits` has an
+  `evaluation_cost` budget, charged per node while the graph is decoded, before anything is evaluated:
+  1 unit (about 16 ns) for an input, a constant or a field operation, 3 for a comparison, 24 for a
+  shift or bitwise operation, 48 for an integer division, 256 for an inverse or field division and 768
+  for an exponentiation. Over budget is `WitnessError::EvaluationCostLimit`. `Limits::client()` allows
+  32 million units and `Limits::batch_prover()` 128 million; the costliest shipped graph, pending(10,30),
+  needs 6.5 million. Before, a client-sized graph of two million exponentiations evaluated for about
+  23 s. Both evaluators, both SIGNET body versions and compiled SAGE programs are charged.
+
+### Added
+
+- Rust: compact zkeys (`.czkey`), behind the opt-in `curvy-prover` feature `compact-zkey`. A compact
+  zkey stores each curve point as `x` and a sign bit, and the coefficient section as columns, in one zstd
+  frame behind a 48-byte header: `CVYZKC01`, then the SHA-256 and length of the zkey it decodes to. It
+  decodes to that zkey byte for byte; `verifyPixAggregationBound_2_9_30` is 9,621,660 bytes instead of
+  39,980,468. `Prover::from_compact_zkey_bytes`, `Prover::from_compact_zkey_reader` and
+  `ResidentProver::from_compact_artifacts` check the compact file's pin before decoding it, and the
+  decoded zkey against the digest in the header before parsing it. Loading computes a square root per
+  point: that key loads in 990 ms instead of 30 ms, or 144 ms with `parallel` on 14 threads. Proving is
+  unchanged. The `compact_zkey` module also has `encode`, `inflate`, `describe` and `is_compact`, and the
+  `compact_zkey` example encodes, decodes, inspects and benchmarks compact zkeys.
+- WASM: `WasmResidentProver` takes a compact zkey as well as a raw one, under the pin of the file it is
+  given, and `@0xcurvy/rs-core-wasm` is built with it. Single-threaded, the 2_9_30 key loads in 2.9 s
+  from its compact form and 0.1 s from the raw one. The Node.js and C bindings take raw zkeys only.
+- WASM: `@0xcurvy/rs-core-wasm` is built with `signet-v2`, so both prover entries load SIGNET version-2
+  witness graphs as well as version-1 ones, raw or zstd-compressed, under the pin of the bytes passed.
+  Version 1 loads exactly as before. The decoder adds about 2 KB to each prover module, and SAGE and
+  SPARROW stay out of the package.
+- SIGNET: `signet transcode` rewrites an artifact in the other body version from the artifact alone. The
+  header, and with it the R1CS digest, is kept byte for byte apart from the version field. The result must
+  transcode back to the source and load with the source's signal count before it is written; `--input`
+  and `--reference` add evaluation parity. Version 2 at zstd -9 is 48-66% smaller than the shipped bound
+  v1 graphs.
+- `scripts/build.sh npm-web` and `npm-web-threads` build the modules the npm package ships, with
+  `--signet-v2 --compact-zkey`; `scripts/build.sh npm`, CI and the release workflow all build through
+  them. `scripts/check.sh browser` takes `--signet-v2` and `--compact-zkey` like `scripts/check.sh wasm`.
+- `scripts/build.sh` WASM targets and `scripts/check.sh wasm` take `--compact-zkey`, and
+  `tools/artifacts/validate_release.py --compact-zkey` requires a shipped compact zkey to decode to the
+  validated zkey.
+
+### Fixed
+
+- The `@0xcurvy/rs-core-wasm` modules and the `@0xcurvy/rs-core-node` binaries no longer contain
+  absolute paths of the machine that built them. They name dependency sources `/cargo-home/...` and Rust
+  standard-library sources `/rustc/<commit>/...`.
+- The install name of the macOS `@0xcurvy/rs-core-node` binary is `@rpath/curvy_rs_core_node.node`
+  instead of the path it was linked at.
+
+### Changed
+
+- `curvy-witness` refuses an input-mapping table in which two ranges partially overlap
+  (`WitnessError::InputMappingOverlap`). Ranges may still nest, as a bus or struct input's fields do in
+  18 of the 21 shipped graphs. Every shipped graph loads.
+- SIGNET tooling: `export` refuses a constant at or above the BN254 modulus
+  (`SignetError::NonCanonicalConstant`); `transcode` without `--input` compares the source and the
+  result on an all-zero input (`parity=zero-input`, was `unchecked`); `--compressor zstd` refuses the
+  ruzstd fallback before writing; `export`, `reseal`, `transcode` and `inspect` print `client_limits=`;
+  and a failed write removes its partial output.
+- CI tests the C library with its `signet-v2` feature.
+- `scripts/build.sh node-release` and `scripts/build.sh npm` stop if a binary contains the build
+  machine's home directory or the checkout's path.
+- SIGNET version 2 has more coverage: generated graphs over all 23 operations must evaluate as in version
+  1 and as an independent oracle computes, in both evaluators; CI fuzzes the two versions against each
+  other (`signet_parity`) and the transcoder against the decoder (`signet_transcode`); and
+  `WasmResidentProver` proves from a version-2 graph in Node (`scripts/check.sh wasm --signet-v2`), in
+  Chromium and Firefox single-threaded and on Rayon workers (`scripts/check.sh browser`), and from the
+  packed npm tarball (`scripts/check.sh npm`), which also proves from a compact zkey.
+
 ## [0.1.4] - 2026-10-28
 
 Changes since `v0.1.3` (`305fa0a`, 19 October 2026). 0.1.3 was tagged but not published, so 0.1.4
@@ -250,6 +325,7 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.5]: https://github.com/0xCurvy/rs-core/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/0xCurvy/rs-core/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/0xCurvy/rs-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/0xCurvy/rs-core/compare/v0.1.1...v0.1.2

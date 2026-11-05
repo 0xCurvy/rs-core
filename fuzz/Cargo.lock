@@ -737,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",

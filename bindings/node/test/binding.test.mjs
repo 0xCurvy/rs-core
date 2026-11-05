@@ -39,7 +39,7 @@ test("proves an authenticated generic circuit with one worker", async () => {
     threads: 1,
   });
 
-  assert.equal(binding.rsCoreVersion(), "0.1.4");
+  assert.equal(binding.rsCoreVersion(), "0.1.5");
   assert.equal(prover.mode, "resident");
   assert.equal(prover.profile, "HAWK");
   assert.equal(prover.threads, 1);
