@@ -56,6 +56,8 @@ jobs:
           tool: cbindgen@0.29.4
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: cargo test --locked -p curvy-ffi
+      # The C library's optional SIGNET v2 decoder, which the default build refuses.
+      - run: cargo test --locked -p curvy-ffi --features signet-v2
       - run: scripts/build.sh wasm-nodejs
       - run: scripts/check.sh ffi
 

@@ -40,8 +40,8 @@ fn limits() -> Limits {
     limits
 }
 
-/// A scalar: small, at the field's top, or any 32 bytes, which the encoder writes
-/// as given - so a non-canonical constant reaches both decoders too.
+/// A scalar: small, at the field's top, or any 32 bytes - so the encoder also
+/// meets constants at or above the modulus, which it must refuse alike.
 fn scalar(u: &mut Unstructured) -> Result<U256> {
     Ok(match u.int_in_range(0..=3)? {
         0 => U256::from(u.int_in_range(0..=300_u64)?),
@@ -127,8 +127,26 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Envelope::Signet
     };
-    let v1 = encode(&graph, [0x5E; 32], envelope, FormatVersion::V1).expect("encode v1");
-    let v2 = encode(&graph, [0x5E; 32], envelope, FormatVersion::V2).expect("encode v2");
+    // A constant at or above the modulus is refused by the encoder, in either version.
+    let (v1, v2) = match (
+        encode(&graph, [0x5E; 32], envelope, FormatVersion::V1),
+        encode(&graph, [0x5E; 32], envelope, FormatVersion::V2),
+    ) {
+        (Ok(v1), Ok(v2)) => (v1, v2),
+        (Err(v1), Err(v2)) => {
+            assert_eq!(
+                v1.to_string(),
+                v2.to_string(),
+                "the encoder refused differently"
+            );
+            return;
+        }
+        (v1, v2) => panic!(
+            "the encoder refused one version only: {:?} / {:?}",
+            v1.err(),
+            v2.err()
+        ),
+    };
 
     assert_eq!(transcode(&v1, FormatVersion::V2).expect("transcode v1"), v2);
     assert_eq!(transcode(&v2, FormatVersion::V1).expect("transcode v2"), v1);

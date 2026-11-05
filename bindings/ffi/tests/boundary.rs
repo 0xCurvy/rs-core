@@ -1210,3 +1210,33 @@ fn calldata_binding_is_returned_in_public_signal_order() {
         ]
     );
 }
+
+/// A SIGNET version-2 graph loads through the C ABI exactly when the decoder it
+/// links accepts version 2: always with this library's `signet-v2` feature, and
+/// never in a build of this library alone without it (`cargo test -p curvy-ffi`).
+/// In a workspace build another crate - the Node.js binding - turns the decoder's
+/// feature on for everyone, so the test asks the decoder rather than assuming.
+#[test]
+fn version_2_graphs_load_only_with_the_signet_v2_feature() {
+    const V2: &[u8] = include_bytes!("../../../fuzz/corpus/graph/multiplier.v2");
+    let sha = sha256_hex(V2);
+    let decoder_accepts =
+        curvy_witness::WitnessGraph::from_bytes(V2, sha.to_str().unwrap()).is_ok();
+    if cfg!(feature = "signet-v2") {
+        assert!(
+            decoder_accepts,
+            "the signet-v2 feature did not reach the decoder"
+        );
+    }
+    let mut handle = 0_u64;
+    let status =
+        unsafe { curvy_witness_graph_new(V2.as_ptr(), V2.len(), sha.as_ptr(), false, &mut handle) };
+    if decoder_accepts {
+        assert_eq!(status, CurvyStatus::Ok, "{}", last_error());
+        assert_eq!(curvy_witness_graph_free(handle), CurvyStatus::Ok);
+    } else {
+        assert_eq!(status, CurvyStatus::Error);
+        let error = last_error();
+        assert!(error.contains("format version 2"), "{error}");
+    }
+}

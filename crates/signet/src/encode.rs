@@ -3,6 +3,7 @@
 //! The tag values come from [`curvy_witness::wire`], so producer and consumer read
 //! one table.
 
+use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use curvy_witness::wire;
 
@@ -46,7 +47,7 @@ pub fn encode(
     );
 
     for (index, node) in graph.nodes.iter().enumerate() {
-        push_record(&mut bytes, version, index, record(node)?)?;
+        push_record(&mut bytes, version, index, record(node, index)?)?;
     }
 
     let mut signals = SignalWriter::new(version);
@@ -86,9 +87,14 @@ pub(crate) enum Record {
     Inverse(usize),
 }
 
-fn record(node: &Node) -> Result<Record, SignetError> {
+fn record(node: &Node, index: usize) -> Result<Record, SignetError> {
     Ok(match node {
-        Node::Input(index) => Record::Input(checked_u32(*index, "input index")?),
+        Node::Input(input) => Record::Input(checked_u32(*input, "input index")?),
+        // The evaluator refuses a constant at or above the modulus; refusing it here
+        // says which node at export time instead of at the load that follows.
+        Node::Constant(value) if *value >= ruint::aliases::U256::from_limbs(Fr::MODULUS.0) => {
+            return Err(SignetError::NonCanonicalConstant { index });
+        }
         Node::Constant(value) => Record::Constant(constant_bytes(*value)),
         Node::MontConstant(value) => Record::Constant(montgomery_bytes(*value)),
         Node::Op(operation, left, right) => Record::Operation {

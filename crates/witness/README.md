@@ -45,8 +45,27 @@ raw or zstd-compressed.
 | `signet-v2` | version-2 body encoding with varint distances and ZigZag output deltas |
 | `sage` | `sage::SageGraph`, a second evaluator over the same artifacts (experimental) |
 
-A deployment that enables `signet-v2` should run the SIGNET v1/v2 parity matrix
-over every graph it accepts.
+A default build refuses a version-2 artifact with
+`WitnessError::UnsupportedVersion(2)` ("unsupported witness graph format version
+2"); enabling `signet-v2` changes nothing for version 1. Ship the consumer
+feature before the version-2 artifacts. A deployment that enables `signet-v2`
+should run the SIGNET v1/v2 parity matrix over every graph it accepts.
+
+## Limits
+
+`Limits::client()` bounds what a pinned artifact can make a client do: its bytes,
+compressed and not, its zstd window, its node, signal and input counts, and its
+evaluation cost, summed over its nodes while they are decoded so that an
+expensive graph fails before anything is evaluated. One unit is roughly a field
+addition (about 16 ns natively); a comparison costs 3, a shift or bitwise
+operation 24, an integer division 48, an inverse or field division 256 and an
+exponentiation 768. The client budget is 32 million units, about five times what
+the costliest shipped graph, pending(10,30), needs. `Limits::batch_prover()`
+widens the node, byte and cost limits for the batch-50 pending commitment, and
+only hosts that prove it should use them.
+
+Input ranges may nest, as a bus or struct input's fields sit inside the whole,
+but a mapping table in which two ranges partially overlap is refused.
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for artifact
 and build-target guidance.

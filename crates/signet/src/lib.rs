@@ -241,6 +241,8 @@ pub enum SignetError {
     TooLarge { what: &'static str },
     #[error("node {index}: {what} does not point at a prior node")]
     NotAPriorNode { what: &'static str, index: usize },
+    #[error("node {index}: constant is not below the BN254 scalar modulus")]
+    NonCanonicalConstant { index: usize },
     #[error(
         "unsupported black-box node {name:?} with {arity} arguments; only \
          `bbf_inv` (inverse or zero) is understood"

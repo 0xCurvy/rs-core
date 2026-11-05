@@ -12,24 +12,25 @@ use sha2::{Digest, Sha256};
 const USAGE: &str = "\
 signet - build and check SIGNET witness-graph artifacts
 
-  signet export <graph.bin> <out.bin> <r1cs-sha256>\n      [--ops patched|original] [--envelope cvywit|signet] [--version 1|2]\n      [--compress none|zstd] [--level N]
+  signet export <graph.bin> <out.bin> <r1cs-sha256>\n      [--ops patched|original] [--envelope cvywit|signet] [--version 1|2]\n      [--compress none|zstd] [--level N] [--compressor zstd|any]
       Encode an upstream postcard graph. Prints the artifact size and its SHA-256,
       which is the value to pin in protocol metadata.
 
-  signet reseal <artifact> <sha256> <out.bin>\n      [--envelope cvywit|signet] [--compress none|zstd] [--level N]
+  signet reseal <artifact> <sha256> <out.bin>\n      [--envelope cvywit|signet] [--compress none|zstd] [--level N]\n      [--compressor zstd|any]
       Rewrite an existing artifact's envelope and compression without rebuilding it
       from source. The body is copied untouched, so this cannot change what the
       graph computes - only how it is wrapped. Use it when a profile's postcard
       `graph.bin` was not kept.
 
-  signet transcode <artifact> <sha256> <out.bin>\n      [--version 2|1] [--envelope cvywit|signet] [--compress none|zstd] [--level N]\n      [--input input.json [--reference reference.wtns]]
+  signet transcode <artifact> <sha256> <out.bin>\n      [--version 2|1] [--envelope cvywit|signet] [--compress none|zstd] [--level N]\n      [--compressor zstd|any] [--input input.json [--reference reference.wtns]]
       Re-encode an existing artifact's body in the other body version (version 2
       by default) without its postcard source. The header, source R1CS digest
       included, is kept byte for byte apart from the version field, and so is the
       envelope unless --envelope says otherwise. The result must decode back to
       the source body byte for byte and load through the evaluator before it is
-      written. With --input, the source and the result are both evaluated and must
-      agree on every signal; --reference also compares them with circom's witness.
+      written. The source and the result are both evaluated, on --input or else on
+      an all-zero input, and must agree on every signal; --reference also compares
+      them with circom's witness.
 
   signet validate <artifact> <sha256> <input.json> <reference.wtns>
       Evaluate the artifact and compare every signal against a reference witness.
@@ -43,9 +44,12 @@ curvy-witness accepts. `--envelope cvywit` still works for older consumers. Only
 
 Compression shells out to the system `zstd` (default level 9, which keeps the
 frame window at half the consumer's cap) and falls back to the weaker built-in
-encoder if that binary is missing. A compressed artifact pins its *compressed*
-digest; `export` prints both and labels which one. Every artifact is loaded back
-through the evaluator before it is written.
+encoder if that binary is missing or fails; `--compressor zstd` refuses the
+fallback before anything is written, as publication should. A compressed
+artifact pins its *compressed* digest; `export` prints both and labels which
+one. Every artifact is loaded back through the evaluator before it is written,
+under the batch-prover limits; `client_limits=` says whether a client built with
+the default limits loads it too.
 
 `--ops` says which upstream built the postcard. `patched` is the default;
 `original` is for graphs built before the bitwise patch. Choosing wrong is SILENT
@@ -92,6 +96,7 @@ fn export(arguments: &[String]) -> Result<(), String> {
     let mut schema = OperationSchema::default();
     let mut compression = Compression::default();
     let mut level = DEFAULT_COMPRESSION_LEVEL;
+    let mut require_zstd = false;
     let mut flags = arguments[positional.len()..].iter();
     while let Some(flag) = flags.next() {
         let value = flags
@@ -103,6 +108,7 @@ fn export(arguments: &[String]) -> Result<(), String> {
             "--level" => level = compression_level(value)?,
             "--envelope" => envelope = Envelope::parse(value).map_err(|e| e.to_string())?,
             "--version" => version = FormatVersion::parse(value).map_err(|e| e.to_string())?,
+            "--compressor" => require_zstd = compressor_requirement(value)?,
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
@@ -111,7 +117,7 @@ fn export(arguments: &[String]) -> Result<(), String> {
     let graph = Graph::from_postcard(&source, schema).map_err(|e| e.to_string())?;
     let r1cs = decode_sha256(positional[2]).map_err(|e| e.to_string())?;
     let bytes = encode(&graph, r1cs, envelope, version).map_err(|e| e.to_string())?;
-    let (artifact, compressor) = wrap(&bytes, compression, level);
+    let (artifact, compressor) = wrap(&bytes, compression, level, require_zstd)?;
 
     // Load what we are about to write, through the evaluator a client uses. This is
     // what catches a frame whose window exceeds the consumer's cap, and any header
@@ -131,12 +137,14 @@ fn export(arguments: &[String]) -> Result<(), String> {
         ));
     }
 
+    let client = client_limits(&artifact, &artifact_sha);
     write_new(positional[1], &artifact)?;
 
     println!("nodes={}", graph.nodes.len());
     println!("signals={}", graph.signals.len());
     print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
     println!("round_trip=ok");
+    print_client_limits(&client);
     eprintln!("note: confirm this artifact with `signet validate` before pinning it");
     Ok(())
 }
@@ -159,6 +167,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
     let mut envelope = Envelope::default();
     let mut compression = Compression::default();
     let mut level = DEFAULT_COMPRESSION_LEVEL;
+    let mut require_zstd = false;
     let mut flags = arguments[positional.len()..].iter();
     while let Some(flag) = flags.next() {
         let value = flags
@@ -168,6 +177,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
             "--envelope" => envelope = Envelope::parse(value).map_err(|e| e.to_string())?,
             "--compress" => compression = Compression::parse(value).map_err(|e| e.to_string())?,
             "--level" => level = compression_level(value)?,
+            "--compressor" => require_zstd = compressor_requirement(value)?,
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
@@ -186,7 +196,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
         return Err("reseal changed bytes outside the eight-byte envelope".to_owned());
     }
 
-    let (artifact, compressor) = wrap(&bytes, compression, level);
+    let (artifact, compressor) = wrap(&bytes, compression, level, require_zstd)?;
 
     let artifact_sha = hex(&Sha256::digest(&artifact));
     let resealed = WitnessGraph::from_bytes_with_limits(
@@ -206,6 +216,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
         return Err("reseal changed the source R1CS digest".to_owned());
     }
 
+    let client = client_limits(&artifact, &artifact_sha);
     write_new(positional[2], &artifact)?;
 
     println!("signals={}", resealed.assignment_size());
@@ -215,6 +226,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
     );
     print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
     println!("body=unchanged");
+    print_client_limits(&client);
     Ok(())
 }
 
@@ -243,6 +255,7 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
     let mut level = DEFAULT_COMPRESSION_LEVEL;
     let mut input_path = None;
     let mut reference_path = None;
+    let mut require_zstd = false;
     let mut flags = arguments[positional.len()..].iter();
     while let Some(flag) = flags.next() {
         let value = flags
@@ -255,6 +268,7 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
             "--level" => level = compression_level(value)?,
             "--input" => input_path = Some(value.as_str()),
             "--reference" => reference_path = Some(value.as_str()),
+            "--compressor" => require_zstd = compressor_requirement(value)?,
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
@@ -287,7 +301,7 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
         return Err("the transcoded body does not decode back to the source body".to_owned());
     }
 
-    let (artifact, compressor) = wrap(&bytes, compression, level);
+    let (artifact, compressor) = wrap(&bytes, compression, level, require_zstd)?;
     let artifact_sha = hex(&Sha256::digest(&artifact));
     let transcoded = WitnessGraph::from_bytes_with_limits(
         &artifact,
@@ -306,8 +320,27 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
         return Err("transcode changed the source R1CS digest".to_owned());
     }
 
+    // The body checks above run on this tool's own parser, so a misreading shared by
+    // both directions would pass them. Evaluating through the evaluator's decoder
+    // would not: with no input given, compare the two on an all-zero input.
     let parity = match input_path {
-        None => "unchecked",
+        None => {
+            let zero = |graph: &WitnessGraph| graph.calculate_json("{}").map_err(|e| e.to_string());
+            let (expected, candidate) = (zero(&source), zero(&transcoded));
+            let differs = match (&expected, &candidate) {
+                (Ok(expected), Ok(candidate)) => {
+                    wtns::first_difference(candidate, expected).is_some()
+                }
+                _ => expected != candidate,
+            };
+            if differs {
+                return Err(
+                    "the source and the result evaluate differently on an all-zero input"
+                        .to_owned(),
+                );
+            }
+            "zero-input"
+        }
         Some(input_path) => {
             let input =
                 std::fs::read_to_string(input_path).map_err(|e| format!("{input_path}: {e}"))?;
@@ -336,6 +369,7 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
         }
     };
 
+    let client = client_limits(&artifact, &artifact_sha);
     write_new(positional[2], &artifact)?;
 
     println!("signals={}", transcoded.assignment_size());
@@ -347,7 +381,8 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
     print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
     println!("round_trip=ok");
     println!("parity={parity}");
-    if parity == "unchecked" {
+    print_client_limits(&client);
+    if parity == "zero-input" {
         eprintln!("note: confirm this artifact with `signet validate` before pinning it");
     }
     if target == FormatVersion::V2 {
@@ -359,13 +394,52 @@ fn transcode_command(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Raw bytes as they are, or inside a zstd frame.
-fn wrap(bytes: &[u8], compression: Compression, level: i32) -> (Vec<u8>, Option<Compressor>) {
+/// Raw bytes as they are, or inside a zstd frame. With `require_zstd`, a frame
+/// from the ruzstd fallback is refused before anything is written.
+fn wrap(
+    bytes: &[u8],
+    compression: Compression,
+    level: i32,
+    require_zstd: bool,
+) -> Result<(Vec<u8>, Option<Compressor>), String> {
     match compression {
-        Compression::None => (bytes.to_vec(), None),
-        Compression::Zstd => {
-            let (compressed, compressor) = compress(bytes, level);
-            (compressed, Some(compressor))
+        Compression::None => Ok((bytes.to_vec(), None)),
+        Compression::Zstd => match compress(bytes, level) {
+            (_, Compressor::Ruzstd) if require_zstd => Err(
+                "the system `zstd` is missing or failed, and --compressor zstd refuses \
+                 the ruzstd fallback"
+                    .to_owned(),
+            ),
+            (compressed, compressor) => Ok((compressed, Some(compressor))),
+        },
+    }
+}
+
+fn compressor_requirement(value: &str) -> Result<bool, String> {
+    match value {
+        "zstd" => Ok(true),
+        "any" => Ok(false),
+        other => Err(format!("--compressor needs `zstd` or `any`, got {other:?}")),
+    }
+}
+
+/// Whether a client with the default limits loads the artifact too. Every write
+/// is gated on the batch-prover limits, which accept graphs a browser refuses.
+fn client_limits(artifact: &[u8], artifact_sha: &str) -> Result<(), String> {
+    WitnessGraph::from_bytes_with_limits(artifact, artifact_sha, curvy_witness::Limits::client())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn print_client_limits(client: &Result<(), String>) {
+    match client {
+        Ok(()) => println!("client_limits=ok"),
+        Err(error) => {
+            println!("client_limits=exceeded");
+            eprintln!(
+                "note: a client with the default limits refuses this artifact ({error}); \
+                 only hosts using Limits::batch_prover() load it"
+            );
         }
     }
 }
@@ -393,8 +467,9 @@ fn print_digests(
             Compressor::Ruzstd => {
                 println!("compressor=ruzstd (level 1)");
                 eprintln!(
-                    "warning: `zstd` was not found, so this artifact is roughly twice \
-                     the size it should be; install zstd before publishing"
+                    "warning: the system `zstd` is missing or failed, so this artifact \
+                     was compressed with ruzstd's level 1 and is roughly twice the size \
+                     it should be; publish with --compressor zstd"
                 );
             }
         }
@@ -444,6 +519,8 @@ fn inspect(arguments: &[String]) -> Result<(), String> {
     let graph = load(artifact, expected_sha)?;
     println!("signals={}", graph.assignment_size());
     println!("r1cs_sha256={}", hex(&graph.r1cs_sha256()));
+    let bytes = std::fs::read(artifact).map_err(|e| format!("{artifact}: {e}"))?;
+    print_client_limits(&client_limits(&bytes, expected_sha));
     Ok(())
 }
 
@@ -486,9 +563,12 @@ fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
                 format!("{path}: {error}")
             }
         })?;
-    output
-        .write_all(bytes)
-        .map_err(|error| format!("{path}: {error}"))
+    // Do not leave a truncated artifact behind, under the name it was meant to have.
+    output.write_all(bytes).map_err(|error| {
+        drop(output);
+        let _ = std::fs::remove_file(path);
+        format!("{path}: {error}")
+    })
 }
 
 #[cfg(test)]
