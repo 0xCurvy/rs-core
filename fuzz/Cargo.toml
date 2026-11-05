@@ -14,6 +14,11 @@ curvy-witness = { path = "../crates/witness", features = ["sage", "signet-v2"] }
 sha2 = "=0.11.0"
 # Stored zstd frames, so the compact zkey target can mutate bodies directly.
 ruzstd = { version = "=0.9.1", default-features = false, features = ["std", "hash"] }
+# The SIGNET producer, so the signet targets can build graphs and transcode them.
+curvy-signet = { path = "../crates/signet" }
+ark-bn254 = { version = "=0.6.0", default-features = false, features = ["std"] }
+ark-ff = { version = "=0.6.0", default-features = false, features = ["std"] }
+ruint = { version = "=1.20.0", default-features = false, features = ["std"] }
 
 [features]
 default = ["compact-matrix"]
@@ -56,6 +61,20 @@ bench = false
 [[bin]]
 name = "compact_zkey"
 path = "fuzz_targets/compact_zkey.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signet_parity"
+path = "fuzz_targets/signet_parity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signet_transcode"
+path = "fuzz_targets/signet_transcode.rs"
 test = false
 doc = false
 bench = false

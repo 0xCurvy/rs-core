@@ -608,7 +608,7 @@ jobs:
       - run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Exercise parsers after digest authentication
         run: |
-          for target in graph sage prover_formats input_json compact_zkey; do
+          for target in graph sage prover_formats input_json compact_zkey signet_parity signet_transcode; do
             CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
           done
       # prover_formats is the only target that uses curvy-prover. It starts from

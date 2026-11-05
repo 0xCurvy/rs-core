@@ -74,17 +74,17 @@ check() {
       ;;
     wasm)
       have_file crates/prover/pkg-node/curvy_prover.js "scripts/build.sh wasm-nodejs" || return
-      local signet_v2=(--expect-v2-disabled) compact_zkey=()
+      local signet_v2=(--expect-v2-disabled) proof_options=()
       local option
       for option in "$@"; do
         case "$option" in
-          --signet-v2) signet_v2=() ;;
-          --compact-zkey) compact_zkey=(--compact-zkey) ;;
+          --signet-v2) signet_v2=(); proof_options+=(--signet-v2) ;;
+          --compact-zkey) proof_options+=(--compact-zkey) ;;
           *) echo "unknown option for wasm: $option" >&2; return 2 ;;
         esac
       done
       node crates/wasm/smoke-test.cjs
-      node tools/browser/node-proof-check.mjs "${compact_zkey[@]+"${compact_zkey[@]}"}"
+      node tools/browser/node-proof-check.mjs "${proof_options[@]+"${proof_options[@]}"}"
       node scripts/lib/signet-v2.cjs "${signet_v2[@]+"${signet_v2[@]}"}"
       ;;
     simd-codegen)

@@ -1,11 +1,12 @@
 // Prove the multiplier fixture through a wasm-bindgen prover package in Node.
 //
-// Usage: node tools/browser/node-proof-check.mjs [path/to/curvy_prover.js] [--compact-zkey]
+// Usage: node tools/browser/node-proof-check.mjs [path/to/curvy_prover.js] [--compact-zkey] [--signet-v2]
 //
 // The default is the `scripts/build.sh wasm-nodejs` output. scripts/lib/smoke-npm.mjs
 // reuses `checkResidentProver` for the portable entry of the packed npm tarball.
 // `--compact-zkey` says the module was built with it: the compact copy of the
-// fixture must then prove, and is otherwise refused.
+// fixture must then prove, and is otherwise refused. `--signet-v2` does the same
+// for the fixture's graph as a SIGNET version-2 artifact, raw and zstd-compressed.
 // `prove` only returns after the proof verifies against the key's own verifying
 // key, so a returned bundle is a self-verified proof. The checks below pin that
 // verifying key to the snarkjs export and show that a proof which fails
@@ -46,7 +47,7 @@ function snarkjsVerifyingKeyDigest(vk) {
     g2(vk.vk_gamma_2), g2(vk.vk_delta_2), count, ...vk.IC.map(g1)]));
 }
 
-export function checkResidentProver(wasm, { compactZkey = false } = {}) {
+export function checkResidentProver(wasm, { compactZkey = false, signetV2 = false } = {}) {
   assert.equal(typeof wasm.WasmResidentProver, 'function', 'package is missing WasmResidentProver');
   const zkey = readFileSync(resolve(testdata, 'multiplier.zkey'));
   const graph = Buffer.from(fixture.graph, 'base64');
@@ -90,7 +91,32 @@ export function checkResidentProver(wasm, { compactZkey = false } = {}) {
 
   return { publicSignals: bundle.publicSignals, verifyingKeyDigest: FIXTURE_VK_DIGEST,
     selfVerified: true, corruptedKeyRejected: String(tamperedError.message ?? tamperedError),
-    compactZkey: checkCompactZkey(wasm, graph, compactZkey) };
+    compactZkey: checkCompactZkey(wasm, graph, compactZkey),
+    signetV2: checkSignetV2(wasm, zkey, signetV2) };
+}
+
+// The fixture's graph transcoded to SIGNET version 2 (`signet transcode
+// --version 2 --envelope signet`, then also `--compress zstd`) proves the same
+// statement through the resident prover in a build with `signet-v2`, and is
+// refused for its body version otherwise.
+function checkSignetV2(wasm, zkey, enabled) {
+  for (const [form, base64, pin] of [
+    ['raw', fixture.graphV2, fixture.graphV2Sha256],
+    ['zstd', fixture.graphV2Zstd, fixture.graphV2ZstdSha256],
+  ]) {
+    const graph = Buffer.from(base64, 'base64');
+    assert.equal(sha256(graph), pin, `the ${form} v2 fixture graph does not match its pin`);
+    if (!enabled) {
+      assert.throws(() => new wasm.WasmResidentProver(zkey, fixture.zkeySha256, graph, pin).free(),
+        /format version 2/, `a build without signet-v2 accepted a ${form} v2 graph`);
+      continue;
+    }
+    const prover = new wasm.WasmResidentProver(zkey, fixture.zkeySha256, graph, pin);
+    try {
+      assert.deepEqual(JSON.parse(prover.prove(INPUT)).publicSignals, ['33'], `${form} v2 graph`);
+    } finally { prover.free(); }
+  }
+  return enabled ? 'proved' : 'refused';
 }
 
 // The same constructor takes the compact copy of the fixture under its own pin,
@@ -116,8 +142,9 @@ function checkCompactZkey(wasm, graph, enabled) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
   const compactZkey = args.includes('--compact-zkey');
+  const signetV2 = args.includes('--signet-v2');
   const path = args.find(arg => !arg.startsWith('--'));
   const entry = resolve(path ?? resolve(root, 'crates/prover/pkg-node/curvy_prover.js'));
   const wasm = createRequire(import.meta.url)(entry);
-  console.log(JSON.stringify({ package: entry, ...checkResidentProver(wasm, { compactZkey }) }));
+  console.log(JSON.stringify({ package: entry, ...checkResidentProver(wasm, { compactZkey, signetV2 }) }));
 }

@@ -245,10 +245,22 @@ cargo test -p curvy-signet
 - `tests/roundtrip.rs` also holds `transcode` to `export`: every source and
   target version, both envelopes, a 70,000-node graph with multi-byte distances
   and backward output deltas, and a zstd-wrapped source.
+- `tests/v2_parity.rs` generates graphs over all 23 operations, multi-value
+  inputs and constants at the field's edges, and requires version 2 to transcode
+  to and from version 1 byte for byte and to evaluate exactly like it, raw and
+  zstd-compressed, in both evaluators. One test checks every encoding and
+  evaluator path, including a reused workspace and a compiled SAGE program,
+  against values computed independently with `num-bigint`. Another puts backward
+  references and output deltas at every varint length boundary, up to four-byte
+  distances in a 2.2-million-node graph.
 - `tests/ir_builder_graph.rs` exports a graph the builder wrote and checks it
   against circom's witness for inputs on both sides of each select, offline.
 - `scripts/check.sh wasm --signet-v2` runs the v2 cases through the portable
-  WASM binding.
+  WASM binding, and proves the multiplier fixture from its v2 graph, raw and
+  zstd-compressed, through `WasmResidentProver`.
+- The `signet_parity` and `signet_transcode` fuzz targets (`fuzz/README.md`)
+  compare the two versions on generated graphs, and the transcoder with the
+  decoder on mutated artifacts.
 
 End-to-end check of the whole pipeline on a throwaway circuit, including parity
 against circom's witness (needs circom 2.2.3, node, and the builder or the pin):
