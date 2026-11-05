@@ -28,6 +28,12 @@ import init, { poseidon } from "@0xcurvy/rs-core-wasm/core";
 await init(); // resolves curvy_wasm_bg.wasm relative to this module
 ```
 
+Both prover entries load a proving key from a snarkjs `.zkey` or a compact `.czkey`
+([curvy-prover's compact zkeys](https://github.com/0xCurvy/rs-core/blob/main/crates/prover/README.md#compact-zkeys)).
+`new WasmResidentProver(zkey, zkeySha256, graph, graphSha256)` tells them apart by their first bytes;
+`zkeySha256` is the SHA-256 of the file passed, whichever it is. A compact key is about a quarter of
+the size and costs about 3 s more to load single-threaded for a 40 MB key.
+
 ## Bundler setup
 
 The generated glue locates its binary with `new URL('curvy_wasm_bg.wasm', import.meta.url)`, and the

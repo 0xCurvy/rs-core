@@ -360,13 +360,14 @@ jobs:
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmResidentProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
       # Golden vectors, a real self-verified Groth16 proof (pinned fixture,
       # publicSignals ["33"], VK digest equal to the snarkjs export, a corrupted
-      # key refused) and SIGNET v2 refused, then accepted by the v2 builds.
+      # key refused) and SIGNET v2 and compact zkeys refused, then accepted by
+      # the builds that enable them.
       - run: scripts/check.sh wasm
-      - run: scripts/build.sh wasm-nodejs --signet-v2
+      - run: scripts/build.sh wasm-nodejs --signet-v2 --compact-zkey
       - name: Check standalone SIGNET v2 bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
-      - run: scripts/check.sh wasm --signet-v2
+      - run: scripts/check.sh wasm --signet-v2 --compact-zkey
       - run: scripts/build.sh wasm-nodejs --sparrow
       - name: Check opt-in SPARROW and SAGE bindings
         run: |

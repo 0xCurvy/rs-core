@@ -38,8 +38,9 @@ for (const [subpath, binary] of [
     if (digest !== expected) throw new Error(`core poseidon returned ${digest}, expected ${expected}`);
     console.log(`${subpath.padEnd(14)} instantiated`);
   } else {
-    const proof = checkResidentProver(entry);
-    console.log(`${subpath.padEnd(14)} proved publicSignals=${JSON.stringify(proof.publicSignals)} (self-verified)`);
+    // scripts/build.sh npm builds both prover modules with --compact-zkey.
+    const proof = checkResidentProver(entry, { compactZkey: true });
+    console.log(`${subpath.padEnd(14)} proved publicSignals=${JSON.stringify(proof.publicSignals)} (self-verified), compact zkey ${proof.compactZkey}`);
   }
 }
 

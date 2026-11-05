@@ -14,6 +14,7 @@
 #                    (implies --signet-v2)
 #   --bench          development-only arithmetic kernels (implies --sparrow)
 #   --compact-matrix the compact constraint representation
+#   --compact-zkey   accept compact zkeys (`.czkey`) next to raw ones
 #   --simd-msm       SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`)
 #   --simd-fft       SIMD witness-map FFT (curvy-prover `wasm-simd-fft`)
 #   --simd           both of the above
@@ -81,6 +82,7 @@ signet_v2_mode=""
 sparrow_mode=""
 bench_mode=""
 compact_matrix_mode=""
+compact_zkey_mode=""
 simd_msm_mode=""
 simd_fft_mode=""
 simd_selftest_mode=""
@@ -120,6 +122,13 @@ for mode in "$@"; do
         exit 1
       fi
       compact_matrix_mode="--compact-matrix"
+      ;;
+    --compact-zkey)
+      if [ -n "$compact_zkey_mode" ]; then
+        echo "--compact-zkey may be supplied only once" >&2
+        exit 1
+      fi
+      compact_zkey_mode="--compact-zkey"
       ;;
     --simd-msm)
       # Opt-in SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`).
@@ -169,6 +178,9 @@ elif [ "$signet_v2_mode" = "--signet-v2" ]; then
 fi
 if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
   optional_features+=",curvy-prover/compact-matrix"
+fi
+if [ "$compact_zkey_mode" = "--compact-zkey" ]; then
+  optional_features+=",curvy-prover/compact-zkey"
 fi
 if [ "$simd_msm_mode" = "--simd-msm" ]; then
   optional_features+=",curvy-prover/wasm-simd-msm"
@@ -294,9 +306,10 @@ sparrow_status="$(feature_status has_sparrow)"
 sage_status="$sparrow_status"
 signet_v2_status="$(feature_status has_signet_v2)"
 compact_matrix_status="$(feature_status has_feature curvy-prover/compact-matrix)"
+compact_zkey_status="$(feature_status has_feature curvy-prover/compact-zkey)"
 threads_status="$(feature_status has_feature curvy-wasm/wasm-threads)"
 simd_msm_status="$(feature_status has_feature curvy-prover/wasm-simd-msm)"
 simd_fft_status="$(feature_status has_feature curvy-prover/wasm-simd-fft)"
 simd_selftest_status="$(feature_status has_feature curvy-prover/wasm-simd-selftest)"
-echo "built $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, simd-msm=$simd_msm_status, simd-fft=$simd_fft_status, simd-selftest=$simd_selftest_status)"
+echo "built $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, compact-zkey=$compact_zkey_status, simd-msm=$simd_msm_status, simd-fft=$simd_fft_status, simd-selftest=$simd_selftest_status)"
 echo "cargo features: $prover_features"

@@ -95,6 +95,13 @@ mod roots;
 /// The first eight bytes of a compact zkey file.
 pub const MAGIC: &[u8; 8] = b"CVYZKC01";
 
+/// Whether `file` starts with [`MAGIC`], so a loader that takes either format
+/// knows which decoder to authenticate it for. A raw zkey starts with `zkey`.
+/// This reads nothing else and proves nothing: the pin is still checked first.
+pub fn is_compact(file: &[u8]) -> bool {
+    file.starts_with(MAGIC)
+}
+
 /// Bytes ahead of the zstd frame: the magic, the original zkey's SHA-256 and its
 /// length.
 pub const HEADER_BYTES: usize = 48;

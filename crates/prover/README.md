@@ -189,7 +189,15 @@ pin, which bytes 8 to 40 of the compact file hold.
 The decoded zkey is held in memory while it is parsed, as `from_zkey_bytes`
 holds the zkey it is given; `from_compact_zkey_reader` does not hold the
 compact file. SPARROW, `zkey-manifest` and `zkey-single-pass` read a raw zkey
-stream and do not accept compact zkeys, and no binding exposes them yet.
+stream and do not accept compact zkeys.
+
+In WebAssembly, `WasmResidentProver` takes either format under the pin of the
+file it is given when the module is built with `--compact-zkey`, as
+`scripts/build.sh npm` builds `@0xcurvy/rs-core-wasm`. The feature adds 81 KB to
+the portable prover module (22 KB with brotli). Single-threaded under Node.js,
+the 2_9_30 resident prover takes 2,881 ms to load from the compact key and
+106 ms from the raw one, both including its witness graph. The Node.js and C
+bindings take raw zkeys only.
 
 Make one with the example, which refuses to write a file that does not decode
 back to the zkey or loads as a different key:

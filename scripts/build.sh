@@ -10,7 +10,8 @@
 #   wasm-bundler        portable modules for bundlers  crates/{wasm,prover}/pkg-bundler
 #   wasm-web-threads    threaded modules for browsers  crates/{wasm,prover}/pkg-web-threads
 #   all-portable        native, wasm-nodejs, wasm-web and wasm-bundler
-#   npm [--pack]        @0xcurvy/rs-core-wasm from wasm-web and wasm-web-threads:
+#   npm [--pack]        @0xcurvy/rs-core-wasm from wasm-web and wasm-web-threads,
+#                       both with --compact-zkey:
 #                       dist/npm, and with --pack the .tgz in the repository root;
 #                       needs wasm-opt from the binaryen release build-wasm.sh pins
 #   node-release        @0xcurvy/rs-core-node packages (Apple Silicon Mac with
@@ -70,8 +71,8 @@ build() {
       wasm bundler
       ;;
     npm)
-      CURVY_WASM_OPT=required wasm web
-      CURVY_WASM_OPT=required wasm web --threads
+      CURVY_WASM_OPT=required wasm web --compact-zkey
+      CURVY_WASM_OPT=required wasm web --threads --compact-zkey
       node scripts/lib/build-npm.mjs "$@"
       ;;
     node-release) node scripts/lib/node-release.mjs "$@" ;;

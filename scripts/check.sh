@@ -8,10 +8,12 @@
 #   js             unit tests of the SPARROW JS adapter and the npm packager
 #   ffi            curvy.h is current (cbindgen 0.29.4), the C ABI covers the WASM
 #                  API, and both agree on the golden vectors  [wasm-nodejs]
-#   wasm [--signet-v2]
+#   wasm [--signet-v2] [--compact-zkey]
 #                  the Node.js modules match the golden vectors, prove a Groth16
 #                  proof, and accept SIGNET v2 graphs exactly when built with
-#                  --signet-v2 or --sparrow (say so with --signet-v2)  [wasm-nodejs]
+#                  --signet-v2 or --sparrow (say so with --signet-v2), and compact
+#                  zkeys exactly when built with --compact-zkey (say so with
+#                  --compact-zkey)  [wasm-nodejs]
 #   simd-codegen   the SIMD kernels compiled to extmul, not emulated i64x2.mul
 #                  [any build with --simd]
 #   simd [options] SIMD differential self-tests, stress rounds and kernel
@@ -72,14 +74,17 @@ check() {
       ;;
     wasm)
       have_file crates/prover/pkg-node/curvy_prover.js "scripts/build.sh wasm-nodejs" || return
-      local signet_v2=(--expect-v2-disabled)
-      case "${1:-}" in
-        --signet-v2) signet_v2=() ;;
-        "") ;;
-        *) echo "unknown option for wasm: $1" >&2; return 2 ;;
-      esac
+      local signet_v2=(--expect-v2-disabled) compact_zkey=()
+      local option
+      for option in "$@"; do
+        case "$option" in
+          --signet-v2) signet_v2=() ;;
+          --compact-zkey) compact_zkey=(--compact-zkey) ;;
+          *) echo "unknown option for wasm: $option" >&2; return 2 ;;
+        esac
+      done
       node crates/wasm/smoke-test.cjs
-      node tools/browser/node-proof-check.mjs
+      node tools/browser/node-proof-check.mjs "${compact_zkey[@]+"${compact_zkey[@]}"}"
       node scripts/lib/signet-v2.cjs "${signet_v2[@]+"${signet_v2[@]}"}"
       ;;
     simd-codegen)
