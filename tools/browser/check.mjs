@@ -1,12 +1,16 @@
 // CI driver. The interactive local check uses the Browser skill's live browser.
 //
-// Usage: node tools/browser/check.mjs [threaded] [portable]
+// Usage: node tools/browser/check.mjs [threaded] [portable] [--signet-v2] [--compact-zkey]
 //
 // `threaded` proves with crates/prover/pkg-web-threads (scripts/build.sh
 // wasm-web-threads) on two Rayon workers; `portable` proves with
-// crates/prover/pkg-web (scripts/build.sh wasm-web). With no argument both run,
-// so both packages must already be built. CURVY_BROWSER_PKG_WEB and
-// CURVY_BROWSER_PKG_WEB_THREADS substitute other prover package directories.
+// crates/prover/pkg-web (scripts/build.sh wasm-web). With no mode both run,
+// so both packages must already be built. `--signet-v2` and `--compact-zkey` say
+// the packages were built with them, as scripts/build.sh npm-web and
+// npm-web-threads build them: the fixture must then also prove from its SIGNET
+// version-2 graphs and its compact zkey, and without them those must be refused.
+// CURVY_BROWSER_PKG_WEB and CURVY_BROWSER_PKG_WEB_THREADS substitute other prover
+// package directories.
 // CURVY_BROWSER_ENGINES picks the browsers (default chromium,firefox; webkit
 // also works, after `npx --prefix tools/browser playwright install webkit`).
 import assert from 'node:assert/strict';
@@ -15,7 +19,11 @@ import { request } from 'node:http';
 import { chromium, firefox, webkit } from 'playwright';
 const port = 8127;
 const origin = `http://127.0.0.1:${port}`;
-const modes = process.argv.slice(2).flatMap(arg => arg.split(',')).filter(Boolean);
+const args = process.argv.slice(2);
+const options = args.filter(arg => arg.startsWith('--'));
+for (const option of options) assert.ok(['--signet-v2', '--compact-zkey'].includes(option), `unknown option ${option}`);
+const features = {signetV2: options.includes('--signet-v2'), compactZkey: options.includes('--compact-zkey')};
+const modes = args.filter(arg => !arg.startsWith('--')).flatMap(arg => arg.split(',')).filter(Boolean);
 if (!modes.length) modes.push('threaded', 'portable');
 for (const mode of modes) assert.ok(['threaded', 'portable'].includes(mode), `unknown mode ${mode} (use threaded or portable)`);
 const expectedThreads = {threaded: 2, portable: 1};
@@ -45,7 +53,8 @@ try {
           page.on('pageerror', error => { errors.push(String(error)); console.error(error); });
           page.on('console', message => console.error(`browser ${message.type()}: ${message.text()}`));
           page.on('requestfailed', request => console.error(`request failed: ${request.url()} ${request.failure()?.errorText}`));
-          const query = new URLSearchParams({mode});
+          const query = new URLSearchParams({mode, signetV2: features.signetV2 ? '1' : '0',
+            compactZkey: features.compactZkey ? '1' : '0'});
           if (mode === 'threaded') query.set('threads', String(expectedThreads.threaded));
           await page.goto(`${origin}/tools/browser/proof-check.html?${query}`);
           await page.getByRole('button', {name: 'Run proof checks'}).click();
@@ -61,6 +70,9 @@ try {
           assert.equal(report.threads, expectedThreads[mode]);
           assert.equal(report.selfVerified, true);
           assert.deepEqual(report.publicSignals, ['33']);
+          for (const [feature, enabled] of Object.entries(features)) {
+            assert.equal(report[feature], enabled ? 'proved' : 'refused', feature);
+          }
           assert.deepEqual(errors, []);
           console.log(JSON.stringify({browser: name, ...report}));
         } finally { await page.close(); }

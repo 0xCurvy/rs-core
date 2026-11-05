@@ -34,6 +34,13 @@ Both prover entries load a proving key from a snarkjs `.zkey` or a compact `.czk
 `zkeySha256` is the SHA-256 of the file passed, whichever it is. A compact key is about a quarter of
 the size and costs about 3 s more to load single-threaded for a 40 MB key.
 
+The witness graph is a SIGNET artifact (`SIGNET01` or `CVYWIT01`) at body version 1 or 2, raw or
+zstd-compressed; `graphSha256` is the SHA-256 of the bytes passed. Version 2
+([`signet transcode`](https://github.com/0xCurvy/rs-core/blob/main/crates/signet/README.md#re-encoding-the-body-version-with-no-postcard-source))
+computes the same witness as version 1 and, at zstd -9, is 48-66% smaller for the shipped graphs. Both entries
+accept both versions from 0.1.5; earlier releases refuse version 2 with "unsupported witness graph
+format version 2".
+
 ## Bundler setup
 
 The generated glue locates its binary with `new URL('curvy_wasm_bg.wasm', import.meta.url)`, and the

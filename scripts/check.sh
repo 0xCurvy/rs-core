@@ -20,11 +20,14 @@
 #                  benchmark; options go to scripts/lib/simd-selftest.mjs
 #                  [wasm-nodejs --sparrow --simd --simd-selftest, or the web
 #                  equivalent with --engine]
-#   npm            pack @0xcurvy/rs-core-wasm, install it and prove with it
-#                  [wasm-web and wasm-web-threads]
-#   browser [threaded|portable]
-#                  proofs in Chromium and Firefox  [wasm-web and wasm-web-threads;
-#                  npm ci --prefix tools/browser; npx playwright install]
+#   npm            pack @0xcurvy/rs-core-wasm, install it and prove with it,
+#                  including from SIGNET v2 graphs and a compact zkey
+#                  [npm-web and npm-web-threads]
+#   browser [threaded|portable] [--signet-v2] [--compact-zkey]
+#                  proofs in Chromium and Firefox; the options work as for wasm,
+#                  and npm-web builds have both  [wasm-web and wasm-web-threads,
+#                  or npm-web and npm-web-threads; npm ci --prefix tools/browser;
+#                  npx playwright install]
 #   graph          the witness-graph pipeline end to end (circom 2.2.3, node)
 #   artifacts      the release bundle validator  [npm ci --prefix tools/artifacts]
 #   all            kernels, js, ffi, wasm, npm, graph and artifacts, skipping the
@@ -96,7 +99,7 @@ check() {
       ;;
     npm)
       for dir in crates/wasm/pkg-web crates/prover/pkg-web crates/wasm/pkg-web-threads crates/prover/pkg-web-threads; do
-        have_file "$dir" "scripts/build.sh wasm-web and wasm-web-threads" || return
+        have_file "$dir" "scripts/build.sh npm-web and npm-web-threads" || return
       done
       local version install_dir status=0
       node scripts/lib/build-npm.mjs --pack

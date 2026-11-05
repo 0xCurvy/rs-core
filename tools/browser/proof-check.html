@@ -15,6 +15,54 @@ const fetchBytes = async (url) => {
   check(response.ok, `fetch failed: ${url} (${response.status})`);
   return new Uint8Array(await response.arrayBuffer());
 };
+const base64 = value => Uint8Array.from(atob(value), c => c.charCodeAt(0));
+// `signetV2=1` and `compactZkey=1` say the build has the feature, as the npm-web
+// and npm-web-threads targets do: the multiplier fixture must then prove from its
+// SIGNET version-2 graph, raw and zstd-compressed, and from its compact zkey.
+// `=0` says it does not, and they must be refused. Without the parameter (the
+// benchmark scenarios) neither is checked.
+async function checkFeatures(wasm, query) {
+  const features = {};
+  if (!query.has('signetV2') && !query.has('compactZkey')) return features;
+  const zkey = await fetchBytes('/crates/prover/testdata/multiplier.zkey');
+  const graph = base64(fixture.graph);
+  const load = (key, keyPin, graphBytes, graphPin) => new wasm.WasmResidentProver(key, keyPin, graphBytes, graphPin);
+  const refusal = construct => { try { construct().free(); } catch (error) { return String(error); } return null; };
+  const prove = (prover, label) => {
+    try {
+      const bundle = JSON.parse(prover.prove(JSON.stringify({a: '3', b: '11'})));
+      check(JSON.stringify(bundle.publicSignals) === '["33"]', `${label}: public signals mismatch`);
+      return prover.verifyingKeyDigest;
+    } finally { prover.free(); }
+  };
+  const verifyingKeyDigest = prove(load(zkey, fixture.zkeySha256, graph, fixture.graphSha256), 'fixture');
+  if (query.has('signetV2')) {
+    const enabled = query.get('signetV2') === '1';
+    for (const [form, value, pin] of [['raw', fixture.graphV2, fixture.graphV2Sha256],
+                                      ['zstd', fixture.graphV2Zstd, fixture.graphV2ZstdSha256]]) {
+      const v2 = base64(value);
+      if (enabled) prove(load(zkey, fixture.zkeySha256, v2, pin), `${form} SIGNET v2 graph`);
+      else check(/format version 2/.test(refusal(() => load(zkey, fixture.zkeySha256, v2, pin)) ?? ''),
+        `a build without signet-v2 accepted a ${form} SIGNET v2 graph`);
+    }
+    features.signetV2 = enabled ? 'proved' : 'refused';
+  }
+  if (query.has('compactZkey')) {
+    const enabled = query.get('compactZkey') === '1';
+    const compact = await fetchBytes('/crates/prover/testdata/multiplier.czkey');
+    if (enabled) {
+      check(refusal(() => load(compact, fixture.zkeySha256, graph, fixture.graphSha256)),
+        'a compact zkey was accepted under the raw zkey pin');
+      check(prove(load(compact, fixture.compactZkeySha256, graph, fixture.graphSha256), 'compact zkey') === verifyingKeyDigest,
+        'the compact zkey loaded a different key');
+    } else {
+      check(refusal(() => load(compact, fixture.compactZkeySha256, graph, fixture.graphSha256)),
+        'a build without compact-zkey accepted a compact zkey');
+    }
+    features.compactZkey = enabled ? 'proved' : 'refused';
+  }
+  return features;
+}
 document.querySelector('#run').onclick = async () => {
   document.querySelector('#run').disabled = true;
   result.textContent = 'Running';
@@ -84,12 +132,13 @@ document.querySelector('#run').onclick = async () => {
     try { new wasm.WasmResidentProver(zkey, '00'.repeat(32), graph, data.graphSha256).free(); }
     catch { rejected = true; }
     check(rejected, 'incorrect key pin was accepted');
+    const features = await checkFeatures(wasm, query);
     const sorted = [...times].sort((a,b) => a-b);
     const report = { passed: true, mode, threads, crossOriginIsolated, userAgent: navigator.userAgent,
       scenario: query.get('scenario') || 'multiplier', selfVerified: true, publicSignals: publics,
       initMs, loadMs, fetchMs: loadMs - parseMs, parseMs, proofMs: times,
       wasmMemoryAfterParseBytes, wasmMemoryPeakBytes: memory.buffer.byteLength, medianMs: sorted[Math.floor(sorted.length / 2)],
-      p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1],
+      p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1], ...features,
       ...(loadPhases && { phases: { load: loadPhases, proofs: proofPhases } }) };
     result.textContent = JSON.stringify(report, null, 2);
     result.dataset.state = 'passed';

@@ -26,7 +26,7 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const FIXTURE_VK_DIGEST = 'b550c07c390e3122b682edc04afb8c590bbc66172f19d1a42ac7051f15442838';
 const INPUT = JSON.stringify({ a: '3', b: '11' });
 // Pinned by crates/prover/testdata/README.md.
-const COMPACT_ZKEY_SHA256 = 'd3589b5b0ce19a00e99354f8bbc73524263fa110246fe1ae966d8ebcd5e98bc2';
+const COMPACT_ZKEY_SHA256 = fixture.compactZkeySha256;
 
 // Re-derive the CVYVK digest (crates/prover/src/lib.rs `verifying_key_digest`)
 // from the independent snarkjs export of the fixture's verifying key.

@@ -436,9 +436,11 @@ jobs:
       - run: scripts/check.sh wasm --signet-v2
 
   # Build every browser configuration that ships in @0xcurvy/rs-core-wasm with
-  # the exact release command (release.yml.disabled, scripts/build.sh npm) and
-  # prove with it in Chromium and Firefox. compact-matrix and SIMD are opt-in
-  # variants kept proven alongside.
+  # the exact release command (release.yml.disabled and scripts/build.sh npm both
+  # use npm-web and npm-web-threads, with SIGNET v2 and compact zkeys) and prove
+  # with it in Chromium and Firefox, from a SIGNET v2 graph and a compact zkey as
+  # well. compact-matrix and SIMD are opt-in variants kept proven alongside; they
+  # must refuse both.
   wasm-browser:
     name: Browser WASM proof (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -451,8 +453,9 @@ jobs:
           - name: threaded release
             toolchain: nightly-2026-08-15
             components: rust-src
-            build: scripts/build.sh wasm-web-threads
+            build: scripts/build.sh npm-web-threads
             mode: threaded
+            check-options: --signet-v2 --compact-zkey
             artifact: wasm-web-threads
             artifact-dir: pkg-web-threads
           - name: threaded compact-matrix
@@ -463,8 +466,9 @@ jobs:
           - name: portable release
             toolchain: 1.99.0
             components: ""
-            build: scripts/build.sh wasm-web
+            build: scripts/build.sh npm-web
             mode: portable
+            check-options: --signet-v2 --compact-zkey
             artifact: wasm-web
             artifact-dir: pkg-web
           # Opt-in SIMD MSM + FFT (prototype). The self-test build adds SPARROW
@@ -554,7 +558,7 @@ jobs:
         run: >-
           scripts/check.sh simd --engine chromium --mode ${{ matrix.mode }}
           --pkg "$SIMD_SELFTEST_DIR/prover/${{ matrix.package-dir }}" --stress 30 --min-speedup 0
-      - run: scripts/check.sh browser ${{ matrix.mode }}
+      - run: scripts/check.sh browser ${{ matrix.mode }} ${{ matrix.check-options }}
       # Hand the proved release builds to the npm-package job.
       - if: matrix.artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

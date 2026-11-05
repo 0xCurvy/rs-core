@@ -216,7 +216,9 @@ file.
 
 A version-2 artifact loads only in consumers built with `curvy-witness`'s
 `signet-v2` feature (`signet-v2` in `curvy-prover`). Ship the consumer flag first
-or together with the artifacts.
+or together with the artifacts. `@0xcurvy/rs-core-wasm` accepts version 2 from
+0.1.5 and `@0xcurvy/rs-core-node` since 0.1.0-rc.7; the C library and Rust
+consumers need the feature.
 
 Shipped bound artifacts from the Curvy monorepo (`packages/zk-keys/v2/bound`),
 transcoded from their version-1 zstd -9 files:
@@ -269,7 +271,9 @@ cargo test -p curvy-signet
   against circom's witness for inputs on both sides of each select, offline.
 - `scripts/check.sh wasm --signet-v2` runs the v2 cases through the portable
   WASM binding, and proves the multiplier fixture from its v2 graph, raw and
-  zstd-compressed, through `WasmResidentProver`.
+  zstd-compressed, through `WasmResidentProver`. `scripts/check.sh browser
+  --signet-v2` does the same in Chromium and Firefox, single-threaded and on
+  Rayon workers, and `scripts/check.sh npm` from the packed npm tarball.
 - The `signet_parity` and `signet_transcode` fuzz targets (`fuzz/README.md`)
   compare the two versions on generated graphs, and the transcoder with the
   decoder on mutated artifacts.
