@@ -118,8 +118,10 @@ check() {
     artifacts)
       have_tool python3 "python3" || return
       have_file tools/artifacts/node_modules "npm ci --prefix tools/artifacts" || return
-      # Both suites drive the validator example.
+      # Both suites drive the validator example; the pipeline suite also drives
+      # the compact zkey encoder.
       cargo build --locked -p curvy-prover --example artifact_manifest_check --features sage
+      cargo build --locked -p curvy-prover --example compact_zkey --features compact-zkey
       python3 tools/artifacts/test_release.py
       python3 tools/artifacts/test_pipeline.py
       ;;

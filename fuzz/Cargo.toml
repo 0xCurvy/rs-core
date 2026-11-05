@@ -9,9 +9,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-curvy-prover = { path = "../crates/prover", features = ["zkey-manifest", "zkey-single-pass", "sparrow"] }
+curvy-prover = { path = "../crates/prover", features = ["zkey-manifest", "zkey-single-pass", "sparrow", "compact-zkey"] }
 curvy-witness = { path = "../crates/witness", features = ["sage", "signet-v2"] }
 sha2 = "=0.11.0"
+# Stored zstd frames, so the compact zkey target can mutate bodies directly.
+ruzstd = { version = "=0.9.1", default-features = false, features = ["std", "hash"] }
 
 [features]
 default = ["compact-matrix"]
@@ -47,6 +49,13 @@ bench = false
 [[bin]]
 name = "input_json"
 path = "fuzz_targets/input_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compact_zkey"
+path = "fuzz_targets/compact_zkey.rs"
 test = false
 doc = false
 bench = false

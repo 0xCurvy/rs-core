@@ -434,6 +434,7 @@ dependencies = [
  "curvy-prover",
  "curvy-witness",
  "libfuzzer-sys",
+ "ruzstd",
  "sha2 0.11.0",
 ]
 
@@ -453,6 +454,7 @@ dependencies = [
  "curvy-witness",
  "getrandom 0.2.17",
  "num-bigint 0.5.1",
+ "ruzstd",
  "sha2 0.11.0",
  "thiserror",
  "zeroize",

@@ -37,6 +37,23 @@ def snapshot(source, destination, limit):
             writer.write(block)
     destination.chmod(0o400)
 
+def check_compact_zkey(args, source, stage, zkey_pin):
+    """Stage a compact zkey and require it to decode to the validated zkey's bytes."""
+    staged = stage / 'key.czkey'
+    snapshot(source, staged, LIMITS['zkey'])
+    pin = digest(staged)
+    result = subprocess.run([args.compact_validator, 'verify', str(staged), zkey_pin['sha256']],
+                            text=True, capture_output=True, timeout=args.timeout)
+    (stage / 'check-compact-zkey.log').write_text(result.stdout + result.stderr)
+    if result.returncode:
+        raise RuntimeError(f'compact zkey check failed (exit {result.returncode}):\n{(result.stdout + result.stderr)[-2048:]}')
+    observed = json.loads(result.stdout)
+    if observed['compactZkey'] != pin or digest(staged) != pin:
+        raise ValueError('validator observed different bytes: compactZkey')
+    if observed['zkey'] != zkey_pin:
+        raise ValueError('compact zkey does not decode to the validated zkey')
+    return {**pin, 'decodesTo': zkey_pin['sha256'], 'roundTrip': 'passed'}
+
 def validate(args):
     output = Path(args.output).resolve()
     if output.exists():
@@ -74,6 +91,9 @@ def validate(args):
                 actual = report[aliases.get(key, key)]
                 if any(actual.get(field) != value for field, value in pin.items()):
                     raise ValueError(f'validator observed different bytes: {key}')
+        compact = getattr(args, 'compact_zkey', None)
+        if compact:
+            report['compactZkey'] = check_compact_zkey(args, compact, stage, pins['zkey'])
         report['ceremony'] = pins['ptau']
         report['ceremonyTranscriptVerification'] = 'passed'
         report['zkeyR1csPtauVerification'] = 'passed'
@@ -100,4 +120,6 @@ if __name__ == '__main__':
     parser.add_argument('--snarkjs', default=str(Path(__file__).resolve().parent / 'node_modules/.bin/snarkjs'))
     parser.add_argument('--validator', default='target/release/examples/artifact_manifest_check')
     parser.add_argument('--timeout', type=int, default=3600)
+    parser.add_argument('--compact-zkey', help='optional compact zkey that must decode to --zkey')
+    parser.add_argument('--compact-validator', default='target/release/examples/compact_zkey')
     validate(parser.parse_args())

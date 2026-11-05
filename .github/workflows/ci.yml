@@ -253,6 +253,7 @@ jobs:
               # linted above. Lint the shipped and opt-in combinations directly.
               cargo clippy -p curvy-prover --all-targets --features sparrow --locked -- -D warnings
               cargo clippy -p curvy-prover --all-targets --features scratch --locked -- -D warnings
+              cargo clippy -p curvy-prover --all-targets --features compact-zkey --locked -- -D warnings
               cargo clippy -p curvy-prover --all-targets --no-default-features --locked -- -D warnings
               cargo clippy -p curvy-core --all-targets --no-default-features --locked -- -D warnings
               cargo clippy -p curvy-core --all-targets --features parallel --locked -- -D warnings
@@ -301,6 +302,10 @@ jobs:
               # whose two-pass CSR parser makes the walk buffer section 4.
               cargo test -p curvy-prover --features zkey-single-pass --all-targets --locked
               cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
+              # `compact-zkey` decodes points serially, or in parallel batches with
+              # `parallel`; run both arms.
+              cargo test -p curvy-prover --features compact-zkey --all-targets --locked
+              cargo test -p curvy-prover --features compact-zkey,parallel --all-targets --locked
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -602,7 +607,7 @@ jobs:
       - run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Exercise parsers after digest authentication
         run: |
-          for target in graph sage prover_formats input_json; do
+          for target in graph sage prover_formats input_json compact_zkey; do
             CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
           done
       # prover_formats is the only target that uses curvy-prover. It starts from
