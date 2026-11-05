@@ -450,3 +450,130 @@ fn reseal_refuses_bytes_that_are_not_an_artifact() {
         );
     }
 }
+
+/// `transcode` writes through the encoder's own record emitter, so going from one
+/// body version to the other has to land on exactly what `export` writes for the
+/// target version from the postcard source - in every direction, both envelopes.
+#[test]
+fn transcoding_reproduces_a_native_export() {
+    for envelope in [Envelope::Cvywit, Envelope::Signet] {
+        for source in [FormatVersion::V1, FormatVersion::V2] {
+            for target in [FormatVersion::V1, FormatVersion::V2] {
+                let from = encode(&graph(), [0x33; 32], envelope, source).expect("encode");
+                let native = encode(&graph(), [0x33; 32], envelope, target).expect("encode");
+                let transcoded = curvy_signet::transcode(&from, target).expect("transcode");
+                assert_eq!(transcoded, native, "{envelope:?}: {source:?} -> {target:?}");
+            }
+        }
+    }
+}
+
+/// A graph wide enough that backward distances need two- and three-byte varints and
+/// output references jump backwards, which the four-node fixture never exercises.
+fn wide_graph() -> Graph {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+    let mut nodes = vec![
+        Node::Constant(U256::from(1_u64)),
+        Node::Input(1),
+        Node::Input(2),
+        Node::Input(3),
+        Node::Constant(U256::from(0xDEAD_BEEF_u64)),
+    ];
+    for index in nodes.len()..70_000 {
+        let left = index - 1 - next(index.min(25_000));
+        let right = index - 1 - next(index);
+        nodes.push(match next(8) {
+            0..=2 => Node::Op(Operation::Add, left, right),
+            3..=4 => Node::Op(Operation::Mul, left, right),
+            5 => Node::Op(Operation::Sub, left, right),
+            6 => Node::Bbf(format!("bbf_inv_{index}"), vec![left]),
+            _ => Node::Constant(U256::from(index as u64 * 7919)),
+        });
+    }
+    let mut signals = vec![0];
+    for _ in 0..500 {
+        signals.push(next(nodes.len()));
+    }
+    let input_mapping = ["a", "b", "c"]
+        .iter()
+        .enumerate()
+        .map(|(offset, name)| InputMapping {
+            hash: fnv1a(name),
+            signal_id: offset as u64 + 1,
+            signal_size: 1,
+        })
+        .collect();
+    Graph {
+        nodes,
+        signals,
+        input_mapping,
+    }
+}
+
+#[test]
+fn a_transcoded_wide_graph_is_the_native_export_and_evaluates_like_its_source() {
+    let graph = wide_graph();
+    let v1 = encode(&graph, [0x42; 32], Envelope::Signet, FormatVersion::V1).expect("encode");
+    let v2 = encode(&graph, [0x42; 32], Envelope::Signet, FormatVersion::V2).expect("encode");
+    let transcoded = curvy_signet::transcode(&v1, FormatVersion::V2).expect("transcode");
+    assert_eq!(transcoded, v2);
+    assert_eq!(
+        curvy_signet::transcode(&transcoded, FormatVersion::V1).expect("back"),
+        v1
+    );
+
+    let input = r#"{"a":"6","b":"11","c":"123456789"}"#;
+    let evaluate = |bytes: &[u8]| {
+        WitnessGraph::from_bytes(bytes, &hex(&Sha256::digest(bytes)))
+            .expect("load")
+            .calculate_json(input)
+            .expect("evaluate")
+    };
+    let expected = evaluate(&v1);
+    assert_eq!(expected.len(), 501);
+    assert_eq!(evaluate(&transcoded), expected);
+}
+
+/// Shipped artifacts are zstd frames. Transcoding starts by unwrapping one and the
+/// result is wrapped again; what loads at the far end has to compute the same thing.
+#[test]
+fn a_compressed_artifact_transcodes_through_its_frame() {
+    let v1 = encode(&graph(), [0x77; 32], Envelope::Signet, FormatVersion::V1).expect("encode");
+    let (shipped, _) = curvy_signet::compress(&v1, curvy_signet::DEFAULT_COMPRESSION_LEVEL);
+
+    let raw = curvy_signet::to_raw(&shipped).expect("decompress");
+    let v2 = curvy_signet::transcode(&raw, FormatVersion::V2).expect("transcode");
+    let (artifact, _) = curvy_signet::compress(&v2, curvy_signet::DEFAULT_COMPRESSION_LEVEL);
+    let digest = hex(&Sha256::digest(&artifact));
+
+    let loaded = WitnessGraph::from_bytes(&artifact, &digest).expect("load");
+    assert_eq!(loaded.r1cs_sha256(), [0x77; 32]);
+    let assignment = loaded.calculate_json(r#"{"a":"6"}"#).expect("evaluate");
+    assert_eq!(assignment[1].into_bigint().0[0], 43);
+}
+
+#[test]
+fn transcode_refuses_bytes_that_are_not_an_artifact() {
+    let valid = encode(&graph(), [0; 32], Envelope::Signet, FormatVersion::V1).expect("encode");
+    let mut wrong_version = valid.clone();
+    wrong_version[8..10].copy_from_slice(&99_u16.to_le_bytes());
+    let mut wrong_header_size = valid.clone();
+    wrong_header_size[12..16].copy_from_slice(&65_u32.to_le_bytes());
+    for (label, bytes) in [
+        ("empty", Vec::new()),
+        ("truncated header", valid[..32].to_vec()),
+        ("unknown version", wrong_version),
+        ("wrong header size", wrong_header_size),
+    ] {
+        assert!(
+            curvy_signet::transcode(&bytes, FormatVersion::V2).is_err(),
+            "{label} must be refused"
+        );
+    }
+}

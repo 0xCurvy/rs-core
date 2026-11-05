@@ -46,28 +46,12 @@ pub fn encode(
     );
 
     for (index, node) in graph.nodes.iter().enumerate() {
-        match version {
-            FormatVersion::V1 => encode_v1_node(&mut bytes, node)?,
-            FormatVersion::V2 => encode_v2_node(&mut bytes, index, node)?,
-        }
+        push_record(&mut bytes, version, index, record(node)?)?;
     }
 
-    match version {
-        FormatVersion::V1 => {
-            for signal in &graph.signals {
-                push_u32(&mut bytes, checked_u32(*signal, "signal reference")?);
-            }
-        }
-        FormatVersion::V2 => {
-            let mut previous = 0_i64;
-            for signal in &graph.signals {
-                let signal = i64::try_from(*signal).map_err(|_| SignetError::TooLarge {
-                    what: "signal reference",
-                })?;
-                push_var_u64(&mut bytes, zigzag(signal - previous));
-                previous = signal;
-            }
-        }
+    let mut signals = SignalWriter::new(version);
+    for signal in &graph.signals {
+        signals.push(&mut bytes, *signal)?;
     }
 
     for mapping in input_mapping {
@@ -84,66 +68,120 @@ pub fn encode(
     Ok(bytes)
 }
 
-fn encode_v1_node(bytes: &mut Vec<u8>, node: &Node) -> Result<(), SignetError> {
-    match node {
-        Node::Input(index) => {
-            bytes.push(0);
-            push_u32(bytes, checked_u32(*index, "input index")?);
-        }
-        Node::Constant(value) => {
-            bytes.push(1);
-            bytes.extend_from_slice(&constant_bytes(*value));
-        }
-        Node::MontConstant(value) => {
-            bytes.push(1);
-            bytes.extend_from_slice(&montgomery_bytes(*value));
-        }
-        Node::Op(operation, left, right) => {
-            bytes.push(2);
-            bytes.push(operation_tag(*operation));
-            push_u32(bytes, checked_u32(*left, "left reference")?);
-            push_u32(bytes, checked_u32(*right, "right reference")?);
-        }
-        Node::Bbf(name, parameters) => {
-            bytes.push(3);
-            push_u32(
-                bytes,
-                checked_u32(inverse_source(name, parameters)?, "inverse reference")?,
-            );
-        }
+/// One node as the wire format sees it, whichever body version carries it.
+///
+/// [`encode`] reaches this from a postcard graph and [`crate::transcode`] from an
+/// existing artifact body. Both then write it through [`push_record`], so a
+/// transcoded body and a freshly exported one cannot differ in how a record is
+/// spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Record {
+    /// An index into the input buffer.
+    Input(u32),
+    /// A canonical little-endian field element.
+    Constant([u8; 32]),
+    /// A shipped operation tag and two prior node indices.
+    Operation { tag: u8, left: usize, right: usize },
+    /// Inverse-or-zero of a prior node.
+    Inverse(usize),
+}
+
+fn record(node: &Node) -> Result<Record, SignetError> {
+    Ok(match node {
+        Node::Input(index) => Record::Input(checked_u32(*index, "input index")?),
+        Node::Constant(value) => Record::Constant(constant_bytes(*value)),
+        Node::MontConstant(value) => Record::Constant(montgomery_bytes(*value)),
+        Node::Op(operation, left, right) => Record::Operation {
+            tag: operation_tag(*operation),
+            left: *left,
+            right: *right,
+        },
+        Node::Bbf(name, parameters) => Record::Inverse(inverse_source(name, parameters)?),
+    })
+}
+
+/// Append node `index` in the given body version.
+pub(crate) fn push_record(
+    bytes: &mut Vec<u8>,
+    version: FormatVersion,
+    index: usize,
+    record: Record,
+) -> Result<(), SignetError> {
+    match version {
+        FormatVersion::V1 => match record {
+            Record::Input(input) => {
+                bytes.push(0);
+                push_u32(bytes, input);
+            }
+            Record::Constant(value) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&value);
+            }
+            Record::Operation { tag, left, right } => {
+                bytes.push(2);
+                bytes.push(tag);
+                push_u32(bytes, checked_u32(left, "left reference")?);
+                push_u32(bytes, checked_u32(right, "right reference")?);
+            }
+            Record::Inverse(source) => {
+                bytes.push(3);
+                push_u32(bytes, checked_u32(source, "inverse reference")?);
+            }
+        },
+        FormatVersion::V2 => match record {
+            Record::Input(input) => {
+                bytes.push(wire::V2_INPUT_TAG);
+                push_var_u64(bytes, u64::from(input));
+            }
+            Record::Constant(value) => {
+                bytes.push(wire::V2_CONSTANT_TAG);
+                bytes.extend_from_slice(&value);
+            }
+            Record::Operation { tag, left, right } => {
+                bytes.push(tag);
+                push_var_u64(bytes, backward_distance(index, left, "left reference")?);
+                push_var_u64(bytes, backward_distance(index, right, "right reference")?);
+            }
+            Record::Inverse(source) => {
+                bytes.push(wire::V2_INVERSE_TAG);
+                push_var_u64(
+                    bytes,
+                    backward_distance(index, source, "inverse reference")?,
+                );
+            }
+        },
     }
     Ok(())
 }
 
-fn encode_v2_node(bytes: &mut Vec<u8>, index: usize, node: &Node) -> Result<(), SignetError> {
-    match node {
-        Node::Input(input) => {
-            bytes.push(wire::V2_INPUT_TAG);
-            push_var_u64(bytes, u64::from(checked_u32(*input, "input index")?));
-        }
-        Node::Constant(value) => {
-            bytes.push(wire::V2_CONSTANT_TAG);
-            bytes.extend_from_slice(&constant_bytes(*value));
-        }
-        Node::MontConstant(value) => {
-            bytes.push(wire::V2_CONSTANT_TAG);
-            bytes.extend_from_slice(&montgomery_bytes(*value));
-        }
-        Node::Op(operation, left, right) => {
-            bytes.push(operation_tag(*operation));
-            push_var_u64(bytes, backward_distance(index, *left, "left reference")?);
-            push_var_u64(bytes, backward_distance(index, *right, "right reference")?);
-        }
-        Node::Bbf(name, parameters) => {
-            let source = inverse_source(name, parameters)?;
-            bytes.push(wire::V2_INVERSE_TAG);
-            push_var_u64(
-                bytes,
-                backward_distance(index, source, "inverse reference")?,
-            );
+/// Writes the output-reference table: fixed-width in version 1, ZigZag deltas
+/// from the previous reference in version 2.
+pub(crate) struct SignalWriter {
+    version: FormatVersion,
+    previous: i64,
+}
+
+impl SignalWriter {
+    pub(crate) fn new(version: FormatVersion) -> Self {
+        Self {
+            version,
+            previous: 0,
         }
     }
-    Ok(())
+
+    pub(crate) fn push(&mut self, bytes: &mut Vec<u8>, signal: usize) -> Result<(), SignetError> {
+        match self.version {
+            FormatVersion::V1 => push_u32(bytes, checked_u32(signal, "signal reference")?),
+            FormatVersion::V2 => {
+                let signal = i64::try_from(signal).map_err(|_| SignetError::TooLarge {
+                    what: "signal reference",
+                })?;
+                push_var_u64(bytes, zigzag(signal - self.previous));
+                self.previous = signal;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The only black-box function the exporter understands.

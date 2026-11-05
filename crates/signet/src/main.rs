@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use curvy_signet::{
     Compression, Compressor, DEFAULT_COMPRESSION_LEVEL, Envelope, FormatVersion, Graph,
-    OperationSchema, compress, decode_sha256, encode, hex, wtns,
+    OperationSchema, compress, decode_sha256, encode, hex, transcode, wtns,
 };
 use curvy_witness::WitnessGraph;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,15 @@ signet - build and check SIGNET witness-graph artifacts
       from source. The body is copied untouched, so this cannot change what the
       graph computes - only how it is wrapped. Use it when a profile's postcard
       `graph.bin` was not kept.
+
+  signet transcode <artifact> <sha256> <out.bin>\n      [--version 2|1] [--envelope cvywit|signet] [--compress none|zstd] [--level N]\n      [--input input.json [--reference reference.wtns]]
+      Re-encode an existing artifact's body in the other body version (version 2
+      by default) without its postcard source. The header, source R1CS digest
+      included, is kept byte for byte apart from the version field, and so is the
+      envelope unless --envelope says otherwise. The result must decode back to
+      the source body byte for byte and load through the evaluator before it is
+      written. With --input, the source and the result are both evaluated and must
+      agree on every signal; --reference also compares them with circom's witness.
 
   signet validate <artifact> <sha256> <input.json> <reference.wtns>
       Evaluate the artifact and compare every signal against a reference witness.
@@ -57,6 +66,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.first().map(String::as_str) {
         Some("export") => export(&arguments[1..]),
         Some("reseal") => reseal_command(&arguments[1..]),
+        Some("transcode") => transcode_command(&arguments[1..]),
         Some("validate") => validate(&arguments[1..]),
         Some("inspect") => inspect(&arguments[1..]),
         Some("-h" | "--help" | "help") | None => {
@@ -101,13 +111,7 @@ fn export(arguments: &[String]) -> Result<(), String> {
     let graph = Graph::from_postcard(&source, schema).map_err(|e| e.to_string())?;
     let r1cs = decode_sha256(positional[2]).map_err(|e| e.to_string())?;
     let bytes = encode(&graph, r1cs, envelope, version).map_err(|e| e.to_string())?;
-    let (artifact, compressor) = match compression {
-        Compression::None => (bytes.clone(), None),
-        Compression::Zstd => {
-            let (compressed, compressor) = compress(&bytes, level);
-            (compressed, Some(compressor))
-        }
-    };
+    let (artifact, compressor) = wrap(&bytes, compression, level);
 
     // Load what we are about to write, through the evaluator a client uses. This is
     // what catches a frame whose window exceeds the consumer's cap, and any header
@@ -131,28 +135,7 @@ fn export(arguments: &[String]) -> Result<(), String> {
 
     println!("nodes={}", graph.nodes.len());
     println!("signals={}", graph.signals.len());
-    println!("graph_bytes={}", bytes.len());
-    println!("graph_sha256={}", hex(&Sha256::digest(&bytes)));
-    if let Some(compressor) = compressor {
-        // The evaluator authenticates whatever bytes it is handed, so a compressed
-        // artifact pins its compressed digest. The uncompressed pair is printed too
-        // because the publication record carries both.
-        println!("artifact_bytes={}", artifact.len());
-        println!("artifact_sha256={artifact_sha}");
-        println!("pin=artifact_sha256");
-        match compressor {
-            Compressor::SystemZstd => println!("compressor=zstd -{level}"),
-            Compressor::Ruzstd => {
-                println!("compressor=ruzstd (level 1)");
-                eprintln!(
-                    "warning: `zstd` was not found, so this artifact is roughly twice \
-                     the size it should be; install zstd before publishing"
-                );
-            }
-        }
-    } else {
-        println!("pin=graph_sha256");
-    }
+    print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
     println!("round_trip=ok");
     eprintln!("note: confirm this artifact with `signet validate` before pinning it");
     Ok(())
@@ -203,13 +186,7 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
         return Err("reseal changed bytes outside the eight-byte envelope".to_owned());
     }
 
-    let (artifact, compressor) = match compression {
-        Compression::None => (bytes.clone(), None),
-        Compression::Zstd => {
-            let (compressed, compressor) = compress(&bytes, level);
-            (compressed, Some(compressor))
-        }
-    };
+    let (artifact, compressor) = wrap(&bytes, compression, level);
 
     let artifact_sha = hex(&Sha256::digest(&artifact));
     let resealed = WitnessGraph::from_bytes_with_limits(
@@ -236,8 +213,177 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
         "from={:?} to={:?} version={}",
         described.envelope, envelope, described.version
     );
+    print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
+    println!("body=unchanged");
+    Ok(())
+}
+
+/// Re-encode an artifact's body in the other version, with no postcard source.
+///
+/// Three checks stand between the decoder and the output file. The header must
+/// be unchanged apart from the version field (and the magic, when `--envelope`
+/// asks for a different one). The result must transcode back to the source body
+/// byte for byte, which version 1's fixed-width records make an exact test of
+/// every node, reference and output. And it must load through the evaluator with
+/// the source's signal count and R1CS digest. `--input` adds evaluation parity
+/// between source and result; `--reference` adds circom's witness.
+fn transcode_command(arguments: &[String]) -> Result<(), String> {
+    let positional = arguments
+        .iter()
+        .take_while(|argument| !argument.starts_with("--"))
+        .collect::<Vec<_>>();
+    if positional.len() != 3 {
+        return Err(format!(
+            "transcode needs three positional arguments\n\n{USAGE}"
+        ));
+    }
+    let mut target = FormatVersion::V2;
+    let mut envelope = None;
+    let mut compression = Compression::default();
+    let mut level = DEFAULT_COMPRESSION_LEVEL;
+    let mut input_path = None;
+    let mut reference_path = None;
+    let mut flags = arguments[positional.len()..].iter();
+    while let Some(flag) = flags.next() {
+        let value = flags
+            .next()
+            .ok_or_else(|| format!("{flag} needs a value"))?;
+        match flag.as_str() {
+            "--version" => target = FormatVersion::parse(value).map_err(|e| e.to_string())?,
+            "--envelope" => envelope = Some(Envelope::parse(value).map_err(|e| e.to_string())?),
+            "--compress" => compression = Compression::parse(value).map_err(|e| e.to_string())?,
+            "--level" => level = compression_level(value)?,
+            "--input" => input_path = Some(value.as_str()),
+            "--reference" => reference_path = Some(value.as_str()),
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    if reference_path.is_some() && input_path.is_none() {
+        return Err("--reference needs --input: the witness is computed from it".to_owned());
+    }
+
+    // As with reseal, an unidentified file must not come out the other side
+    // carrying a fresh pin.
+    let source_bytes =
+        std::fs::read(positional[0]).map_err(|e| format!("{}: {e}", positional[0]))?;
+    let source = load_bytes(&source_bytes, positional[1], positional[0])?;
+
+    let raw = curvy_signet::to_raw(&source_bytes).map_err(|e| e.to_string())?;
+    let described = curvy_signet::reseal::describe(&raw).map_err(|e| e.to_string())?;
+    let source_version =
+        FormatVersion::parse(&described.version.to_string()).map_err(|e| e.to_string())?;
+    let mut bytes = transcode(&raw, target).map_err(|e| e.to_string())?;
+    if let Some(envelope) = envelope {
+        bytes = curvy_signet::reseal(&bytes, envelope).map_err(|e| e.to_string())?;
+    }
+
+    if raw.get(10..64) != bytes.get(10..64) || bytes.get(8..10) != Some(&target.tag().to_le_bytes())
+    {
+        return Err("transcode changed header bytes other than the body version".to_owned());
+    }
+    let mut back = transcode(&bytes, source_version).map_err(|e| e.to_string())?;
+    back[..8].copy_from_slice(&raw[..8]);
+    if back != raw {
+        return Err("the transcoded body does not decode back to the source body".to_owned());
+    }
+
+    let (artifact, compressor) = wrap(&bytes, compression, level);
+    let artifact_sha = hex(&Sha256::digest(&artifact));
+    let transcoded = WitnessGraph::from_bytes_with_limits(
+        &artifact,
+        &artifact_sha,
+        curvy_witness::Limits::batch_prover(),
+    )
+    .map_err(|e| format!("refusing to write an artifact the evaluator rejects: {e}"))?;
+    if transcoded.assignment_size() != source.assignment_size() {
+        return Err(format!(
+            "transcode changed the signal count: {} in, {} out",
+            source.assignment_size(),
+            transcoded.assignment_size()
+        ));
+    }
+    if transcoded.r1cs_sha256() != source.r1cs_sha256() {
+        return Err("transcode changed the source R1CS digest".to_owned());
+    }
+
+    let parity = match input_path {
+        None => "unchecked",
+        Some(input_path) => {
+            let input =
+                std::fs::read_to_string(input_path).map_err(|e| format!("{input_path}: {e}"))?;
+            let expected = source
+                .calculate_json(&input)
+                .map_err(|e| format!("evaluating the source: {e}"))?;
+            let candidate = transcoded
+                .calculate_json(&input)
+                .map_err(|e| format!("evaluating the result: {e}"))?;
+            if let Some(index) = wtns::first_difference(&candidate, &expected) {
+                return Err(format!(
+                    "signal {index} differs between the source and the result"
+                ));
+            }
+            if let Some(reference_path) = reference_path {
+                let reference_bytes =
+                    std::fs::read(reference_path).map_err(|e| format!("{reference_path}: {e}"))?;
+                let reference = wtns::read(&reference_bytes).map_err(|e| e.to_string())?;
+                if let Some(index) = wtns::first_difference(&candidate, &reference) {
+                    return Err(format!("signal {index} differs from the reference witness"));
+                }
+                "exact"
+            } else {
+                "source"
+            }
+        }
+    };
+
+    write_new(positional[2], &artifact)?;
+
+    println!("signals={}", transcoded.assignment_size());
+    println!(
+        "from_version={} to_version={}",
+        described.version,
+        target.tag()
+    );
+    print_digests(&bytes, &artifact, &artifact_sha, compressor, level);
+    println!("round_trip=ok");
+    println!("parity={parity}");
+    if parity == "unchecked" {
+        eprintln!("note: confirm this artifact with `signet validate` before pinning it");
+    }
+    if target == FormatVersion::V2 {
+        eprintln!(
+            "note: version 2 loads only in consumers built with curvy-witness's \
+             `signet-v2` feature (curvy-prover's `signet-v2`)"
+        );
+    }
+    Ok(())
+}
+
+/// Raw bytes as they are, or inside a zstd frame.
+fn wrap(bytes: &[u8], compression: Compression, level: i32) -> (Vec<u8>, Option<Compressor>) {
+    match compression {
+        Compression::None => (bytes.to_vec(), None),
+        Compression::Zstd => {
+            let (compressed, compressor) = compress(bytes, level);
+            (compressed, Some(compressor))
+        }
+    }
+}
+
+/// The digest block every writing subcommand prints.
+///
+/// The evaluator authenticates whatever bytes it is handed, so a compressed
+/// artifact pins its compressed digest. The uncompressed pair is printed too
+/// because the publication record carries both.
+fn print_digests(
+    bytes: &[u8],
+    artifact: &[u8],
+    artifact_sha: &str,
+    compressor: Option<Compressor>,
+    level: i32,
+) {
     println!("graph_bytes={}", bytes.len());
-    println!("graph_sha256={}", hex(&Sha256::digest(&bytes)));
+    println!("graph_sha256={}", hex(&Sha256::digest(bytes)));
     if let Some(compressor) = compressor {
         println!("artifact_bytes={}", artifact.len());
         println!("artifact_sha256={artifact_sha}");
@@ -255,8 +401,6 @@ fn reseal_command(arguments: &[String]) -> Result<(), String> {
     } else {
         println!("pin=graph_sha256");
     }
-    println!("body=unchanged");
-    Ok(())
 }
 
 fn validate(arguments: &[String]) -> Result<(), String> {

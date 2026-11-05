@@ -10,6 +10,7 @@ not published.
                                          matches the proving key's R1CS
 graph.bin ── signet export ────────────► artifact + SHA-256
 artifact  ── signet validate ──────────► parity against a reference witness
+artifact  ── signet transcode ─────────► the same graph in the other body version
 ```
 
 `scripts/build-graph.sh` runs the circuit half. It needs cargo, a circuits tree,
@@ -170,8 +171,59 @@ nothing unless the result loads with the same signal count and source R1CS
 digest.
 
 It cannot change what a graph computes: it will not fix an export made with the
-wrong `--ops`, and it will not convert version 1 to version 2. Both need the
-postcard source.
+wrong `--ops`, which needs the postcard source. To convert version 1 to version 2,
+use `transcode`.
+
+## Re-encoding the body version with no postcard source
+
+```bash
+signet transcode <artifact> <sha256> <out.bin> \
+  [--version 2|1] [--envelope cvywit|signet] [--compress none|zstd] [--level N] \
+  [--input input.json [--reference reference.wtns]]
+```
+
+`transcode` decodes the node records, output references and input table of an
+artifact and writes them in the other body version, version 2 by default. It
+authenticates the input against its digest first. The output keeps every header
+byte except the version field, so the source R1CS digest is carried over, and it
+keeps the envelope unless `--envelope` asks for another one. Records go through
+the encoder `export` uses, so a body transcoded to version 2 is byte for byte the
+body `export --version 2` writes from the postcard source.
+
+Before writing, it checks that:
+
+- the result transcodes back to the source body byte for byte. Version 1's
+  records are fixed width, so this compares every node, reference and output;
+- the result loads through `WitnessGraph` under the batch-prover limits, with the
+  source's signal count and R1CS digest;
+- with `--input`, the source and the result compute the same witness; and
+- with `--reference`, that witness matches circom's (`parity=exact`).
+
+Without `--input` it prints `parity=unchecked`; run `signet validate` before
+pinning the result.
+
+A version-2 artifact loads only in consumers built with `curvy-witness`'s
+`signet-v2` feature (`signet-v2` in `curvy-prover`). Ship the consumer flag first
+or together with the artifacts.
+
+Shipped bound artifacts from the Curvy monorepo (`packages/zk-keys/v2/bound`),
+transcoded from their version-1 zstd -9 files:
+
+| artifact | shipped (v1, zstd -9) | v2 raw | v2, zstd -9 | v2, zstd -19 |
+|---|--:|--:|--:|--:|
+| `verifySingleWithdrawalBound_2_30` | 645,829 | 675,748 | 336,199 (−47.9%) | 292,586 (−54.7%) |
+| `verifySingleAggregationBound_2_3_30` | 857,976 | 915,405 | 436,201 (−49.2%) | 382,274 (−55.4%) |
+| `verifyPixAggregationBound_2_9_30` | 1,447,688 | 1,546,595 | 595,919 (−58.8%) | 503,987 (−65.2%) |
+| `verifyPendingNotesCommitmentBound_256_30` | 2,021,382 | 2,163,153 | 703,934 (−65.2%) | 514,878 (−74.5%) |
+| `verifyPixMultiOwnerWithdrawalBound_10_30` | 3,127,622 | 3,175,920 | 1,077,498 (−65.5%) | 820,932 (−73.8%) |
+
+All eleven bound artifacts transcode and load; the five above span the range.
+`verifySingleAggregationBound_2_3_30` transcoded with `--reference` against
+circom's witness for the monorepo's test input gives `parity=exact`. The -19
+frames declare an 8 MiB window, exactly the consumer's cap (zstd reads the body
+from a pipe and does not size the window to it), so they load today but sit on
+the boundary the section on [compression](#envelope-version-and-compression)
+warns about. The default stays at level 9.
 
 ## Editing `src/postcard.rs`
 
@@ -190,6 +242,9 @@ cargo test -p curvy-signet
   evaluator's assignment across both envelopes, both versions, and raw and
   compressed output. It loads every compressed artifact back through
   `WitnessGraph`, and holds the v2 truncation and corruption cases.
+- `tests/roundtrip.rs` also holds `transcode` to `export`: every source and
+  target version, both envelopes, a 70,000-node graph with multi-byte distances
+  and backward output deltas, and a zstd-wrapped source.
 - `tests/ir_builder_graph.rs` exports a graph the builder wrote and checks it
   against circom's witness for inputs on both sides of each select, offline.
 - `scripts/check.sh wasm --signet-v2` runs the v2 cases through the portable

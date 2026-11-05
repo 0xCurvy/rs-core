@@ -10,6 +10,7 @@
 //! ```text
 //! graph.bin  ──encode──►  SIGNET artifact + SHA-256
 //!            ──validate─►  assignment parity against a reference witness
+//! artifact   ──transcode─► the same graph in the other body version
 //! ```
 //!
 //! # Why it lives beside the evaluator
@@ -39,6 +40,7 @@
 pub mod encode;
 pub mod postcard;
 pub mod reseal;
+pub mod transcode;
 pub mod wtns;
 
 use curvy_witness::wire;
@@ -47,6 +49,7 @@ use thiserror::Error;
 pub use encode::encode;
 pub use postcard::{Graph, OperationSchema};
 pub use reseal::{reseal, to_raw};
+pub use transcode::transcode;
 
 /// Which magic the artifact carries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -259,6 +262,8 @@ pub enum SignetError {
     NotAnArtifact,
     #[error("could not decompress the artifact: {0}")]
     Decompress(String),
+    #[error("malformed artifact body: {0}")]
+    MalformedBody(String),
 }
 
 /// Decode a 64-character hex digest.
