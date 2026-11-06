@@ -75,6 +75,16 @@ or, where third-party embeds must keep working, `Document-Isolation-Policy: isol
 Call `initThreadPool(n)` after `init()`. Feature-detect with `crossOriginIsolated` and fall back to the
 single-threaded entry - the two expose the same API.
 
+Some Safari releases cannot run the threaded entries. A WebKit regression,
+[bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), reported in Safari 26.2 and fixed in WebKit in
+December 2025 (304204@main), breaks `memory.fill` and `memory.copy` on pages that another thread has
+just added to the shared memory: they trap with `RuntimeError: Out of bounds memory access`. Rayon
+workers grow the memory as they start, so `initThreadPool` usually rejects with that error, and a proof
+can still fail with it later. Every browser on iOS uses WebKit, so this applies to all of them there.
+Safari 27.0.1 on macOS and Safari 26.5 on iOS (Simulator) run both threaded entries; 26.3 and 26.4 were
+not checked. If `initThreadPool` rejects, or a threaded call throws that error, load the single-threaded
+entry and use it instead.
+
 ## Node
 
 `fetch` cannot read `file:` URLs, so pass the bytes explicitly:
