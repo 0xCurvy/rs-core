@@ -79,8 +79,6 @@ pub struct Limits {
     /// 16 ns natively: an input, a constant or a field operation costs 1, a
     /// comparison 3, a shift or bitwise operation 24, an integer division or
     /// modulus 48, an inverse or field division 256, and an exponentiation 768.
-    /// Without it, the node limit alone would let a pinned graph of two million
-    /// exponentiations evaluate for about 23 s.
     pub evaluation_cost: u64,
 }
 
@@ -88,12 +86,10 @@ impl Limits {
     /// Every profile published today, with headroom.
     ///
     /// The largest is pending(5,30) at 1,106,576 nodes and 11,978,841 bytes, so two
-    /// million nodes and 64 MiB clear it comfortably. Of the graphs shipped by
-    /// 2026-11, pending(10,30) costs the most to evaluate, 6.5 million units of
-    /// [`Self::evaluation_cost`]; 32 million bounds evaluation to under a second
-    /// natively. Version-2 artifacts are smaller than version 1 for the same
-    /// counts, so the byte limits, which apply to the decompressed artifact, fit
-    /// them with more room. At these maxima the evaluator accounts for roughly 280 MiB of structural memory before allocator overhead:
+    /// million nodes and 64 MiB clear it comfortably. 32 million units of
+    /// [`Self::evaluation_cost`] bound evaluation to under a second natively. At
+    /// these maxima the evaluator accounts for roughly 280 MiB of structural memory
+    /// before allocator overhead:
     /// 76 MiB nodes + 61 MiB node values + 15 MiB signal indices + 61 MiB assignment
     /// + 61 MiB inputs + 64 MiB graph + 16 MiB input JSON.
     pub const fn client() -> Self {
@@ -112,8 +108,7 @@ impl Limits {
     }
 
     /// Wide enough for the pending(50) commitment profile: 7,442,816 nodes, and
-    /// 80,771,417 bytes as version 1. At pending(10,30)'s 3.5 units a node it costs
-    /// about 26 million units of [`Self::evaluation_cost`].
+    /// 80,771,417 bytes as version 1.
     ///
     /// Only for processes that deliberately prove that circuit - a batch prover or
     /// the artifact pipeline. At these maxima the evaluator accounts for roughly
@@ -387,9 +382,9 @@ impl Operation {
         Ok(operation)
     }
 
-    /// Units of [`Limits::evaluation_cost`], from timing each operation on
-    /// canonical operands near the field's size. They only have to bound
-    /// evaluation time, not predict it.
+    /// Units of [`Limits::evaluation_cost`], roughly proportional to each
+    /// operation's time on canonical operands near the field's size. They bound
+    /// evaluation time; they do not predict it.
     pub(crate) const fn cost(self) -> u64 {
         match self {
             Self::Mul
@@ -831,9 +826,8 @@ impl CostMeter {
 }
 
 /// Input ranges may nest - a bus or struct input maps the whole and each of its
-/// fields, and 18 of the 21 graphs shipped by 2026-11 do - but no graph builder
-/// writes two ranges that partially overlap, so a mapping table with one is
-/// refused. `ranges` are `(signal_id, signal_size)`, already within the buffer.
+/// fields - but may not partially overlap. `ranges` are `(signal_id,
+/// signal_size)`, already within the buffer.
 pub(crate) fn check_input_ranges(ranges: &[(usize, usize)]) -> Result<(), WitnessError> {
     let mut order = reserved_vec("input mapping order", ranges.len())?;
     order.extend(0..ranges.len());

@@ -128,8 +128,8 @@ only level 1. `export` prints the compressor it used. Publication should pass
 `--compressor zstd`, which refuses the fallback before anything is written, and
 check the level.
 
-An export refuses a constant at or above the BN254 scalar modulus, naming the
-node, rather than writing an artifact the evaluator would refuse to load.
+`export` refuses a constant at or above the BN254 scalar modulus and names the
+node.
 
 The consumer rejects zstd windows above 8 MiB. Level 9 uses a 4 MiB window;
 level 19 reaches the 8 MiB cap exactly.
@@ -194,20 +194,17 @@ signet transcode <artifact> <sha256> <out.bin> \
 artifact and writes them in the other body version, version 2 by default. It
 authenticates the input against its digest first. The output keeps every header
 byte except the version field, so the source R1CS digest is carried over, and it
-keeps the envelope unless `--envelope` asks for another one. Records go through
-the encoder `export` uses, so a body transcoded to version 2 is byte for byte the
-body `export --version 2` writes from the postcard source.
+keeps the envelope unless `--envelope` asks for another one. A body transcoded
+to version 2 is byte for byte the body `export --version 2` writes from the
+postcard source.
 
 Before writing, it checks that:
 
-- the result transcodes back to the source body byte for byte. Version 1's
-  records are fixed width, so this compares every node, reference and output;
+- the result transcodes back to the source body byte for byte;
 - the result loads through `WitnessGraph` under the batch-prover limits, with the
   source's signal count and R1CS digest;
 - the source and the result compute the same witness, on `--input` or, without
-  it, on an all-zero input (`parity=zero-input`). The checks above use this
-  tool's own body parser in both directions, so a misreading they share would
-  pass them; evaluating goes through the evaluator's decoder instead; and
+  it, on an all-zero input (`parity=zero-input`); and
 - with `--reference`, that witness matches circom's (`parity=exact`).
 
 `parity=zero-input` and `parity=source` are not circom parity: run `signet
@@ -220,8 +217,7 @@ or together with the artifacts. `@0xcurvy/rs-core-wasm` accepts version 2 from
 0.1.5 and `@0xcurvy/rs-core-node` since 0.1.0-rc.7; the C library and Rust
 consumers need the feature.
 
-Shipped bound artifacts from the Curvy monorepo (`packages/zk-keys/v2/bound`),
-transcoded from their version-1 zstd -9 files:
+Sizes of bound artifacts transcoded from their version-1 zstd -9 files:
 
 | artifact | shipped (v1, zstd -9) | v2 raw | v2, zstd -9 | v2, zstd -19 |
 |---|--:|--:|--:|--:|
@@ -231,13 +227,8 @@ transcoded from their version-1 zstd -9 files:
 | `verifyPendingNotesCommitmentBound_256_30` | 2,021,382 | 2,163,153 | 703,934 (−65.2%) | 514,878 (−74.5%) |
 | `verifyPixMultiOwnerWithdrawalBound_10_30` | 3,127,622 | 3,175,920 | 1,077,498 (−65.5%) | 820,932 (−73.8%) |
 
-All eleven bound artifacts transcode and load; the five above span the range.
-`verifySingleAggregationBound_2_3_30` transcoded with `--reference` against
-circom's witness for the monorepo's test input gives `parity=exact`. The -19
-frames declare an 8 MiB window, exactly the consumer's cap (zstd reads the body
-from a pipe and does not size the window to it), so they load today but sit on
-the boundary the section on [compression](#envelope-version-and-compression)
-warns about. The default stays at level 9.
+At level 19 the frames declare an 8 MiB window, the consumer's cap (see
+[compression](#envelope-version-and-compression)).
 
 ## Editing `src/postcard.rs`
 

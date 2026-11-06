@@ -3,7 +3,7 @@
 //! [`reseal`](crate::reseal()) rewraps a body it copies verbatim. This module
 //! decodes the body instead - node records, output references, input table - and
 //! writes it again in the requested version. It needs no postcard `graph.bin`, no
-//! circom and no circuit tree, so it runs on a file fetched from a release page.
+//! circom and no circuit tree.
 //!
 //! What it preserves:
 //!
@@ -35,8 +35,7 @@ const INPUT_MAPPING_BYTES: usize = 8 + 4 + 4;
 ///
 /// The input must be uncompressed; see [`crate::to_raw`]. The envelope stays as
 /// it is. Transcoding to the version the artifact already has returns the input
-/// unchanged, which is a property the tests check rather than a shortcut taken
-/// here: the body is still decoded and written again.
+/// unchanged; the body is still decoded and written again.
 ///
 /// This checks structure, not meaning: every reference must point at a prior
 /// node, every operation tag must be one the evaluator knows, and nothing may

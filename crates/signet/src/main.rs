@@ -447,8 +447,8 @@ fn print_client_limits(client: &Result<(), String>) {
 /// The digest block every writing subcommand prints.
 ///
 /// The evaluator authenticates whatever bytes it is handed, so a compressed
-/// artifact pins its compressed digest. The uncompressed pair is printed too
-/// because the publication record carries both.
+/// artifact pins its compressed digest. The uncompressed pair is printed too,
+/// for the publication record.
 fn print_digests(
     bytes: &[u8],
     artifact: &[u8],

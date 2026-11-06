@@ -86,8 +86,7 @@ signet-v2 = ["curvy-witness/signet-v2"]
 sage = ["curvy-witness/sage"]
 zkey-manifest = []
 # Read the compact zkey encoding (`compact_zkey`): x-only points, a columnar
-# coefficient section and a zstd frame. Opt-in because accepting a new artifact
-# format must be deliberate, and decoding costs a square root per point.
+# coefficient section and a zstd frame. Decoding costs a square root per point.
 compact-zkey = ["dep:ruzstd"]
 # Opt-in witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
 # simd128 only; a no-op elsewhere). With `parallel` each transform runs in

@@ -59,12 +59,9 @@ scripts/check.sh simd --engine chromium --mode threaded
 
 Threaded builds need a browser. Playwright WebKit runs both modes
 (`--engine webkit`, after `npx --prefix tools/browser playwright install
-webkit`). Playwright 1.57's WebKit 26.0 (revision 2227) traps in
-`initThreadPool` with "Out of bounds memory access": it predates the fix for
-[WebKit bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), in which
-`memory.fill` and `memory.copy` keep the size an instance last saw after
-another thread grows the shared memory. Playwright 1.64.1's WebKit 27.2
-(revision 2370) has the fix.
+webkit`); its WebKit must include the fix for
+[WebKit bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), as
+Playwright 1.64.1's does.
 
 ## Manual checks and measurements
 

@@ -37,9 +37,8 @@ the size and costs about 3 s more to load single-threaded for a 40 MB key.
 The witness graph is a SIGNET artifact (`SIGNET01` or `CVYWIT01`) at body version 1 or 2, raw or
 zstd-compressed; `graphSha256` is the SHA-256 of the bytes passed. Version 2
 ([`signet transcode`](https://github.com/0xCurvy/rs-core/blob/main/crates/signet/README.md#re-encoding-the-body-version-with-no-postcard-source))
-computes the same witness as version 1 and, at zstd -9, is 48-66% smaller for the shipped graphs. Both entries
-accept both versions from 0.1.5; earlier releases refuse version 2 with "unsupported witness graph
-format version 2".
+computes the same witness as version 1 in a smaller file. Version 2 needs 0.1.5 or later; earlier
+releases refuse it with "unsupported witness graph format version 2".
 
 ## Bundler setup
 
@@ -75,15 +74,11 @@ or, where third-party embeds must keep working, `Document-Isolation-Policy: isol
 Call `initThreadPool(n)` after `init()`. Feature-detect with `crossOriginIsolated` and fall back to the
 single-threaded entry - the two expose the same API.
 
-Some Safari releases cannot run the threaded entries. A WebKit regression,
-[bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), reported in Safari 26.2 and fixed in WebKit in
-December 2025 (304204@main), breaks `memory.fill` and `memory.copy` on pages that another thread has
-just added to the shared memory: they trap with `RuntimeError: Out of bounds memory access`. Rayon
-workers grow the memory as they start, so `initThreadPool` usually rejects with that error, and a proof
-can still fail with it later. Every browser on iOS uses WebKit, so this applies to all of them there.
-Safari 27.0.1 on macOS and Safari 26.5 on iOS (Simulator) run both threaded entries; 26.3 and 26.4 were
-not checked. If `initThreadPool` rejects, or a threaded call throws that error, load the single-threaded
-entry and use it instead.
+The threaded entries do not run on Safari releases with
+[WebKit bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), such as Safari 26.2, or in any iOS
+browser built on such a release: `initThreadPool` rejects, or a later threaded call throws,
+`RuntimeError: Out of bounds memory access`. Safari 26.5 and 27.0.1 run them. When that error occurs,
+use the single-threaded entry.
 
 ## Node
 

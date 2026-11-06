@@ -55,14 +55,21 @@ should run the SIGNET v1/v2 parity matrix over every graph it accepts.
 
 `Limits::client()` bounds what a pinned artifact can make a client do: its bytes,
 compressed and not, its zstd window, its node, signal and input counts, and its
-evaluation cost, summed over its nodes while they are decoded so that an
-expensive graph fails before anything is evaluated. One unit is roughly a field
-addition (about 16 ns natively); a comparison costs 3, a shift or bitwise
-operation 24, an integer division 48, an inverse or field division 256 and an
-exponentiation 768. The client budget is 32 million units, about five times what
-the costliest shipped graph, pending(10,30), needs. `Limits::batch_prover()`
-widens the node, byte and cost limits for the batch-50 pending commitment, and
-only hosts that prove it should use them.
+evaluation cost. The cost is summed over the nodes while they are decoded, and a
+graph over budget fails before anything is evaluated:
+
+| node | units |
+|---|--:|
+| input, constant, field operation | 1 |
+| comparison | 3 |
+| shift or bitwise operation | 24 |
+| integer division or modulus | 48 |
+| inverse or field division | 256 |
+| exponentiation | 768 |
+
+One unit is roughly a field addition, about 16 ns natively. The client budget is
+32 million units. `Limits::batch_prover()` widens the node, byte and cost limits
+for the batch-50 pending commitment; only hosts that prove it should use them.
 
 Input ranges may nest, as a bus or struct input's fields sit inside the whole,
 but a mapping table in which two ranges partially overlap is refused.

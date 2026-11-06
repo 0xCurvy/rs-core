@@ -443,9 +443,8 @@ jobs:
   # alongside in Chromium and Firefox; they must refuse both.
   wasm-browser:
     name: Browser WASM proof (${{ matrix.name }})
-    # ubuntu-latest is now 26.04, on which Playwright 1.57 refused to install
-    # its browsers. 1.64.1 (tools/browser/package.json) lists 26.04 builds, but
-    # the browser proofs have only run on 24.04 so far; move with a run on 26.04.
+    # The image the browser proofs run on; keep it one Playwright
+    # (tools/browser/package.json) installs its browsers on.
     runs-on: ubuntu-24.04
     # SIMD entries build twice (self-test and release-shaped packages).
     timeout-minutes: ${{ matrix.simd && 45 || 30 }}
@@ -459,10 +458,8 @@ jobs:
             build: scripts/build.sh npm-web-threads
             mode: threaded
             check-options: --signet-v2 --compact-zkey
-            # Every iOS browser and Safari run WebKit. Playwright's WebKit must
-            # include the fix for WebKit bug 303387 (shared-memory bulk
-            # operations after another thread grows the memory), as 1.64.1's
-            # does; 1.57's traps in initThreadPool.
+            # Playwright's WebKit must include the fix for WebKit bug 303387,
+            # as 1.64.1's does.
             engines: chromium,firefox,webkit
             artifact: wasm-web-threads
             artifact-dir: pkg-web-threads

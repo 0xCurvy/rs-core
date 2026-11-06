@@ -88,8 +88,8 @@ jobs:
           toolchain: 1.99.0
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      # The binaryen release scripts/lib/build-wasm.sh pins; the npm-web targets
-      # require it, so the published modules are optimized as CI's proved ones are.
+      # The binaryen release scripts/lib/build-wasm.sh pins, which the npm-web
+      # targets require.
       - name: Install binaryen
         working-directory: ${{ runner.temp }}
         run: |
@@ -121,8 +121,8 @@ jobs:
           components: rust-src
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      # The binaryen release scripts/lib/build-wasm.sh pins; the npm-web targets
-      # require it, so the published modules are optimized as CI's proved ones are.
+      # The binaryen release scripts/lib/build-wasm.sh pins, which the npm-web
+      # targets require.
       - name: Install binaryen
         working-directory: ${{ runner.temp }}
         run: |

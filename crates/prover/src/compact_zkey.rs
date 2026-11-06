@@ -28,10 +28,9 @@
 //!      …         one payload per section, in the same order
 //! ```
 //!
-//! The header sits outside the frame so that a tool can recognise the file and
-//! read which zkey it decodes to without decompressing anything. zstd is part of
-//! the format rather than a wrapper around it: the body is not a file of its own,
-//! so the file carries no `.zst` suffix and `zstd -d` does not open it.
+//! The header sits outside the frame and is readable without decompressing
+//! anything. The frame is part of the format, not a file of its own: the file
+//! has no `.zst` suffix and `zstd -d` does not open it.
 //!
 //! | encoding | payload |
 //! |---|---|
@@ -226,8 +225,8 @@ pub struct CompactZkeyHeader {
 /// Encode a snarkjs zkey as a compact zkey file.
 ///
 /// `compress` wraps the body in one zstd frame; its window must not exceed
-/// [`MAX_WINDOW_BYTES`]. Release tooling passes the system `zstd`, because
-/// ruzstd only encodes at level 1. The zkey must be exactly a header and its
+/// [`MAX_WINDOW_BYTES`]. ruzstd encodes only at level 1; release tooling passes
+/// the system `zstd`. The zkey must be exactly a header and its
 /// sections, with every point section holding canonical curve points; anything
 /// else is refused rather than encoded lossily. The file is decoded with
 /// [`inflate`] before it is returned and must reproduce `zkey` byte for byte.
@@ -994,9 +993,7 @@ mod tests {
     }
 
     /// A section count is refused before it sizes anything, also by `describe`,
-    /// which reads the table with no length limit. A count of `u32::MAX` once
-    /// made it reserve 64 GiB for the table and abort (found by the
-    /// `compact_zkey` fuzz target).
+    /// which reads the table with no length limit.
     #[test]
     fn the_section_count_cannot_size_an_allocation() {
         let file = compact();

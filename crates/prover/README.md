@@ -143,8 +143,7 @@ sign bit in arkworks' compressed form, section 4 is split into columns, and the
 result is one zstd frame behind a 48-byte header: the magic `CVYZKC01`, then the
 SHA-256 and length of the zkey the file decodes to, readable without
 decompressing. Files use the `.czkey` extension; they are not `.zst` files, and
-`zstd -d` does not open them. Most of a zkey is uniformly random coordinates that
-no compressor can shrink; dropping `y` halves them.
+`zstd -d` does not open them.
 
 | zkey | zkey bytes | compact, zstd -19 | compact, zstd -9 |
 |---|--:|--:|--:|
@@ -154,9 +153,8 @@ no compressor can shrink; dropping `y` halves them.
 `Prover::from_compact_zkey_bytes`, `Prover::from_compact_zkey_reader` and
 `ResidentProver::from_compact_artifacts` take the compact file's pin and check it
 before zstd or the decoder see any byte. The decoded zkey must then hash to the
-original zkey's digest, which the compact body records, before the raw parser
-runs. The key that loads is byte for byte the one the original file loads, so
-proving is unchanged; only loading costs more.
+original zkey's digest, which the compact header records, before the raw parser
+runs. The key that loads is byte for byte the one the original file loads.
 
 Decoding computes a square root per point. Measured on an Apple M4 Pro
 (medians):
@@ -168,20 +166,11 @@ Decoding computes a square root per point. Measured on an Apple M4 Pro
 | 2_3_30, serial | 14 ms | 578 ms | 535 ms | 530 ms |
 | 2_3_30, `parallel`, 14 threads | 16 ms | 84 ms | 81 ms | 79 ms |
 
-Serial, the 2_9_30 load splits into 712 ms of G1 square roots (3.3 µs a
-point), 235 ms of G2 (6.7 µs), 14 ms hashing the decoded zkey and 6 ms for the
-coefficient columns. The roots are computed with arkworks' field arithmetic but
-not its generic `sqrt`: a sliding-window exponentiation for `Fq`, and two
-exponentiations instead of three plus an inversion for `Fq2`. With arkworks'
-`sqrt`, the same loads took 1,621, 203-244, 939-1,001 and 117-122 ms. No
-batching trick exists for square roots, so each point keeps its own
-exponentiation.
-
 The zstd level does not change load time. Level 19 is about 2% smaller than
-level 9, encodes more slowly and declares an 8 MiB window, half of
-`compact_zkey::MAX_WINDOW_BYTES`; the example defaults to level 9.
+level 9 and declares an 8 MiB window, half of `compact_zkey::MAX_WINDOW_BYTES`;
+the example defaults to level 9.
 
-A host that loads the same key repeatedly can pay the decoding once: expand the
+A host that loads the same key repeatedly can decode it once: expand the
 compact file with `compact_zkey::inflate` (or the example's `decode`), keep the
 zkey, and load it with `Prover::from_zkey_reader` under the original zkey's
 pin, which bytes 8 to 40 of the compact file hold.
