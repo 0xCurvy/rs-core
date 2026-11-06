@@ -9,6 +9,12 @@
 - Upstream license: MIT OR Apache-2.0
 
 `multiplier.vk.json` is the snarkjs verification-key export of that fixture.
+`multiplier.czkey` is that zkey as a compact zkey, written by
+`compact_zkey encode ... --level 19` with the system `zstd`; it decodes back to
+`multiplier.zkey`.
+
+- SHA-256: `d3589b5b0ce19a00e99354f8bbc73524263fa110246fe1ae966d8ebcd5e98bc2`
+
 `noncanonical-g2.zkey` is a malformed zkey that must be rejected before any
 unchecked field arithmetic. The fuzz corpus stores the same input with the
 `prover_formats` target's one-byte format selector.

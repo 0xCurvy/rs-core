@@ -10,6 +10,7 @@ not published.
                                          matches the proving key's R1CS
 graph.bin ── signet export ────────────► artifact + SHA-256
 artifact  ── signet validate ──────────► parity against a reference witness
+artifact  ── signet transcode ─────────► the same graph in the other body version
 ```
 
 `scripts/build-graph.sh` runs the circuit half. It needs cargo, a circuits tree,
@@ -89,10 +90,12 @@ cargo run -p curvy-signet --release -- validate \
 
 `validate` compares every signal against the reference witness. It loads through
 `WitnessGraph` with the batch-prover limits: the same structural checks as a
-client, with larger size ceilings.
+client, with larger size and evaluation-cost ceilings.
 
-`signet inspect <artifact> <sha256>` prints the signal count and the source R1CS
-digest.
+`signet inspect <artifact> <sha256>` prints the signal count, the source R1CS
+digest and `client_limits=ok` or `client_limits=exceeded`: whether a client with
+the default limits loads the artifact too. `export`, `reseal` and `transcode`
+print the same line for what they write.
 
 ## Envelope, version and compression
 
@@ -109,6 +112,8 @@ Defaults are `--envelope signet --version 1 --compress zstd`, which a default
 | `--compress none` | raw bytes |
 | `--compress zstd` | a zstd frame around them, level 9 by default |
 | `--level N` | zstd level in `1..=19`; only meaningful with `--compress zstd` |
+| `--compressor zstd` | refuse to write a frame from the fallback encoder |
+| `--compressor any` | fall back to ruzstd when the system `zstd` is missing or fails (default) |
 
 Sizes for a representative 628,124-node graph:
 
@@ -119,8 +124,12 @@ Sizes for a representative 628,124-node graph:
 | v2, zstd -9 | 871,833 |
 
 Compression uses the system `zstd` when available; the fallback encoder supports
-only level 1. `export` prints the compressor it used; publication automation
-should assert the expected compressor and level.
+only level 1. `export` prints the compressor it used. Publication should pass
+`--compressor zstd`, which refuses the fallback before anything is written, and
+check the level.
+
+`export` refuses a constant at or above the BN254 scalar modulus and names the
+node.
 
 The consumer rejects zstd windows above 8 MiB. Level 9 uses a 4 MiB window;
 level 19 reaches the 8 MiB cap exactly.
@@ -160,7 +169,7 @@ run the matrix over every graph the deployment accepts.
 
 ```bash
 signet reseal <artifact> <sha256> <out.bin> \
-  [--envelope cvywit|signet] [--compress none|zstd] [--level N]
+  [--envelope cvywit|signet] [--compress none|zstd] [--level N] [--compressor zstd|any]
 ```
 
 `reseal` changes the envelope and compression of an artifact and copies the body
@@ -170,8 +179,56 @@ nothing unless the result loads with the same signal count and source R1CS
 digest.
 
 It cannot change what a graph computes: it will not fix an export made with the
-wrong `--ops`, and it will not convert version 1 to version 2. Both need the
+wrong `--ops`, which needs the postcard source. To convert version 1 to version 2,
+use `transcode`.
+
+## Re-encoding the body version with no postcard source
+
+```bash
+signet transcode <artifact> <sha256> <out.bin> \
+  [--version 2|1] [--envelope cvywit|signet] [--compress none|zstd] [--level N] \
+  [--compressor zstd|any] [--input input.json [--reference reference.wtns]]
+```
+
+`transcode` decodes the node records, output references and input table of an
+artifact and writes them in the other body version, version 2 by default. It
+authenticates the input against its digest first. The output keeps every header
+byte except the version field, so the source R1CS digest is carried over, and it
+keeps the envelope unless `--envelope` asks for another one. A body transcoded
+to version 2 is byte for byte the body `export --version 2` writes from the
 postcard source.
+
+Before writing, it checks that:
+
+- the result transcodes back to the source body byte for byte;
+- the result loads through `WitnessGraph` under the batch-prover limits, with the
+  source's signal count and R1CS digest;
+- the source and the result compute the same witness, on `--input` or, without
+  it, on an all-zero input (`parity=zero-input`); and
+- with `--reference`, that witness matches circom's (`parity=exact`).
+
+`parity=zero-input` and `parity=source` are not circom parity: run `signet
+validate` before pinning the result. A failed write removes the partial output
+file.
+
+A version-2 artifact loads only in consumers built with `curvy-witness`'s
+`signet-v2` feature (`signet-v2` in `curvy-prover`). Ship the consumer flag first
+or together with the artifacts. `@0xcurvy/rs-core-wasm` accepts version 2 from
+0.1.5 and `@0xcurvy/rs-core-node` since 0.1.0-rc.7; the C library and Rust
+consumers need the feature.
+
+Sizes of bound artifacts transcoded from their version-1 zstd -9 files:
+
+| artifact | shipped (v1, zstd -9) | v2 raw | v2, zstd -9 | v2, zstd -19 |
+|---|--:|--:|--:|--:|
+| `verifySingleWithdrawalBound_2_30` | 645,829 | 675,748 | 336,199 (−47.9%) | 292,586 (−54.7%) |
+| `verifySingleAggregationBound_2_3_30` | 857,976 | 915,405 | 436,201 (−49.2%) | 382,274 (−55.4%) |
+| `verifyPixAggregationBound_2_9_30` | 1,447,688 | 1,546,595 | 595,919 (−58.8%) | 503,987 (−65.2%) |
+| `verifyPendingNotesCommitmentBound_256_30` | 2,021,382 | 2,163,153 | 703,934 (−65.2%) | 514,878 (−74.5%) |
+| `verifyPixMultiOwnerWithdrawalBound_10_30` | 3,127,622 | 3,175,920 | 1,077,498 (−65.5%) | 820,932 (−73.8%) |
+
+At level 19 the frames declare an 8 MiB window, the consumer's cap (see
+[compression](#envelope-version-and-compression)).
 
 ## Editing `src/postcard.rs`
 
@@ -190,10 +247,27 @@ cargo test -p curvy-signet
   evaluator's assignment across both envelopes, both versions, and raw and
   compressed output. It loads every compressed artifact back through
   `WitnessGraph`, and holds the v2 truncation and corruption cases.
+- `tests/roundtrip.rs` also holds `transcode` to `export`: every source and
+  target version, both envelopes, a 70,000-node graph with multi-byte distances
+  and backward output deltas, and a zstd-wrapped source.
+- `tests/v2_parity.rs` generates graphs over all 23 operations, multi-value
+  inputs and constants at the field's edges, and requires version 2 to transcode
+  to and from version 1 byte for byte and to evaluate exactly like it, raw and
+  zstd-compressed, in both evaluators. One test checks every encoding and
+  evaluator path, including a reused workspace and a compiled SAGE program,
+  against values computed independently with `num-bigint`. Another puts backward
+  references and output deltas at every varint length boundary, up to four-byte
+  distances in a 2.2-million-node graph.
 - `tests/ir_builder_graph.rs` exports a graph the builder wrote and checks it
   against circom's witness for inputs on both sides of each select, offline.
 - `scripts/check.sh wasm --signet-v2` runs the v2 cases through the portable
-  WASM binding.
+  WASM binding, and proves the multiplier fixture from its v2 graph, raw and
+  zstd-compressed, through `WasmResidentProver`. `scripts/check.sh browser
+  --signet-v2` does the same in Chromium and Firefox, single-threaded and on
+  Rayon workers, and `scripts/check.sh npm` from the packed npm tarball.
+- The `signet_parity` and `signet_transcode` fuzz targets (`fuzz/README.md`)
+  compare the two versions on generated graphs, and the transcoder with the
+  decoder on mutated artifacts.
 
 End-to-end check of the whole pipeline on a throwaway circuit, including parity
 against circom's witness (needs circom 2.2.3, node, and the builder or the pin):

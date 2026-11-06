@@ -17,6 +17,9 @@ permissions:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  # The binaryen release scripts/lib/build-wasm.sh pins (as in ci.yml).
+  BINARYEN_VERSION: "133"
+  BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
 
 jobs:
   # Publish only a commit that CI (ci.yml) fully passed on main. CI runs for
@@ -85,7 +88,17 @@ jobs:
           toolchain: 1.99.0
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - run: scripts/build.sh wasm-web
+      # The binaryen release scripts/lib/build-wasm.sh pins, which the npm-web
+      # targets require.
+      - name: Install binaryen
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSLO "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${archive}"
+          echo "${BINARYEN_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - run: scripts/build.sh npm-web
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wasm-web
@@ -108,7 +121,17 @@ jobs:
           components: rust-src
           target: wasm32-unknown-unknown
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
-      - run: scripts/build.sh wasm-web-threads
+      # The binaryen release scripts/lib/build-wasm.sh pins, which the npm-web
+      # targets require.
+      - name: Install binaryen
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+          curl -fsSLO "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/${archive}"
+          echo "${BINARYEN_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+      - run: scripts/build.sh npm-web-threads
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wasm-web-threads

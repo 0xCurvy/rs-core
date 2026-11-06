@@ -65,6 +65,8 @@
 //! matrix type.
 
 pub mod artifacts;
+#[cfg(feature = "compact-zkey")]
+pub mod compact_zkey;
 #[doc(hidden)]
 pub mod phase_timing;
 #[cfg(all(feature = "bench", feature = "parallel"))]
@@ -235,6 +237,51 @@ impl Prover {
                 authenticated_reader::AuthenticatedReader::new(reader, expected_sha256)?;
             Self::from_authenticated_zkey_reader(&mut authenticated)
         }
+    }
+
+    /// Authenticate, decode and parse a compact zkey (see [`compact_zkey`]).
+    ///
+    /// `expected_sha256` pins the compact file itself. It is checked before zstd
+    /// or the compact decoder see any byte, as for a compressed witness graph.
+    /// The decoded zkey must then hash to the digest the compact file's header
+    /// records - the original zkey's - before the raw parser runs, so this loads exactly
+    /// the key [`Self::from_zkey_bytes`] would load from the original file.
+    ///
+    /// Decoding computes one square root per curve point, which is most of the
+    /// load time. The decoded zkey is held in memory while it is parsed.
+    #[cfg(feature = "compact-zkey")]
+    pub fn from_compact_zkey_bytes(
+        compact: &[u8],
+        expected_sha256: &str,
+    ) -> Result<Self, ProverError> {
+        phase!("load.sha256", verify_sha256(compact, expected_sha256))?;
+        let zkey = phase!(
+            "load.zkey.inflate",
+            compact_zkey::inflate(compact, compact_zkey::DEFAULT_MAX_ZKEY_BYTES)
+        )
+        .map_err(compact_zkey_error)?;
+        Self::from_authenticated_zkey_reader(&mut Cursor::new(zkey.as_slice()))
+    }
+
+    /// Seekable-reader counterpart to [`Self::from_compact_zkey_bytes`].
+    ///
+    /// The compact file is authenticated the way [`Self::from_zkey_reader`]
+    /// authenticates a zkey: hashed to EOF, then read back through chunks
+    /// checked against that pass. It is never held in memory as a whole; the
+    /// decoded zkey is.
+    #[cfg(feature = "compact-zkey")]
+    pub fn from_compact_zkey_reader<R: Read + Seek>(
+        reader: &mut R,
+        expected_sha256: &str,
+    ) -> Result<Self, ProverError> {
+        let mut authenticated =
+            authenticated_reader::AuthenticatedReader::new(reader, expected_sha256)?;
+        let zkey = phase!(
+            "load.zkey.inflate",
+            compact_zkey::inflate(&mut authenticated, compact_zkey::DEFAULT_MAX_ZKEY_BYTES)
+        )
+        .map_err(compact_zkey_error)?;
+        Self::from_authenticated_zkey_reader(&mut Cursor::new(zkey.as_slice()))
     }
 
     fn from_authenticated_zkey_reader<R: Read + Seek>(reader: &mut R) -> Result<Self, ProverError> {
@@ -547,6 +594,45 @@ impl ResidentProver {
         Self::with_graph(prover, witness_graph)
     }
 
+    /// [`Self::from_artifacts`] with a compact zkey; see
+    /// [`Prover::from_compact_zkey_bytes`]. `expected_compact_zkey_sha256` pins
+    /// the compact file.
+    #[cfg(feature = "compact-zkey")]
+    pub fn from_compact_artifacts(
+        compact_zkey: &[u8],
+        expected_compact_zkey_sha256: &str,
+        witness_graph: &[u8],
+        expected_graph_sha256: &str,
+    ) -> Result<Self, ProverError> {
+        Self::from_compact_artifacts_with_limits(
+            compact_zkey,
+            expected_compact_zkey_sha256,
+            witness_graph,
+            expected_graph_sha256,
+            curvy_witness::Limits::client(),
+        )
+    }
+
+    /// [`Self::from_compact_artifacts`] with an explicit witness-graph budget.
+    #[cfg(feature = "compact-zkey")]
+    pub fn from_compact_artifacts_with_limits(
+        compact_zkey: &[u8],
+        expected_compact_zkey_sha256: &str,
+        witness_graph: &[u8],
+        expected_graph_sha256: &str,
+        limits: curvy_witness::Limits,
+    ) -> Result<Self, ProverError> {
+        let prover = phase!(
+            "load.zkey",
+            Prover::from_compact_zkey_bytes(compact_zkey, expected_compact_zkey_sha256)
+        )?;
+        let witness_graph = phase!(
+            "load.graph",
+            WitnessGraph::from_bytes_with_limits(witness_graph, expected_graph_sha256, limits)
+        )?;
+        Self::with_graph(prover, witness_graph)
+    }
+
     /// Construct from a seekable zkey source and an in-memory witness graph.
     /// This is the native file-backed counterpart to [`Self::from_artifacts`].
     pub fn from_artifacts_reader<R: Read + Seek>(
@@ -660,6 +746,17 @@ impl ResidentProver {
 pub struct ProofBundle {
     pub proof_json: String,
     pub public_signals_json: String,
+}
+
+/// Compact-zkey failures surface as zkey I/O errors, so `ProverError` keeps its
+/// variants with or without the feature. The typed error is the `io::Error`'s
+/// inner error.
+#[cfg(feature = "compact-zkey")]
+fn compact_zkey_error(error: compact_zkey::CompactZkeyError) -> ProverError {
+    match error {
+        compact_zkey::CompactZkeyError::Io(error) => ProverError::ZkeyIo(error),
+        error => ProverError::ZkeyIo(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    }
 }
 
 fn verify_sha256(bytes: &[u8], expected_sha256: &str) -> Result<(), ProverError> {

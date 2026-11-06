@@ -8,21 +8,27 @@
 #   js             unit tests of the SPARROW JS adapter and the npm packager
 #   ffi            curvy.h is current (cbindgen 0.29.4), the C ABI covers the WASM
 #                  API, and both agree on the golden vectors  [wasm-nodejs]
-#   wasm [--signet-v2]
+#   wasm [--signet-v2] [--compact-zkey]
 #                  the Node.js modules match the golden vectors, prove a Groth16
 #                  proof, and accept SIGNET v2 graphs exactly when built with
-#                  --signet-v2 or --sparrow (say so with --signet-v2)  [wasm-nodejs]
+#                  --signet-v2 or --sparrow (say so with --signet-v2), and compact
+#                  zkeys exactly when built with --compact-zkey (say so with
+#                  --compact-zkey)  [wasm-nodejs]
 #   simd-codegen   the SIMD kernels compiled to extmul, not emulated i64x2.mul
 #                  [any build with --simd]
 #   simd [options] SIMD differential self-tests, stress rounds and kernel
 #                  benchmark; options go to scripts/lib/simd-selftest.mjs
 #                  [wasm-nodejs --sparrow --simd --simd-selftest, or the web
 #                  equivalent with --engine]
-#   npm            pack @0xcurvy/rs-core-wasm, install it and prove with it
-#                  [wasm-web and wasm-web-threads]
-#   browser [threaded|portable]
-#                  proofs in Chromium and Firefox  [wasm-web and wasm-web-threads;
-#                  npm ci --prefix tools/browser; npx playwright install]
+#   npm            pack @0xcurvy/rs-core-wasm, install it and prove with it,
+#                  including from SIGNET v2 graphs and a compact zkey
+#                  [npm-web and npm-web-threads]
+#   browser [threaded|portable] [--signet-v2] [--compact-zkey]
+#                  proofs in Chromium and Firefox (CURVY_BROWSER_ENGINES picks
+#                  others, e.g. chromium,firefox,webkit); the options work as for
+#                  wasm, and npm-web builds have both  [wasm-web and wasm-web-threads,
+#                  or npm-web and npm-web-threads; npm ci --prefix tools/browser;
+#                  npx playwright install]
 #   graph          the witness-graph pipeline end to end (circom 2.2.3, node)
 #   artifacts      the release bundle validator  [npm ci --prefix tools/artifacts]
 #   all            kernels, js, ffi, wasm, npm, graph and artifacts, skipping the
@@ -72,14 +78,17 @@ check() {
       ;;
     wasm)
       have_file crates/prover/pkg-node/curvy_prover.js "scripts/build.sh wasm-nodejs" || return
-      local signet_v2=(--expect-v2-disabled)
-      case "${1:-}" in
-        --signet-v2) signet_v2=() ;;
-        "") ;;
-        *) echo "unknown option for wasm: $1" >&2; return 2 ;;
-      esac
+      local signet_v2=(--expect-v2-disabled) proof_options=()
+      local option
+      for option in "$@"; do
+        case "$option" in
+          --signet-v2) signet_v2=(); proof_options+=(--signet-v2) ;;
+          --compact-zkey) proof_options+=(--compact-zkey) ;;
+          *) echo "unknown option for wasm: $option" >&2; return 2 ;;
+        esac
+      done
       node crates/wasm/smoke-test.cjs
-      node tools/browser/node-proof-check.mjs
+      node tools/browser/node-proof-check.mjs "${proof_options[@]+"${proof_options[@]}"}"
       node scripts/lib/signet-v2.cjs "${signet_v2[@]+"${signet_v2[@]}"}"
       ;;
     simd-codegen)
@@ -91,7 +100,7 @@ check() {
       ;;
     npm)
       for dir in crates/wasm/pkg-web crates/prover/pkg-web crates/wasm/pkg-web-threads crates/prover/pkg-web-threads; do
-        have_file "$dir" "scripts/build.sh wasm-web and wasm-web-threads" || return
+        have_file "$dir" "scripts/build.sh npm-web and npm-web-threads" || return
       done
       local version install_dir status=0
       node scripts/lib/build-npm.mjs --pack
@@ -118,8 +127,10 @@ check() {
     artifacts)
       have_tool python3 "python3" || return
       have_file tools/artifacts/node_modules "npm ci --prefix tools/artifacts" || return
-      # Both suites drive the validator example.
+      # Both suites drive the validator example; the pipeline suite also drives
+      # the compact zkey encoder.
       cargo build --locked -p curvy-prover --example artifact_manifest_check --features sage
+      cargo build --locked -p curvy-prover --example compact_zkey --features compact-zkey
       python3 tools/artifacts/test_release.py
       python3 tools/artifacts/test_pipeline.py
       ;;

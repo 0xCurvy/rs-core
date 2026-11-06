@@ -56,6 +56,8 @@ jobs:
           tool: cbindgen@0.29.4
       - run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - run: cargo test --locked -p curvy-ffi
+      # The C library's optional SIGNET v2 decoder, which the default build refuses.
+      - run: cargo test --locked -p curvy-ffi --features signet-v2
       - run: scripts/build.sh wasm-nodejs
       - run: scripts/check.sh ffi
 
@@ -253,6 +255,7 @@ jobs:
               # linted above. Lint the shipped and opt-in combinations directly.
               cargo clippy -p curvy-prover --all-targets --features sparrow --locked -- -D warnings
               cargo clippy -p curvy-prover --all-targets --features scratch --locked -- -D warnings
+              cargo clippy -p curvy-prover --all-targets --features compact-zkey --locked -- -D warnings
               cargo clippy -p curvy-prover --all-targets --no-default-features --locked -- -D warnings
               cargo clippy -p curvy-core --all-targets --no-default-features --locked -- -D warnings
               cargo clippy -p curvy-core --all-targets --features parallel --locked -- -D warnings
@@ -301,6 +304,10 @@ jobs:
               # whose two-pass CSR parser makes the walk buffer section 4.
               cargo test -p curvy-prover --features zkey-single-pass --all-targets --locked
               cargo test -p curvy-prover --features zkey-single-pass,compact-matrix --all-targets --locked
+              # `compact-zkey` decodes points serially, or in parallel batches with
+              # `parallel`; run both arms.
+              cargo test -p curvy-prover --features compact-zkey --all-targets --locked
+              cargo test -p curvy-prover --features compact-zkey,parallel --all-targets --locked
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
@@ -355,13 +362,14 @@ jobs:
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmResidentProver !== "function" || typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
       # Golden vectors, a real self-verified Groth16 proof (pinned fixture,
       # publicSignals ["33"], VK digest equal to the snarkjs export, a corrupted
-      # key refused) and SIGNET v2 refused, then accepted by the v2 builds.
+      # key refused) and SIGNET v2 and compact zkeys refused, then accepted by
+      # the builds that enable them.
       - run: scripts/check.sh wasm
-      - run: scripts/build.sh wasm-nodejs --signet-v2
+      - run: scripts/build.sh wasm-nodejs --signet-v2 --compact-zkey
       - name: Check standalone SIGNET v2 bindings
         run: |
           node -e 'const wasm = require("./crates/prover/pkg-node/curvy_prover.js"); if (typeof wasm.WasmWitnessGraph !== "function" || wasm.WasmStreamingProver !== undefined || wasm.sageCacheVersion !== undefined) process.exit(1)'
-      - run: scripts/check.sh wasm --signet-v2
+      - run: scripts/check.sh wasm --signet-v2 --compact-zkey
       - run: scripts/build.sh wasm-nodejs --sparrow
       - name: Check opt-in SPARROW and SAGE bindings
         run: |
@@ -428,12 +436,16 @@ jobs:
       - run: scripts/check.sh wasm --signet-v2
 
   # Build every browser configuration that ships in @0xcurvy/rs-core-wasm with
-  # the exact release command (release.yml.disabled, scripts/build.sh npm) and
-  # prove with it in Chromium and Firefox. compact-matrix and SIMD are opt-in
-  # variants kept proven alongside.
+  # the exact release command (release.yml.disabled and scripts/build.sh npm both
+  # use npm-web and npm-web-threads, with SIGNET v2 and compact zkeys) and prove
+  # with it in Chromium, Firefox and WebKit, from a SIGNET v2 graph and a compact
+  # zkey as well. compact-matrix and SIMD are opt-in variants kept proven
+  # alongside in Chromium and Firefox; they must refuse both.
   wasm-browser:
     name: Browser WASM proof (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    # The image the browser proofs run on; keep it one Playwright
+    # (tools/browser/package.json) installs its browsers on.
+    runs-on: ubuntu-24.04
     # SIMD entries build twice (self-test and release-shaped packages).
     timeout-minutes: ${{ matrix.simd && 45 || 30 }}
     strategy:
@@ -443,8 +455,12 @@ jobs:
           - name: threaded release
             toolchain: nightly-2026-08-15
             components: rust-src
-            build: scripts/build.sh wasm-web-threads
+            build: scripts/build.sh npm-web-threads
             mode: threaded
+            check-options: --signet-v2 --compact-zkey
+            # Playwright's WebKit must include the fix for WebKit bug 303387,
+            # as 1.64.1's does.
+            engines: chromium,firefox,webkit
             artifact: wasm-web-threads
             artifact-dir: pkg-web-threads
           - name: threaded compact-matrix
@@ -455,8 +471,10 @@ jobs:
           - name: portable release
             toolchain: 1.99.0
             components: ""
-            build: scripts/build.sh wasm-web
+            build: scripts/build.sh npm-web
             mode: portable
+            check-options: --signet-v2 --compact-zkey
+            engines: chromium,firefox,webkit
             artifact: wasm-web
             artifact-dir: pkg-web
           # Opt-in SIMD MSM + FFT (prototype). The self-test build adds SPARROW
@@ -538,7 +556,9 @@ jobs:
           cache: npm
           cache-dependency-path: tools/browser/package-lock.json
       - run: npm ci --prefix tools/browser --ignore-scripts
-      - run: npx --prefix tools/browser playwright install --with-deps chromium firefox
+      - run: >-
+          npx --prefix tools/browser playwright install --with-deps chromium firefox
+          ${{ contains(matrix.engines, 'webkit') && 'webkit' || '' }}
       # Self-tests and a short stress run in Chromium (threaded: two Rayon
       # workers). The MSM speed gate runs under Node in the wasm-simd job;
       # here it is reported only.
@@ -546,7 +566,9 @@ jobs:
         run: >-
           scripts/check.sh simd --engine chromium --mode ${{ matrix.mode }}
           --pkg "$SIMD_SELFTEST_DIR/prover/${{ matrix.package-dir }}" --stress 30 --min-speedup 0
-      - run: scripts/check.sh browser ${{ matrix.mode }}
+      - run: scripts/check.sh browser ${{ matrix.mode }} ${{ matrix.check-options }}
+        env:
+          CURVY_BROWSER_ENGINES: ${{ matrix.engines || 'chromium,firefox' }}
       # Hand the proved release builds to the npm-package job.
       - if: matrix.artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -602,7 +624,7 @@ jobs:
       - run: git diff --exit-code -- fuzz/Cargo.lock
       - name: Exercise parsers after digest authentication
         run: |
-          for target in graph sage prover_formats input_json; do
+          for target in graph sage prover_formats input_json compact_zkey signet_parity signet_transcode; do
             CARGO_NET_OFFLINE=true cargo +nightly-2026-08-15 fuzz run "$target" -- -max_total_time=45 -timeout=10 -rss_limit_mb=1024 -max_len=65536
           done
       # prover_formats is the only target that uses curvy-prover. It starts from

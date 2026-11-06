@@ -74,14 +74,22 @@ pub struct Limits {
     pub signals: usize,
     pub input_mappings: usize,
     pub input_values: usize,
+    /// Evaluation work, summed over the nodes and checked while they are decoded,
+    /// before anything is evaluated. Units are roughly one field addition, about
+    /// 16 ns natively: an input, a constant or a field operation costs 1, a
+    /// comparison 3, a shift or bitwise operation 24, an integer division or
+    /// modulus 48, an inverse or field division 256, and an exponentiation 768.
+    pub evaluation_cost: u64,
 }
 
 impl Limits {
     /// Every profile published today, with headroom.
     ///
     /// The largest is pending(5,30) at 1,106,576 nodes and 11,978,841 bytes, so two
-    /// million nodes and 64 MiB clear it comfortably. At these maxima the evaluator
-    /// accounts for roughly 280 MiB of structural memory before allocator overhead:
+    /// million nodes and 64 MiB clear it comfortably. 32 million units of
+    /// [`Self::evaluation_cost`] bound evaluation to under a second natively. At
+    /// these maxima the evaluator accounts for roughly 280 MiB of structural memory
+    /// before allocator overhead:
     /// 76 MiB nodes + 61 MiB node values + 15 MiB signal indices + 61 MiB assignment
     /// + 61 MiB inputs + 64 MiB graph + 16 MiB input JSON.
     pub const fn client() -> Self {
@@ -95,6 +103,7 @@ impl Limits {
             signals: 2_000_000,
             input_mappings: 4_096,
             input_values: 2_000_000,
+            evaluation_cost: 32_000_000,
         }
     }
 
@@ -111,6 +120,7 @@ impl Limits {
             graph_bytes: 96 * 1024 * 1024,
             sage_program_bytes: 256 * 1024 * 1024,
             nodes: 8_000_000,
+            evaluation_cost: 128_000_000,
             ..Self::client()
         }
     }
@@ -237,6 +247,8 @@ pub enum WitnessError {
     },
     #[error("witness graph contains no nodes or signals")]
     EmptyGraph,
+    #[error("witness graph evaluation cost exceeds limit {maximum}")]
+    EvaluationCostLimit { maximum: u64 },
     #[error("invalid witness graph node tag {tag} at node {index}")]
     InvalidNodeTag { index: usize, tag: u8 },
     #[error("invalid witness graph operation tag {tag} at node {index}")]
@@ -265,6 +277,8 @@ pub enum WitnessError {
     DuplicateInputHash(u64),
     #[error("input mapping {index} range exceeds the graph input buffer")]
     InputMappingRange { index: usize },
+    #[error("input mapping {index} partially overlaps another")]
+    InputMappingOverlap { index: usize },
     #[error("witness graph has trailing bytes")]
     TrailingBytes,
     #[error("unable to reserve memory for witness graph {section}")]
@@ -366,6 +380,28 @@ impl Operation {
             _ => return Err(WitnessError::InvalidOperation { index, tag }),
         };
         Ok(operation)
+    }
+
+    /// Units of [`Limits::evaluation_cost`], roughly proportional to each
+    /// operation's time on canonical operands near the field's size. They bound
+    /// evaluation time; they do not predict it.
+    pub(crate) const fn cost(self) -> u64 {
+        match self {
+            Self::Mul
+            | Self::MontgomeryMul
+            | Self::Add
+            | Self::Sub
+            | Self::Eq
+            | Self::Neq
+            | Self::LogicalOr
+            | Self::LogicalAnd
+            | Self::Neg => 1,
+            Self::Lt | Self::Gt | Self::Leq | Self::Geq => 3,
+            Self::Shl | Self::Shr | Self::BitAnd | Self::BitOr | Self::BitXor => 24,
+            Self::Mod | Self::IntegerDiv => 48,
+            Self::Inv | Self::Div => INVERSE_COST,
+            Self::Pow => 768,
+        }
     }
 
     fn evaluate(self, index: usize, left: Fr, right: Fr) -> Result<Fr, WitnessError> {
@@ -750,6 +786,74 @@ fn decompress_graph_with_limits(
     Ok(decoded)
 }
 
+/// [`Limits::evaluation_cost`] of an inverse-or-zero, the same as a field inverse.
+pub(crate) const INVERSE_COST: u64 = 256;
+/// [`Limits::evaluation_cost`] of reading an input or a constant.
+pub(crate) const LOAD_COST: u64 = 1;
+
+/// Evaluation cost decoded so far, refused as soon as it passes the limit, so an
+/// expensive graph fails before its remaining records are even read.
+pub(crate) struct CostMeter {
+    spent: u64,
+    maximum: u64,
+}
+
+impl CostMeter {
+    pub(crate) fn new(limits: &Limits) -> Self {
+        Self {
+            spent: 0,
+            maximum: limits.evaluation_cost,
+        }
+    }
+
+    pub(crate) fn charge(&mut self, cost: u64) -> Result<(), WitnessError> {
+        self.spent = self.spent.saturating_add(cost);
+        if self.spent > self.maximum {
+            return Err(WitnessError::EvaluationCostLimit {
+                maximum: self.maximum,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn charge_record(&mut self, record: &NodeRecord) -> Result<(), WitnessError> {
+        self.charge(match record {
+            NodeRecord::Input(_) | NodeRecord::Constant(_) => LOAD_COST,
+            NodeRecord::Operation { operation, .. } => operation.cost(),
+            NodeRecord::Inverse(_) => INVERSE_COST,
+        })
+    }
+}
+
+/// Input ranges may nest - a bus or struct input maps the whole and each of its
+/// fields - but may not partially overlap. `ranges` are `(signal_id,
+/// signal_size)`, already within the buffer.
+pub(crate) fn check_input_ranges(ranges: &[(usize, usize)]) -> Result<(), WitnessError> {
+    let mut order = reserved_vec("input mapping order", ranges.len())?;
+    order.extend(0..ranges.len());
+    // By start, and the enclosing range first when two start together.
+    order.sort_unstable_by_key(|&index| {
+        let (start, size) = ranges[index];
+        (start, std::cmp::Reverse(size))
+    });
+    let mut enclosing: Vec<usize> = reserved_vec("input mapping nesting", ranges.len())?;
+    for index in order {
+        let (start, size) = ranges[index];
+        let end = start + size;
+        while enclosing
+            .last()
+            .is_some_and(|&outer_end| outer_end <= start)
+        {
+            enclosing.pop();
+        }
+        if enclosing.last().is_some_and(|&outer_end| end > outer_end) {
+            return Err(WitnessError::InputMappingOverlap { index });
+        }
+        enclosing.push(end);
+    }
+    Ok(())
+}
+
 fn reserved_vec<T>(section: &'static str, capacity: usize) -> Result<Vec<T>, WitnessError> {
     let mut values = Vec::new();
     values
@@ -763,8 +867,10 @@ fn parse_graph(bytes: &[u8], limits: Limits) -> Result<WitnessGraph, WitnessErro
     preflight_body_size(&header, Reader::len(&reader))?;
 
     let mut nodes = reserved_vec("nodes", header.node_count)?;
+    let mut cost = CostMeter::new(&limits);
     for index in 0..header.node_count {
         let record = read_node_record(&mut reader, header.version, index, header.input_buffer_len)?;
+        cost.charge_record(&record)?;
         nodes.push(match record {
             NodeRecord::Input(input) => Node::Input(input),
             NodeRecord::Constant(encoded) => Node::Constant(constant_from_bytes(encoded, index)?),
@@ -943,6 +1049,9 @@ fn read_input_mappings(
             signal_size,
         });
     }
+    let mut ranges = reserved_vec("input mapping ranges", input_mapping.len())?;
+    ranges.extend(input_mapping.iter().map(|m| (m.signal_id, m.signal_size)));
+    check_input_ranges(&ranges)?;
     Ok(input_mapping)
 }
 

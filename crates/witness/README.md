@@ -11,7 +11,7 @@ local Groth16 proving should be one operation.
 
 ```toml
 [dependencies]
-curvy-witness = "=0.1.4"
+curvy-witness = "=0.1.5"
 ```
 
 ## Evaluate a graph
@@ -45,8 +45,34 @@ raw or zstd-compressed.
 | `signet-v2` | version-2 body encoding with varint distances and ZigZag output deltas |
 | `sage` | `sage::SageGraph`, a second evaluator over the same artifacts (experimental) |
 
-A deployment that enables `signet-v2` should run the SIGNET v1/v2 parity matrix
-over every graph it accepts.
+A default build refuses a version-2 artifact with
+`WitnessError::UnsupportedVersion(2)` ("unsupported witness graph format version
+2"); enabling `signet-v2` changes nothing for version 1. Ship the consumer
+feature before the version-2 artifacts. A deployment that enables `signet-v2`
+should run the SIGNET v1/v2 parity matrix over every graph it accepts.
+
+## Limits
+
+`Limits::client()` bounds what a pinned artifact can make a client do: its bytes,
+compressed and not, its zstd window, its node, signal and input counts, and its
+evaluation cost. The cost is summed over the nodes while they are decoded, and a
+graph over budget fails before anything is evaluated:
+
+| node | units |
+|---|--:|
+| input, constant, field operation | 1 |
+| comparison | 3 |
+| shift or bitwise operation | 24 |
+| integer division or modulus | 48 |
+| inverse or field division | 256 |
+| exponentiation | 768 |
+
+One unit is roughly a field addition, about 16 ns natively. The client budget is
+32 million units. `Limits::batch_prover()` widens the node, byte and cost limits
+for the batch-50 pending commitment; only hosts that prove it should use them.
+
+Input ranges may nest, as a bus or struct input's fields sit inside the whole,
+but a mapping table in which two ranges partially overlap is refused.
 
 See the [workspace guide](https://github.com/0xCurvy/rs-core#readme) for artifact
 and build-target guidance.

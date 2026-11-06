@@ -14,6 +14,7 @@
 #                    (implies --signet-v2)
 #   --bench          development-only arithmetic kernels (implies --sparrow)
 #   --compact-matrix the compact constraint representation
+#   --compact-zkey   accept compact zkeys (`.czkey`) next to raw ones
 #   --simd-msm       SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`)
 #   --simd-fft       SIMD witness-map FFT (curvy-prover `wasm-simd-fft`)
 #   --simd           both of the above
@@ -35,6 +36,17 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+
+# The modules name dependency and standard-library sources by these prefixes
+# instead of this machine's paths, which include its home directory. Pass a
+# `+toolchain` for a toolchain other than rust-toolchain.toml's.
+remap_flags() {
+  local sysroot commit
+  sysroot="$(rustc "$@" --print sysroot)"
+  commit="$(rustc "$@" -vV | sed -n 's/^commit-hash: //p')"
+  printf -- '--remap-path-prefix=%s=/cargo-home --remap-path-prefix=%s/lib/rustlib/src/rust=/rustc/%s' \
+    "${CARGO_HOME:-$HOME/.cargo}" "$sysroot" "$commit"
+}
 
 # Only this binaryen release post-optimizes the modules, so the published package
 # and CI's browser proofs run the same bytes. CI installs the same release.
@@ -70,6 +82,7 @@ signet_v2_mode=""
 sparrow_mode=""
 bench_mode=""
 compact_matrix_mode=""
+compact_zkey_mode=""
 simd_msm_mode=""
 simd_fft_mode=""
 simd_selftest_mode=""
@@ -110,6 +123,13 @@ for mode in "$@"; do
       fi
       compact_matrix_mode="--compact-matrix"
       ;;
+    --compact-zkey)
+      if [ -n "$compact_zkey_mode" ]; then
+        echo "--compact-zkey may be supplied only once" >&2
+        exit 1
+      fi
+      compact_zkey_mode="--compact-zkey"
+      ;;
     --simd-msm)
       # Opt-in SIMD batch-affine MSM (curvy-prover `wasm-simd-msm`).
       simd_msm_mode="--simd-msm"
@@ -134,7 +154,7 @@ for mode in "$@"; do
 done
 wasm_release_lto="${CURVY_WASM_LTO:-fat}"
 wasm_release_codegen_units="${CURVY_WASM_CODEGEN_UNITS:-1}"
-portable_rust_flags='-C target-feature=+simd128,+bulk-memory'
+portable_rust_flags="-C target-feature=+simd128,+bulk-memory $(remap_flags)"
 
 case "$binding_target" in
   nodejs) portable_output_suffix="node" ;;
@@ -158,6 +178,9 @@ elif [ "$signet_v2_mode" = "--signet-v2" ]; then
 fi
 if [ "$compact_matrix_mode" = "--compact-matrix" ]; then
   optional_features+=",curvy-prover/compact-matrix"
+fi
+if [ "$compact_zkey_mode" = "--compact-zkey" ]; then
+  optional_features+=",curvy-prover/compact-zkey"
 fi
 if [ "$simd_msm_mode" = "--simd-msm" ]; then
   optional_features+=",curvy-prover/wasm-simd-msm"
@@ -201,6 +224,7 @@ case "$thread_mode" in
     rust_flags+=' -C link-arg=--export=__heap_base -C link-arg=--export=__data_end'
     rust_flags+=' -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size'
     rust_flags+=' -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base'
+    rust_flags+=" $(remap_flags +"$thread_toolchain")"
     CARGO_PROFILE_RELEASE_LTO="$wasm_release_lto" \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$wasm_release_codegen_units" \
     RUSTFLAGS="$rust_flags" cargo +"$thread_toolchain" build --locked --release \
@@ -282,9 +306,10 @@ sparrow_status="$(feature_status has_sparrow)"
 sage_status="$sparrow_status"
 signet_v2_status="$(feature_status has_signet_v2)"
 compact_matrix_status="$(feature_status has_feature curvy-prover/compact-matrix)"
+compact_zkey_status="$(feature_status has_feature curvy-prover/compact-zkey)"
 threads_status="$(feature_status has_feature curvy-wasm/wasm-threads)"
 simd_msm_status="$(feature_status has_feature curvy-prover/wasm-simd-msm)"
 simd_fft_status="$(feature_status has_feature curvy-prover/wasm-simd-fft)"
 simd_selftest_status="$(feature_status has_feature curvy-prover/wasm-simd-selftest)"
-echo "built $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, simd-msm=$simd_msm_status, simd-fft=$simd_fft_status, simd-selftest=$simd_selftest_status)"
+echo "built $core_output and $prover_output (LTO=$wasm_release_lto, codegen-units=$wasm_release_codegen_units, simd128, threads=$threads_status, SIGNET-v2=$signet_v2_status, SPARROW=$sparrow_status, SAGE=$sage_status, bench=$bench_status, compact-matrix=$compact_matrix_status, compact-zkey=$compact_zkey_status, simd-msm=$simd_msm_status, simd-fft=$simd_fft_status, simd-selftest=$simd_selftest_status)"
 echo "cargo features: $prover_features"

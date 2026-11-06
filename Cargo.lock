@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-benchmarks"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes",
  "ark-bn254",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-debug-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "curvy-core",
  "curvy-prover",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-ffi"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "curvy-core",
  "curvy-prover",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-leakage"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "curvy-core",
  "wasm-bindgen",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-node"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "curvy-core",
  "curvy-prover",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-prover"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ec",
@@ -929,6 +929,7 @@ dependencies = [
  "getrandom 0.2.17",
  "num-bigint 0.5.1",
  "rayon",
+ "ruzstd",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
@@ -939,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-signet"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",
@@ -957,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-wasm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "curvy-core",
  "js-sys",
@@ -969,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "curvy-witness"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ark-bn254",
  "ark-ff 0.6.0",

@@ -32,10 +32,11 @@ ark-relations = { workspace = true, default-features = false }
 ark-serialize = { workspace = true, default-features = false }
 ark-std = { workspace = true, default-features = false, features = ["getrandom"] }
 byteorder.workspace = true
-curvy-witness = { version = "=0.1.4", path = "../witness" }
+curvy-witness = { version = "=0.1.5", path = "../witness" }
 getrandom.workspace = true
 num-bigint.workspace = true
 rayon = { workspace = true, optional = true }
+ruzstd = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
@@ -84,6 +85,9 @@ parallel = [
 signet-v2 = ["curvy-witness/signet-v2"]
 sage = ["curvy-witness/sage"]
 zkey-manifest = []
+# Read the compact zkey encoding (`compact_zkey`): x-only points, a columnar
+# coefficient section and a zstd frame. Decoding costs a square root per point.
+compact-zkey = ["dep:ruzstd"]
 # Opt-in witness-map FFTs on a 4-lane simd128 Fr multiply (wasm32 +
 # simd128 only; a no-op elsewhere). With `parallel` each transform runs in
 # parallel, on any pool size. See src/simd_fft.
@@ -119,3 +123,7 @@ required-features = ["bench"]
 [[example]]
 name = "zkey_chunk_manifest"
 required-features = ["zkey-manifest"]
+
+[[example]]
+name = "compact_zkey"
+required-features = ["compact-zkey"]

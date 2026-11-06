@@ -1,5 +1,6 @@
 """Exercise every release gate using a fresh, deliberately insecure test ceremony."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,7 @@ from validate_release import validate
 
 SNARKJS = Path(__file__).resolve().parent / 'node_modules/.bin/snarkjs'
 VALIDATOR = Path(os.environ.get('CURVY_ARTIFACT_VALIDATOR', 'target/debug/examples/artifact_manifest_check')).resolve()
+COMPACT = Path(os.environ.get('CURVY_COMPACT_ZKEY_TOOL', 'target/debug/examples/compact_zkey')).resolve()
 
 class PipelineTests(unittest.TestCase):
     def test_real_transcript_r1cs_and_witness_gates(self):
@@ -37,6 +39,38 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(Path(args.output).exists())
             args.ptau_sha256 = '00' * 32
             with self.assertRaisesRegex(ValueError, 'trusted ceremony pin'):
+                validate(args)
+            self.assertFalse(Path(args.output).exists())
+            self.assertEqual(list(root.glob('.curvy-release-*')), [])
+
+            # An optional compact zkey has to decode to exactly the validated key.
+            args.ptau_sha256 = hashlib.sha256((root/'ceremony.ptau').read_bytes()).hexdigest()
+            (root/'witness.wtns').write_bytes(wtns((1,33,3,11)))
+            args.compact_validator = str(COMPACT)
+            zkey_pin = hashlib.sha256((root/'fresh.zkey').read_bytes()).hexdigest()
+            encoded = subprocess.run([str(COMPACT), 'encode', root/'fresh.zkey', zkey_pin, root/'fresh.czkey'],
+                                     capture_output=True, text=True, timeout=60)
+            self.assertEqual(encoded.returncode, 0, encoded.stdout + encoded.stderr)
+            args.compact_zkey = str(root/'fresh.czkey')
+            args.output = str(root/'valid-compact')
+            validate(args)
+            manifest = json.loads((root/'valid-compact/release-manifest.json').read_text())
+            self.assertEqual(manifest['compactZkey']['decodesTo'], zkey_pin)
+            self.assertEqual(manifest['compactZkey']['sha256'],
+                             hashlib.sha256((root/'fresh.czkey').read_bytes()).hexdigest())
+            self.assertTrue((root/'valid-compact/key.czkey').is_file())
+
+            # A compact zkey of another key is refused, and nothing is written. A
+            # contribution changes delta; a second `groth16 setup` would not.
+            run('zkey', 'contribute', root/'fresh.zkey', root/'other.zkey', '-e=PUBLIC TEST ENTROPY - NEVER PRODUCTION')
+            self.assertNotEqual((root/'other.zkey').read_bytes(), (root/'fresh.zkey').read_bytes())
+            other_pin = hashlib.sha256((root/'other.zkey').read_bytes()).hexdigest()
+            encoded = subprocess.run([str(COMPACT), 'encode', root/'other.zkey', other_pin, root/'other.czkey'],
+                                     capture_output=True, text=True, timeout=60)
+            self.assertEqual(encoded.returncode, 0, encoded.stdout + encoded.stderr)
+            args.compact_zkey = str(root/'other.czkey')
+            args.output = str(root/'invalid-compact')
+            with self.assertRaisesRegex(RuntimeError, 'compact zkey check failed'):
                 validate(args)
             self.assertFalse(Path(args.output).exists())
             self.assertEqual(list(root.glob('.curvy-release-*')), [])

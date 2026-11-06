@@ -13,6 +13,8 @@ python3 tools/artifacts/validate_release.py \
   --output /path/new-release-bundle
 ```
 
+To ship a compact zkey (see `curvy_prover::compact_zkey`) beside the key, build the encoder with `cargo build --release --locked -p curvy-prover --example compact_zkey --features compact-zkey`, make the file with `target/release/examples/compact_zkey encode <zkey> <zkey-sha256> <out>`, and pass it as `--compact-zkey <out>`. The validator stages it and requires it to decode to exactly the validated zkey bytes. The manifest records its pin under `compactZkey`, which is the pin `Prover::from_compact_zkey_bytes` takes.
+
 Take the ceremony pin from independently reviewed protocol metadata. The command copies bounded regular files into a private staging directory, verifies the ceremony and the circuit/witness relationships, and emits pins for those exact bytes. It does not publish, replace an existing bundle, or certify the ceremony's contributors. The bundle contains the witness and input fixture, so use an intended release fixture.
 
 The `artifact_manifest_check` example on its own validates local compatibility and accepts an optional input JSON for a full graph/SAGE witness comparison. To create a release bundle, use the Python command, which also enforces the external transcript, R1CS, and SAGE gates.
@@ -21,6 +23,7 @@ Regression tests:
 
 ```sh
 cargo build --locked -p curvy-prover --example artifact_manifest_check --features sage
+cargo build --locked -p curvy-prover --example compact_zkey --features compact-zkey
 python3 tools/artifacts/test_release.py
 python3 tools/artifacts/test_pipeline.py
 ```

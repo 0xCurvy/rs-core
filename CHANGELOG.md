@@ -5,6 +5,48 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 Every crate, binding and package shares one workspace version. The 0.1.0 release
 candidates could break APIs from one candidate to the next.
 
+## [0.1.5] - 2026-11-05
+
+Changes since `v0.1.4`; every crate and both npm packages are at 0.1.5.
+
+### Security
+
+- `Limits::evaluation_cost` refuses a witness graph whose per-node cost exceeds the budget before it is
+  evaluated (`WitnessError::EvaluationCostLimit`): 32 million units for `Limits::client()`, 128 million
+  for `Limits::batch_prover()`.
+
+### Added
+
+- `curvy-prover` feature `compact-zkey`: compact zkeys (`.czkey`), loaded by
+  `Prover::from_compact_zkey_bytes`, `Prover::from_compact_zkey_reader` and
+  `ResidentProver::from_compact_artifacts`, and written by the `compact_zkey` module and example.
+- `@0xcurvy/rs-core-wasm`: `WasmResidentProver` takes a compact zkey under the compact file's pin.
+- `@0xcurvy/rs-core-wasm`: both prover entries load SIGNET version-2 witness graphs.
+- `signet transcode` converts an artifact between SIGNET body versions 1 and 2.
+- `scripts/build.sh npm-web` and `npm-web-threads` build the modules `@0xcurvy/rs-core-wasm` ships.
+- `scripts/build.sh` WASM targets and `scripts/check.sh wasm` take `--compact-zkey`;
+  `scripts/check.sh browser` takes `--signet-v2` and `--compact-zkey`.
+- `tools/artifacts/validate_release.py --compact-zkey` checks that a compact zkey decodes to the
+  release's zkey.
+
+### Fixed
+
+- The `@0xcurvy/rs-core-wasm` modules and `@0xcurvy/rs-core-node` binaries no longer contain the build
+  machine's paths.
+- The macOS `@0xcurvy/rs-core-node` binary's install name is `@rpath/curvy_rs_core_node.node`.
+
+### Changed
+
+- `curvy-witness` refuses an input-mapping table with partially overlapping ranges
+  (`WitnessError::InputMappingOverlap`); nested ranges still load.
+- `signet export` refuses a constant at or above the BN254 modulus (`SignetError::NonCanonicalConstant`).
+- `signet`: `--compressor zstd` refuses the ruzstd fallback; `export`, `reseal`, `transcode` and
+  `inspect` print `client_limits=`; a failed write removes its partial output.
+- `scripts/build.sh node-release` and `npm` stop if a binary contains the build machine's home directory
+  or checkout path.
+- CI tests the C library with `signet-v2`, fuzzes `signet_parity` and `signet_transcode`, and proves
+  the release WASM builds in WebKit.
+
 ## [0.1.4] - 2026-10-28
 
 Changes since `v0.1.3` (`305fa0a`, 19 October 2026). 0.1.3 was tagged but not published, so 0.1.4
@@ -250,6 +292,7 @@ a key.
 
 - Dependency requirements are caret ranges instead of exact pins, so the crates resolve next to a consumer that needs a newer patch of a shared dependency. `Cargo.lock` still fixes what this repository builds; `wasm-bindgen` and the napi crates stay exact.
 
+[0.1.5]: https://github.com/0xCurvy/rs-core/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/0xCurvy/rs-core/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/0xCurvy/rs-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/0xCurvy/rs-core/compare/v0.1.1...v0.1.2

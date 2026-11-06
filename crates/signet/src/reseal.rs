@@ -8,9 +8,11 @@
 //! copied verbatim. `the_envelope_only_changes_the_magic` in `tests/roundtrip.rs`
 //! holds the encoder to that, which is what makes this safe rather than plausible.
 //!
-//! What resealing does not do is change what an artifact *means*. It cannot repair a
-//! graph exported under the wrong [`OperationSchema`](crate::OperationSchema), and it
-//! cannot re-encode version 1 as version 2. Both of those need the postcard source.
+//! What resealing does not do is change what an artifact *means* or how its body is
+//! encoded. It cannot repair a graph exported under the wrong
+//! [`OperationSchema`](crate::OperationSchema) - that needs the postcard source - and
+//! it does not re-encode version 1 as version 2; [`transcode`](crate::transcode())
+//! does that from the artifact alone.
 
 use std::io::{Cursor, Read};
 

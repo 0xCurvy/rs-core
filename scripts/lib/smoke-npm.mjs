@@ -5,7 +5,8 @@
 //
 // The portable entries are instantiated for real, and the portable prover runs
 // a complete self-verified Groth16 proof of the multiplier fixture from this
-// checkout's crates/prover/testdata. The threaded entries cannot be imported
+// checkout's crates/prover/testdata, from a raw and a compact zkey and from
+// SIGNET version-1 and version-2 graphs. The threaded entries cannot be imported
 // here at all - their Rayon snippet registers a worker message handler on
 // `self` at module scope, which exists in browsers and workers but not in Node -
 // so they are checked structurally instead. CI proves the identical threaded
@@ -38,8 +39,10 @@ for (const [subpath, binary] of [
     if (digest !== expected) throw new Error(`core poseidon returned ${digest}, expected ${expected}`);
     console.log(`${subpath.padEnd(14)} instantiated`);
   } else {
-    const proof = checkResidentProver(entry);
-    console.log(`${subpath.padEnd(14)} proved publicSignals=${JSON.stringify(proof.publicSignals)} (self-verified)`);
+    // scripts/build.sh npm builds both prover modules with --signet-v2 and
+    // --compact-zkey (npm_wasm_options); change this together with that build.
+    const proof = checkResidentProver(entry, { compactZkey: true, signetV2: true });
+    console.log(`${subpath.padEnd(14)} proved publicSignals=${JSON.stringify(proof.publicSignals)} (self-verified), compact zkey ${proof.compactZkey}, SIGNET v2 ${proof.signetV2}`);
   }
 }
 

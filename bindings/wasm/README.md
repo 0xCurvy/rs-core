@@ -28,6 +28,18 @@ import init, { poseidon } from "@0xcurvy/rs-core-wasm/core";
 await init(); // resolves curvy_wasm_bg.wasm relative to this module
 ```
 
+Both prover entries load a proving key from a snarkjs `.zkey` or a compact `.czkey`
+([curvy-prover's compact zkeys](https://github.com/0xCurvy/rs-core/blob/main/crates/prover/README.md#compact-zkeys)).
+`new WasmResidentProver(zkey, zkeySha256, graph, graphSha256)` tells them apart by their first bytes;
+`zkeySha256` is the SHA-256 of the file passed, whichever it is. A compact key is about a quarter of
+the size and costs about 3 s more to load single-threaded for a 40 MB key.
+
+The witness graph is a SIGNET artifact (`SIGNET01` or `CVYWIT01`) at body version 1 or 2, raw or
+zstd-compressed; `graphSha256` is the SHA-256 of the bytes passed. Version 2
+([`signet transcode`](https://github.com/0xCurvy/rs-core/blob/main/crates/signet/README.md#re-encoding-the-body-version-with-no-postcard-source))
+computes the same witness as version 1 in a smaller file. Version 2 needs 0.1.5 or later; earlier
+releases refuse it with "unsupported witness graph format version 2".
+
 ## Bundler setup
 
 The generated glue locates its binary with `new URL('curvy_wasm_bg.wasm', import.meta.url)`, and the
@@ -61,6 +73,12 @@ Cross-Origin-Embedder-Policy: require-corp
 or, where third-party embeds must keep working, `Document-Isolation-Policy: isolate-and-credentialless`.
 Call `initThreadPool(n)` after `init()`. Feature-detect with `crossOriginIsolated` and fall back to the
 single-threaded entry - the two expose the same API.
+
+The threaded entries do not run on Safari releases with
+[WebKit bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), such as Safari 26.2, or in any iOS
+browser built on such a release: `initThreadPool` rejects, or a later threaded call throws,
+`RuntimeError: Out of bounds memory access`. Safari 26.5 and 27.0.1 run them. When that error occurs,
+use the single-threaded entry.
 
 ## Node
 

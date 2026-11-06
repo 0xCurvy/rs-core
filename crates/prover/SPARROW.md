@@ -18,16 +18,16 @@ For native Rust:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.4", features = ["sparrow"] }
-curvy-witness = { version = "=0.1.4", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.5", features = ["sparrow"] }
+curvy-witness = { version = "=0.1.5", features = ["sage", "signet-v2"] }
 ```
 
 Add `parallel` when the application has a host-initialized Rayon pool:
 
 ```toml
 [dependencies]
-curvy-prover = { version = "=0.1.4", features = ["parallel", "sparrow"] }
-curvy-witness = { version = "=0.1.4", features = ["sage", "signet-v2"] }
+curvy-prover = { version = "=0.1.5", features = ["parallel", "sparrow"] }
+curvy-witness = { version = "=0.1.5", features = ["sage", "signet-v2"] }
 ```
 
 For direct WASM builds:

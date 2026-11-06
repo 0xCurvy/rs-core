@@ -17,7 +17,7 @@ prover WASM module.
 
 ```toml
 [dependencies]
-curvy-prover = "=0.1.4"
+curvy-prover = "=0.1.5"
 ```
 
 ## Prove from circuit input JSON
@@ -86,6 +86,7 @@ must be authenticated before parsing:
 | `std` | Native standard-library support; enabled by default |
 | `bench` | Development-only native/WASM arithmetic benchmark kernels; implies `sparrow` |
 | `compact-matrix` | Two-pass CSR zkey matrices and direct compact QAP evaluation |
+| `compact-zkey` | Opt-in reader for compact zkeys: x-only points, a columnar coefficient section and a zstd frame |
 | `parallel` | Opt-in QAP, FFT, and MSM work on one host-initialized Rayon pool |
 | `signet-v2` | Opt-in compact SIGNET v2 witness-graph decoder, without SAGE or SPARROW |
 | `zkey-manifest` | Shared authenticated chunk manifests for resident and streaming loads |
@@ -131,6 +132,73 @@ the SAGE cache, tuning, and the security boundary.
   manifest.
 - `derive_sage_cache` derives a SAGE program for hosts that manage their own
   validated local cache.
+- `compact_zkey` (feature `compact-zkey`) encodes, decodes, inspects and
+  benchmarks compact zkeys.
+
+## Compact zkeys
+
+The `compact-zkey` feature adds [`compact_zkey`](src/compact_zkey.rs), a lossless
+encoding of a snarkjs zkey for shipping. Each curve point is stored as `x` and a
+sign bit in arkworks' compressed form, section 4 is split into columns, and the
+result is one zstd frame behind a 48-byte header: the magic `CVYZKC01`, then the
+SHA-256 and length of the zkey the file decodes to, readable without
+decompressing. Files use the `.czkey` extension; they are not `.zst` files, and
+`zstd -d` does not open them.
+
+| zkey | zkey bytes | compact, zstd -19 | compact, zstd -9 |
+|---|--:|--:|--:|
+| `verifyPixAggregationBound_2_9_30_final` | 39,980,468 | 9,621,660 (−75.9%) | 9,822,450 (−75.4%) |
+| `verifySingleAggregationBound_2_3_30_final` | 20,467,024 | 5,460,364 (−73.3%) | 5,489,416 (−73.2%) |
+
+`Prover::from_compact_zkey_bytes`, `Prover::from_compact_zkey_reader` and
+`ResidentProver::from_compact_artifacts` take the compact file's pin and check it
+before zstd or the decoder see any byte. The decoded zkey must then hash to the
+original zkey's digest, which the compact header records, before the raw parser
+runs. The key that loads is byte for byte the one the original file loads.
+
+Decoding computes a square root per point. Measured on an Apple M4 Pro
+(medians):
+
+| | raw zkey load | compact load | proof, raw key | proof, compact key |
+|---|--:|--:|--:|--:|
+| 2_9_30 (215,091 G1 + 35,068 G2 points), serial | 30 ms | 990 ms | | |
+| 2_9_30, `parallel`, 14 threads | 30 ms | 144 ms | | |
+| 2_3_30, serial | 14 ms | 578 ms | 535 ms | 530 ms |
+| 2_3_30, `parallel`, 14 threads | 16 ms | 84 ms | 81 ms | 79 ms |
+
+The zstd level does not change load time. Level 19 is about 2% smaller than
+level 9 and declares an 8 MiB window, half of `compact_zkey::MAX_WINDOW_BYTES`;
+the example defaults to level 9.
+
+A host that loads the same key repeatedly can decode it once: expand the
+compact file with `compact_zkey::inflate` (or the example's `decode`), keep the
+zkey, and load it with `Prover::from_zkey_reader` under the original zkey's
+pin, which bytes 8 to 40 of the compact file hold.
+
+The decoded zkey is held in memory while it is parsed, as `from_zkey_bytes`
+holds the zkey it is given; `from_compact_zkey_reader` does not hold the
+compact file. SPARROW, `zkey-manifest` and `zkey-single-pass` read a raw zkey
+stream and do not accept compact zkeys.
+
+In WebAssembly, `WasmResidentProver` takes either format under the pin of the
+file it is given when the module is built with `--compact-zkey`, as
+`scripts/build.sh npm` builds `@0xcurvy/rs-core-wasm`. The feature adds 81 KB to
+the portable prover module (22 KB with brotli). Single-threaded under Node.js,
+the 2_9_30 resident prover takes 2,881 ms to load from the compact key and
+106 ms from the raw one, both including its witness graph. The Node.js and C
+bindings take raw zkeys only.
+
+Make one with the example, which refuses to write a file that does not decode
+back to the zkey or loads as a different key:
+
+```bash
+cargo run --release -p curvy-prover --features compact-zkey,parallel --example compact_zkey -- \
+  encode circuit.zkey <zkey-sha256> circuit.czkey
+# -> compact_sha256=…  (the pin to ship)
+```
+
+`tools/artifacts/validate_release.py --compact-zkey` checks one against a release
+bundle's zkey.
 
 ## Additional resident paths
 

@@ -269,6 +269,12 @@ pub struct WasmResidentProver(crate::ResidentProver);
 
 #[wasm_bindgen]
 impl WasmResidentProver {
+    /// Authenticate and load a proving key and a witness graph.
+    ///
+    /// `zkey` is a snarkjs zkey or, in a build with the `compact-zkey` feature
+    /// (the npm package's), a compact zkey (`.czkey`), told apart by its first
+    /// bytes. `expected_zkey_sha256` pins whichever file it is and is checked
+    /// before anything is decoded.
     #[wasm_bindgen(constructor)]
     pub fn new(
         zkey: &[u8],
@@ -276,6 +282,17 @@ impl WasmResidentProver {
         witness_graph: &[u8],
         expected_graph_sha256: &str,
     ) -> Result<WasmResidentProver, JsError> {
+        #[cfg(feature = "compact-zkey")]
+        if crate::compact_zkey::is_compact(zkey) {
+            return crate::ResidentProver::from_compact_artifacts(
+                zkey,
+                expected_zkey_sha256,
+                witness_graph,
+                expected_graph_sha256,
+            )
+            .map(WasmResidentProver)
+            .map_err(|error| JsError::new(&error.to_string()));
+        }
         crate::ResidentProver::from_artifacts(
             zkey,
             expected_zkey_sha256,

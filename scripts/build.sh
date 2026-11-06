@@ -10,9 +10,14 @@
 #   wasm-bundler        portable modules for bundlers  crates/{wasm,prover}/pkg-bundler
 #   wasm-web-threads    threaded modules for browsers  crates/{wasm,prover}/pkg-web-threads
 #   all-portable        native, wasm-nodejs, wasm-web and wasm-bundler
-#   npm [--pack]        @0xcurvy/rs-core-wasm from wasm-web and wasm-web-threads:
-#                       dist/npm, and with --pack the .tgz in the repository root;
-#                       needs wasm-opt from the binaryen release build-wasm.sh pins
+#   npm-web             the portable modules @0xcurvy/rs-core-wasm ships: wasm-web
+#                       with --signet-v2 --compact-zkey, post-optimized
+#   npm-web-threads     the threaded modules it ships: wasm-web-threads with the
+#                       same options, post-optimized
+#   npm [--pack]        @0xcurvy/rs-core-wasm from npm-web and npm-web-threads:
+#                       dist/npm, and with --pack the .tgz in the repository root
+#                       (the npm* targets need wasm-opt from the binaryen release
+#                       build-wasm.sh pins)
 #   node-release        @0xcurvy/rs-core-node packages (Apple Silicon Mac with
 #                       Docker): bindings/node/release
 #   ffi-header          bindings/ffi/include/curvy.h (cbindgen 0.29.4)
@@ -34,6 +39,11 @@ usage() {
 wasm() {
   scripts/lib/build-wasm.sh "$@"
 }
+
+# The options of the modules @0xcurvy/rs-core-wasm ships. CI proves and the
+# release workflow publishes exactly these builds (npm-web, npm-web-threads), and
+# scripts/lib/smoke-npm.mjs checks the packed tarball for both features.
+npm_wasm_options=(--signet-v2 --compact-zkey)
 
 native() {
   cargo build --locked --release \
@@ -69,9 +79,11 @@ build() {
       wasm web
       wasm bundler
       ;;
+    npm-web) CURVY_WASM_OPT=required wasm web "${npm_wasm_options[@]}" "$@" ;;
+    npm-web-threads) CURVY_WASM_OPT=required wasm web --threads "${npm_wasm_options[@]}" "$@" ;;
     npm)
-      CURVY_WASM_OPT=required wasm web
-      CURVY_WASM_OPT=required wasm web --threads
+      build npm-web
+      build npm-web-threads
       node scripts/lib/build-npm.mjs "$@"
       ;;
     node-release) node scripts/lib/node-release.mjs "$@" ;;

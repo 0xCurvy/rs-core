@@ -61,9 +61,10 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, Field, PrimeField, Zero};
 
 use crate::{
-    Artifact, InputMapping, Limits, NodeRecord, Operation, WitnessError, authenticate,
-    build_input_buffer, constant_from_bytes, preflight_body_size, read_header, read_input_mappings,
-    read_node_record, read_output_references, reserved_vec, verify_sha256,
+    Artifact, CostMeter, INVERSE_COST, InputMapping, LOAD_COST, Limits, NodeRecord, Operation,
+    WitnessError, authenticate, build_input_buffer, check_input_ranges, constant_from_bytes,
+    preflight_body_size, read_header, read_input_mappings, read_node_record,
+    read_output_references, reserved_vec, verify_sha256,
 };
 use crate::{ZSTD_MAGIC, decompress_graph};
 
@@ -333,12 +334,15 @@ fn compile(
     preflight_body_size(&header, reader.len())?;
     let mut last_use = reserved_vec("node liveness", header.node_count)?;
     last_use.extend((0..header.node_count).map(|index| index as u32));
+    let mut cost = CostMeter::new(&limits);
     for index in 0..header.node_count {
         let mut mark = |reference: usize| -> Result<(), WitnessError> {
             *at_mut(&mut last_use, reference, "node liveness")? = index as u32;
             Ok(())
         };
-        match read_node_record(&mut reader, header.version, index, header.input_buffer_len)? {
+        let record = read_node_record(&mut reader, header.version, index, header.input_buffer_len)?;
+        cost.charge_record(&record)?;
+        match record {
             NodeRecord::Operation { left, right, .. } => {
                 mark(left)?;
                 mark(right)?;
@@ -617,6 +621,7 @@ fn decode_program<R: Read>(
     }
 
     let mut instructions = reserved_vec("instructions", instruction_count)?;
+    let mut cost = CostMeter::new(&limits);
     let mut defined_slots = reserved_vec("slot definition validation", slots)?;
     defined_slots.resize(slots, false);
     for index in 0..instruction_count {
@@ -647,6 +652,11 @@ fn decode_program<R: Read>(
                 ));
             }
         };
+        cost.charge(match kind {
+            Kind::Input | Kind::Constant => LOAD_COST,
+            Kind::Inverse => INVERSE_COST,
+            Kind::Operation(operation) => operation.cost(),
+        })?;
         let reads_undefined_slot = match kind {
             Kind::Inverse => !defined_slots[left as usize],
             Kind::Operation(_) => !defined_slots[left as usize] || !defined_slots[right as usize],
@@ -726,6 +736,9 @@ fn decode_program<R: Read>(
         }
         input_mapping.push(mapping);
     }
+    let mut ranges = reserved_vec("input mapping ranges", input_mapping.len())?;
+    ranges.extend(input_mapping.iter().map(|m| (m.signal_id, m.signal_size)));
+    check_input_ranges(&ranges)?;
     if !reader.is_empty()? {
         return Err(WitnessError::InvalidSageProgram("trailing bytes"));
     }
