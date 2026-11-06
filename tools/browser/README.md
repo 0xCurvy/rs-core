@@ -4,15 +4,17 @@
 scripts/build.sh wasm-web-threads   # the threaded release build
 scripts/build.sh wasm-web           # the portable release build
 npm ci --prefix tools/browser --ignore-scripts
-npx --prefix tools/browser playwright install chromium firefox
+npx --prefix tools/browser playwright install chromium firefox webkit
 scripts/check.sh browser                    # both modes
 scripts/check.sh browser threaded           # or one mode
 scripts/check.sh browser portable
+CURVY_BROWSER_ENGINES=chromium,firefox,webkit scripts/check.sh browser
 ```
 
-`check.mjs` runs a real Groth16 proof in isolated Chromium and Firefox sessions,
-checks the expected public signals, and checks that malformed inputs and an
-incorrect artifact pin are refused. `threaded` loads
+`check.mjs` runs a real Groth16 proof in isolated Chromium and Firefox sessions
+(and WebKit, with `CURVY_BROWSER_ENGINES` as above, as CI does for the release
+builds), checks the expected public signals, and checks that malformed inputs
+and an incorrect artifact pin are refused. `threaded` loads
 `crates/prover/pkg-web-threads` and proves with two Rayon workers; `portable`
 loads `crates/prover/pkg-web` on the main thread. Each mode checks that it
 loaded the matching build. The localhost server sends COOP/COEP headers and
@@ -55,10 +57,14 @@ scripts/check.sh simd --engine chromium --mode threaded
 - `scripts/check.sh simd-codegen` (needs `wasm-tools`) checks that the 4-lane
   multiplies stay `i64x2.extmul`, not emulated `i64x2.mul`.
 
-Threaded builds need a browser. Playwright WebKit runs the portable build
+Threaded builds need a browser. Playwright WebKit runs both modes
 (`--engine webkit`, after `npx --prefix tools/browser playwright install
-webkit`); with Playwright 1.57's WebKit 26.0, threaded builds trap in
-`initThreadPool`.
+webkit`). Playwright 1.57's WebKit 26.0 (revision 2227) traps in
+`initThreadPool` with "Out of bounds memory access": it predates the fix for
+[WebKit bug 303387](https://bugs.webkit.org/show_bug.cgi?id=303387), in which
+`memory.fill` and `memory.copy` keep the size an instance last saw after
+another thread grows the shared memory. Playwright 1.64.1's WebKit 27.2
+(revision 2370) has the fix.
 
 ## Manual checks and measurements
 

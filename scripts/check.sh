@@ -24,8 +24,9 @@
 #                  including from SIGNET v2 graphs and a compact zkey
 #                  [npm-web and npm-web-threads]
 #   browser [threaded|portable] [--signet-v2] [--compact-zkey]
-#                  proofs in Chromium and Firefox; the options work as for wasm,
-#                  and npm-web builds have both  [wasm-web and wasm-web-threads,
+#                  proofs in Chromium and Firefox (CURVY_BROWSER_ENGINES picks
+#                  others, e.g. chromium,firefox,webkit); the options work as for
+#                  wasm, and npm-web builds have both  [wasm-web and wasm-web-threads,
 #                  or npm-web and npm-web-threads; npm ci --prefix tools/browser;
 #                  npx playwright install]
 #   graph          the witness-graph pipeline end to end (circom 2.2.3, node)
