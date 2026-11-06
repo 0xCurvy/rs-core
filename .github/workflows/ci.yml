@@ -443,9 +443,9 @@ jobs:
   # alongside in Chromium and Firefox; they must refuse both.
   wasm-browser:
     name: Browser WASM proof (${{ matrix.name }})
-    # Playwright 1.57 (tools/browser/package.json) installs its browsers on
-    # Ubuntu up to 24.04 and refuses the 26.04 that ubuntu-latest now is. Move
-    # this with a Playwright upgrade.
+    # ubuntu-latest is now 26.04, on which Playwright 1.57 refused to install
+    # its browsers. 1.64.1 (tools/browser/package.json) lists 26.04 builds, but
+    # the browser proofs have only run on 24.04 so far; move with a run on 26.04.
     runs-on: ubuntu-24.04
     # SIMD entries build twice (self-test and release-shaped packages).
     timeout-minutes: ${{ matrix.simd && 45 || 30 }}
