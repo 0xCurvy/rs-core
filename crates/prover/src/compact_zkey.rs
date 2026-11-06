@@ -113,6 +113,12 @@ pub const MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 /// Default ceiling on the decoded zkey: the release validator's zkey limit.
 pub const DEFAULT_MAX_ZKEY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Most sections a compact zkey's table may list; a snarkjs Groth16 zkey has 10.
+/// The table is refused beyond it before anything is allocated for it, so its
+/// count cannot size an allocation whatever length limit the caller passes, and
+/// [`describe`] passes none. [`encode`] refuses a zkey with more.
+pub const MAX_SECTIONS: u32 = 64;
+
 /// The zkey's format version and the section count, ahead of the section table.
 const BODY_HEADER_BYTES: usize = 8;
 const SECTION_ENTRY_BYTES: usize = 13;
@@ -344,6 +350,11 @@ fn zkey_layout(zkey: &[u8]) -> Result<(u32, Layout<'_>), CompactZkeyError> {
     }
     let version = u32_at(zkey, 4);
     let count = u32_at(zkey, 8);
+    if count > MAX_SECTIONS {
+        return Err(CompactZkeyError::Lossy(format!(
+            "the zkey has {count} sections; a compact zkey lists at most {MAX_SECTIONS}"
+        )));
+    }
     let mut position = ZKEY_HEADER_BYTES as usize;
     let mut layout = Vec::new();
     for _ in 0..count {
@@ -477,8 +488,12 @@ fn read_body_header<R: Read>(
     read_exact(body, &mut header)?;
     let zkey_version = u32_at(&header, 0);
     let count = u32_at(&header, 4);
-    // Every section costs the zkey at least its 12-byte header, which bounds the
-    // table before anything is allocated for it.
+    if count > MAX_SECTIONS {
+        return Err(malformed(format!(
+            "{count} sections, more than the {MAX_SECTIONS} a compact zkey may list"
+        )));
+    }
+    // Every section also costs the zkey at least its 12-byte header.
     if u64::from(count) > zkey_bytes.saturating_sub(ZKEY_HEADER_BYTES) / ZKEY_SECTION_HEADER_BYTES {
         return Err(malformed("more sections than the zkey length allows"));
     }
@@ -976,6 +991,43 @@ mod tests {
         inflated[40..48].copy_from_slice(&(1_u64 << 40).to_le_bytes());
         let error = inflate(inflated.as_slice(), u64::MAX).expect_err("inconsistent length");
         assert!(matches!(error, CompactZkeyError::Malformed(_)), "{error}");
+    }
+
+    /// A section count is refused before it sizes anything, also by `describe`,
+    /// which reads the table with no length limit. A count of `u32::MAX` once
+    /// made it reserve 64 GiB for the table and abort (found by the
+    /// `compact_zkey` fuzz target).
+    #[test]
+    fn the_section_count_cannot_size_an_allocation() {
+        let file = compact();
+        let body = body_of(&file);
+        for (count, refused) in [
+            (MAX_SECTIONS, false),
+            (MAX_SECTIONS + 1, true),
+            (u32::MAX, true),
+        ] {
+            let mut forged = body.clone();
+            forged[4..8].copy_from_slice(&count.to_le_bytes());
+            let mut forged = around(&file, &forged);
+            forged[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+            let error = describe(forged.as_slice()).expect_err("a forged table");
+            assert_eq!(
+                error.to_string().contains("more than the 64"),
+                refused,
+                "{count}: {error}"
+            );
+            assert!(inflate(forged.as_slice(), u64::MAX).is_err(), "{count}");
+        }
+
+        // The encoder refuses what the decoder would.
+        let sections = MAX_SECTIONS + 1;
+        let mut zkey = [&b"zkey"[..], &1_u32.to_le_bytes(), &sections.to_le_bytes()].concat();
+        for id in 0..sections {
+            zkey.extend_from_slice(&(100 + id).to_le_bytes());
+            zkey.extend_from_slice(&0_u64.to_le_bytes());
+        }
+        let error = encode(&zkey, fast).expect_err("too many sections");
+        assert!(matches!(error, CompactZkeyError::Lossy(_)), "{error}");
     }
 
     #[test]
